@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Quli Qutub Shah Government Polytechnic Free Fire Tournament registration">
+  <title>Free Fire Tournament | QQSGP</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://*.googleusercontent.com; form-action 'self' https://script.google.com; frame-src 'self' https://script.google.com;">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="googlebot" content="noindex">
+  <meta property="og:title" content="Free Fire Tournament Registration | QQSGP">
+  <meta property="og:description" content="Register your squad for the QQSGP Free Fire College Cup tournament.">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="en_IN">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Free Fire Tournament | QQSGP">
+  <meta name="twitter:description" content="Register your squad for the QQSGP Free Fire College Cup tournament.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">Q</div>
+      <div>
+        <strong>QQSGP</strong>
+        <span>Computer Science Engineering</span>
+      </div>
+    </div>
+    <div class="event-pill"><span class="live-dot"></span> TOURNAMENT REGISTRATION</div>
+  </header>
+
+  <main class="page">
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">QULI QUTUB SHAH GOVERNMENT POLYTECHNIC</p>
+        <h1>FREE FIRE<br><span>CHAMPION SHIP</span></h1>
+        <p class="hero-text">
+          Build your squad, enter your details and secure your team slot.
+          One registration form. Clean records. Zero confusion.
+        </p>
+        <div class="hero-meta">
+          <div><b>4</b><span>Players / Team</span></div>
+          <div><b>01</b><span>Team Registration</span></div>
+        </div>
+      </div>
+
+      <div class="hero-card">
+        <div class="card-top">
+          <span>REGISTRATION</span>
+          <span class="step">01 / 01</span>
+        </div>
+        <div class="progress"><i></i></div>
+        <p>Enter accurate information. Your submitted team details will be stored in an organized tournament sheet.</p>
+      </div>
+    </section>
+
+    <section class="form-shell">
+      <form id="registrationForm">
+        <input type="hidden" id="payload" name="payload">
+
+        <div class="section-heading">
+          <div class="number">01</div>
+          <div>
+            <p>TEAM DETAILS</p>
+            <h2>Tell us about your squad</h2>
+          </div>
+        </div>
+
+        <div class="grid two">
+          <label class="field">
+            <span>Team name <em>*</em></span>
+            <input id="teamName" type="text" maxlength="40" placeholder="e.g. Shadow Squad" required>
+          </label>
+
+          <label class="field">
+            <span>Department <em>*</em></span>
+            <select id="department" required>
+              <option value="" selected disabled>Select your department</option>
+              <option>CSE — Computer Science Engineering</option>
+              <option>EEE — Electrical & Electronics Engineering</option>
+              <option>Mechanical Engineering</option>
+              <option>Printing Technology</option>
+              <option>Electronics & Communication Engineering</option>
+              <option>Civil Engineering</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="section-heading members-heading">
+          <div class="number">02</div>
+          <div>
+            <p>TEAM ROSTER</p>
+            <h2>Register all 4 players</h2>
+          </div>
+        </div>
+
+        <div id="members" class="members">
+          <article class="member-card leader">
+            <div class="member-head">
+              <div class="member-id">01</div>
+              <div>
+                <strong>Team Leader</strong>
+                <span>Primary contact</span>
+              </div>
+              <div class="leader-tag">LEADER</div>
+            </div>
+            <div class="grid two">
+              <label class="field">
+                <span>Player name <em>*</em></span>
+                <input class="member-name" type="text" maxlength="50" placeholder="INGAME NAME" required>
+              </label>
+              <label class="field">
+                <span>WhatsApp number <em>*</em></span>
+                <input class="member-phone" type="tel" inputmode="numeric" maxlength="10" placeholder="10-digit number" required>
+              </label>
+            </div>
+          </article>
+
+          <article class="member-card">
+            <div class="member-head">
+              <div class="member-id">02</div>
+              <div>
+                <strong>Player 02</strong>
+                <span>Team member</span>
+              </div>
+            </div>
+            <div class="grid two">
+              <label class="field">
+                <span>Player name <em>*</em></span>
+                <input class="member-name" type="text" maxlength="50" placeholder="INGAME NAME" required>
+              </label>
+              <label class="field">
+                <span>WhatsApp number <em>*</em></span>
+                <input class="member-phone" type="tel" inputmode="numeric" maxlength="10" placeholder="10-digit number" required>
+              </label>
+            </div>
+          </article>
+
+          <article class="member-card">
+            <div class="member-head">
+              <div class="member-id">03</div>
+              <div>
+                <strong>Player 03</strong>
+                <span>Team member</span>
+              </div>
+            </div>
+            <div class="grid two">
+              <div class="field" style="grid-column: span 2;">
+                <span>Player name <em>*</em></span>
+                <input class="member-name" type="text" maxlength="50" placeholder="INGAME NAME" required>
+              </div>
+            </div>
+          </article>
+
+          <article class="member-card">
+            <div class="member-head">
+              <div class="member-id">04</div>
+              <div>
+                <strong>Player 04</strong>
+                <span>Team member</span>
+              </div>
+            </div>
+            <div class="grid two">
+              <div class="field" style="grid-column: span 2;">
+                <span>Player name <em>*</em></span>
+                <input class="member-name" type="text" maxlength="50" placeholder="INGAME NAME" required>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div class="section-heading">
+          <div class="number">03</div>
+          <div>
+            <p>FINAL CHECK</p>
+            <h2>Ready to enter?</h2>
+          </div>
+        </div>
+
+        <label class="consent">
+          <input id="confirm" type="checkbox" required>
+          <span>I confirm that the information above is correct and these players are part of my tournament team.</span>
+        </label>
+
+        <div class="submit-row">
+          <div>
+            <span class="secure-dot"></span>
+            <span>Your registration is sent securely to the tournament organizer.</span>
+          </div>
+          <button id="submitBtn" type="submit">
+            <span>SUBMIT TEAM</span>
+            <span class="arrow">↗</span>
+          </button>
+        </div>
+      </form>
+      
+      <!-- Premium registration success popup -->
+      <div class="success-overlay" id="successModal" aria-hidden="true">
+        <div class="success-modal" role="dialog"
+            aria-modal="true" aria-labelledby="successTitle">
+
+          <button type="button" class="modal-close"
+                  id="closeSuccess" aria-label="Close">×</button>
+
+          <div class="success-check">
+            <svg viewBox="0 0 52 52" aria-hidden="true">
+              <path d="M14 27 L22 35 L39 17"></path>
+            </svg>
+          </div>
+
+          <p class="success-eyebrow">QQSGP · TOURNAMENT REGISTRATION</p>
+
+          <h2 id="successTitle">Registration Submitted!</h2>
+
+          <p class="success-description">
+            Your team has been submitted for the Free Fire College Cup.
+          </p>
+
+          <div class="registered-team">
+            <span>TEAM REGISTERED</span>
+            <strong id="successTeamName">Your Team</strong>
+          </div>
+
+          <p class="success-note">
+            Keep your team leader's WhatsApp active for tournament updates.
+          </p>
+
+          <button type="button" class="success-done" id="doneSuccess">
+            DONE <span>↗</span>
+          </button>
+
+          <div class="modal-footer">QULI QUTUB SHAH GOVERNMENT POLYTECHNIC</div>
+        </div>
+      </div>
+
+      <div id="success" class="success-panel" aria-live="polite">
+        <div class="success-icon">✓</div>
+        <p class="eyebrow">REGISTRATION RECEIVED</p>
+        <h2>Your team is on the list.</h2>
+        <p>Keep your WhatsApp number active. The tournament organizers can use the submitted team details for further communication.</p>
+        <button type="button" id="newRegistration">Register another team</button>
+      </div>
+    </section>
+
+    <footer>
+      <span>Quli Qutub Shah Government Polytechnic</span>
+      <span>•</span>
+      <span>Free Fire College Cup</span>
+    </footer>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
