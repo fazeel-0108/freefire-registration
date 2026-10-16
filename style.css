@@ -367,6 +367,23 @@ button:disabled { opacity: .55; cursor: wait; transform: none; }
   stroke-linejoin: round;
 }
 
+/* A failed submission reuses this dialog, so the success-only parts step
+   aside and the accent turns red rather than lime. The state lives on the
+   overlay, next to .show, so it is read from there. */
+.success-overlay.is-error .success-modal {
+  border-color: rgba(255, 107, 107, .34);
+}
+
+.success-overlay.is-error .success-check {
+  border-color: rgba(255, 107, 107, .45);
+  background: rgba(255, 107, 107, .08);
+}
+
+.success-overlay.is-error .success-check svg { stroke: #ff6b6b; }
+
+.success-overlay.is-error .registered-team,
+.success-overlay.is-error .success-note { display: none; }
+
 .success-eyebrow {
   margin: 0 0 12px;
   color: #b8ff39;

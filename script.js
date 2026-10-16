@@ -116,21 +116,63 @@ async function loadStats() {
 loadStats();
 
 
-function showSuccessPopup(teamName) {
-  successTeamName.textContent = teamName;
+/* ------------------------------------------------------------------
+   RESULT POPUP
+   One dialog serves both outcomes, so every success-only string has to be
+   put back before it is shown again. Without that, a failure left the
+   "Registration Submitted!" heading sitting directly above an error.
+------------------------------------------------------------------ */
+const modalIcon = document.querySelector(".success-check");
+const modalTitle = document.getElementById("successTitle");
+const modalDescription = document.querySelector(".success-description");
+
+const SUCCESS_ICON = modalIcon.innerHTML;
+const SUCCESS_TITLE = modalTitle.textContent;
+const SUCCESS_DESCRIPTION = modalDescription.textContent;
+
+const ERROR_ICON =
+  '<svg viewBox="0 0 52 52" aria-hidden="true">' +
+  '<circle cx="26" cy="26" r="20" fill="none" stroke-width="4"></circle>' +
+  '<line x1="19" y1="26" x2="33" y2="26" stroke-width="4" stroke-linecap="round"></line>' +
+  '</svg>';
+
+/**
+ * The backend states its rules (a duplicate team, closed registration) in plain
+ * language meant for the player, so those pass through untouched. An internal
+ * fault is not the player's to interpret, and because the row may already have
+ * been written before the failure, the wording promises neither outcome.
+ */
+function playerFacingError(message) {
+  const text = String(message == null ? "" : message).trim();
+  if (!text) return "The submission could not be completed. Please try again.";
+  if (!/^server error/i.test(text)) return text;
+  return "Something went wrong on our side, so we could not confirm your entry. " +
+         "Please check with the organiser before submitting again.";
+}
+
+function openResultPopup() {
   successModal.classList.add("show");
   successModal.setAttribute("aria-hidden", "false");
   doneSuccess.focus();
 }
 
+function showSuccessPopup(teamName) {
+  successModal.classList.remove("is-error");
+  modalTitle.textContent = SUCCESS_TITLE;
+  modalDescription.textContent = SUCCESS_DESCRIPTION;
+  modalIcon.innerHTML = SUCCESS_ICON;
+  successTeamName.textContent = teamName;
+  openResultPopup();
+}
+
 function showErrorPopup(message) {
-  successTeamName.textContent = "Submission Error";
-  document.querySelector(".success-description").textContent = message;
-  document.querySelector(".success-check").innerHTML =
-    '<svg viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="20" fill="none" stroke="#ff6b6b" stroke-width="3"/><line x1="20" y1="26" x2="32" y2="26" stroke="#ff6b6b" stroke-width="3" stroke-linecap="round"/><line x1="26" y1="20" x2="26" y2="32" stroke="#ff6b6b" stroke-width="3" stroke-linecap="round"/></svg>';
-  successModal.classList.add("show");
-  successModal.setAttribute("aria-hidden", "false");
-  doneSuccess.focus();
+  successModal.classList.add("is-error");
+  modalTitle.textContent = "Submission Failed";
+  modalDescription.textContent = playerFacingError(message);
+  modalIcon.innerHTML = ERROR_ICON;
+  // Keep the raw server wording for debugging without showing it to a player.
+  console.error("Submission failed:", message);
+  openResultPopup();
 }
 
 function closeSuccessPopup() {
