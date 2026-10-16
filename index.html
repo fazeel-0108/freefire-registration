@@ -15,6 +15,8 @@
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="Free Fire Tournament | QQSGP">
   <meta name="twitter:description" content="Register your squad for the QQSGP Free Fire College Cup tournament.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="apple-touch-icon" href="favicon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
@@ -26,7 +28,10 @@
 
   <header class="topbar">
     <div class="brand">
-      <div class="brand-mark">Q</div>
+      <div class="brand-mark">
+        <img src="logo.png" width="46" height="50"
+             alt="Quli Qutub Shah Government Polytechnic emblem">
+      </div>
       <div>
         <strong>QQSGP</strong>
         <span>Computer Science Engineering</span>
@@ -60,6 +65,20 @@
       </div>
     </section>
 
+    <section class="stats" id="stats" aria-label="Live registration statistics">
+      <article class="stat">
+        <p>TEAMS REGISTERED</p>
+        <strong id="statTeams">—</strong>
+        <span class="stat-note" id="statTeamsNote">Live from the tournament sheet</span>
+      </article>
+
+      <article class="stat">
+        <p>PLAYERS REGISTERED</p>
+        <strong id="statPlayers">—</strong>
+        <span class="stat-note">Out of 4 per team</span>
+      </article>
+    </section>
+
     <section class="form-shell">
       <form id="registrationForm">
         <input type="hidden" id="payload" name="payload">
@@ -78,18 +97,30 @@
             <input id="teamName" type="text" maxlength="40" placeholder="e.g. Shadow Squad" required>
           </label>
 
-          <label class="field">
-            <span>Department <em>*</em></span>
-            <select id="department" required>
-              <option value="" selected disabled>Select your department</option>
-              <option>CSE — Computer Science Engineering</option>
-              <option>EEE — Electrical & Electronics Engineering</option>
-              <option>Mechanical Engineering</option>
-              <option>Printing Technology</option>
-              <option>Electronics & Communication Engineering</option>
-              <option>Civil Engineering</option>
-            </select>
-          </label>
+          <div class="field">
+            <span id="departmentLabel">Department <em>*</em></span>
+
+            <div class="dropdown" id="departmentDropdown">
+              <button type="button" class="dropdown-trigger" id="departmentTrigger"
+                      aria-haspopup="listbox" aria-expanded="false"
+                      aria-labelledby="departmentLabel">
+                <span class="dropdown-value placeholder" id="departmentValue">Select your department</span>
+                <span class="dropdown-chevron" aria-hidden="true"></span>
+              </button>
+
+              <ul class="dropdown-menu" id="departmentMenu" role="listbox"
+                  aria-labelledby="departmentLabel">
+                <li role="option" data-value="CSE — Computer Science Engineering">CSE — Computer Science Engineering</li>
+                <li role="option" data-value="EEE — Electrical &amp; Electronics Engineering">EEE — Electrical &amp; Electronics Engineering</li>
+                <li role="option" data-value="Mechanical Engineering">Mechanical Engineering</li>
+                <li role="option" data-value="Printing Technology">Printing Technology</li>
+                <li role="option" data-value="Electronics &amp; Communication Engineering">Electronics &amp; Communication Engineering</li>
+                <li role="option" data-value="Civil Engineering">Civil Engineering</li>
+              </ul>
+
+              <input type="hidden" id="department" value="">
+            </div>
+          </div>
         </div>
 
         <div class="section-heading members-heading">

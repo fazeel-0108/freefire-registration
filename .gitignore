@@ -1,0 +1,7 @@
+# Local editor / tool state — not part of the website
+.freebuff/
+
+# OS and OneDrive clutter
+Thumbs.db
+desktop.ini
+.DS_Store

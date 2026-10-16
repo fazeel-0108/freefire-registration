@@ -15,6 +15,106 @@ const successTeamName = document.getElementById("successTeamName");
 const doneSuccess = document.getElementById("doneSuccess");
 const closeSuccess = document.getElementById("closeSuccess");
 
+const departmentDropdown = document.getElementById("departmentDropdown");
+const departmentTrigger = document.getElementById("departmentTrigger");
+const departmentMenu = document.getElementById("departmentMenu");
+const departmentValue = document.getElementById("departmentValue");
+const departmentInput = document.getElementById("department");
+
+const statsSection = document.getElementById("stats");
+const statTeams = document.getElementById("statTeams");
+const statPlayers = document.getElementById("statPlayers");
+const statTeamsNote = document.getElementById("statTeamsNote");
+
+
+/* ------------------------------------------------------------------
+   LIVE REGISTRATION COUNTER
+   Reads { ok, teams, players, departments, generatedAt } from the
+   Apps Script doGet(?action=stats) endpoint. If the backend is an
+   older deployment that has no stats endpoint, the numbers stay as
+   dashes instead of showing a broken value.
+------------------------------------------------------------------ */
+const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const STAT_TEAMS_NOTE = statTeamsNote ? statTeamsNote.textContent : "";
+
+function countUp(el, target) {
+  const from = Number(el.dataset.value || 0);
+  el.dataset.value = String(target);
+
+  if (REDUCED_MOTION || from === target) {
+    el.textContent = String(target);
+    return;
+  }
+
+  const duration = 650;
+  const start = performance.now();
+
+  function frame(now) {
+    const progress = Math.min((now - start) / duration, 1);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    el.textContent = String(Math.round(from + (target - from) * eased));
+    if (progress < 1) requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+}
+
+function renderStats(data) {
+  statsSection.classList.remove("is-offline");
+  countUp(statTeams, data.teams);
+  countUp(statPlayers, data.players);
+
+  if (statTeamsNote) {
+    const hasCapacity = typeof data.capacity === "number" && data.capacity > 0 &&
+                        typeof data.slotsLeft === "number";
+    statTeamsNote.textContent = hasCapacity
+      ? data.slotsLeft + " slot" + (data.slotsLeft === 1 ? "" : "s") + " left of " + data.capacity
+      : STAT_TEAMS_NOTE;
+  }
+}
+
+function markStatsOffline() {
+  statsSection.classList.add("is-offline");
+  [statTeams, statPlayers].forEach(el => {
+    el.textContent = "—";
+    el.dataset.value = "0";
+  });
+  if (statTeamsNote) statTeamsNote.textContent = "Updates automatically";
+}
+
+async function loadStats() {
+  if (!statsSection) return;
+
+  if (APPS_SCRIPT_URL.includes("PASTE_YOUR")) {
+    markStatsOffline();
+    return;
+  }
+
+  const url = APPS_SCRIPT_URL + (APPS_SCRIPT_URL.includes("?") ? "&" : "?") + "action=stats";
+  const controller = new AbortController();
+  // Apps Script can be slow on a cold start, so allow a generous window.
+  const timer = setTimeout(() => controller.abort(), 12000);
+
+  try {
+    const response = await fetch(url, { method: "GET", cache: "no-store", signal: controller.signal });
+    if (!response.ok) throw new Error("Server returned status " + response.status);
+
+    const data = JSON.parse(await response.text());
+    if (!data || data.ok !== true || typeof data.teams !== "number") {
+      throw new Error("Stats endpoint not available yet");
+    }
+
+    renderStats(data);
+  } catch (error) {
+    markStatsOffline();
+    console.warn("Live counter unavailable:", error.message);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+loadStats();
+
 
 function showSuccessPopup(teamName) {
   successTeamName.textContent = teamName;
@@ -93,7 +193,8 @@ form.addEventListener("submit", async (event) => {
 
   if (!department) {
     alert("Please select your department.");
-    document.getElementById("department").focus();
+    departmentDropdown.classList.add("is-invalid");
+    departmentTrigger.focus();
     return;
   }
 
@@ -147,6 +248,7 @@ form.addEventListener("submit", async (event) => {
     const result = await submitToAppsScript(data);
     if (result && result.ok) {
       showSuccessPopup(teamName);
+      loadStats();
     } else {
       showErrorPopup(result && result.error ? result.error : "Server rejected the submission. Check the Apps Script Executions tab for details.");
     }
@@ -168,6 +270,129 @@ document.querySelectorAll(".member-phone").forEach(input => {
     input.value = cleanPhone(input.value);
   });
 });
+
+/* ------------------------------------------------------------------
+   DEPARTMENT DROPDOWN
+   A custom listbox replaces the native <select>, whose popup menu
+   cannot be styled. The chosen value is written into the hidden
+   #department input, so the rest of the form is unchanged.
+------------------------------------------------------------------ */
+const departmentOptions = departmentMenu
+  ? [...departmentMenu.querySelectorAll('[role="option"]')]
+  : [];
+const DEPARTMENT_PLACEHOLDER = departmentValue.textContent;
+let activeOptionIndex = -1;
+
+function openDepartmentMenu() {
+  departmentDropdown.classList.add("is-open");
+  departmentTrigger.setAttribute("aria-expanded", "true");
+}
+
+function closeDepartmentMenu() {
+  departmentDropdown.classList.remove("is-open");
+  departmentTrigger.setAttribute("aria-expanded", "false");
+  departmentTrigger.removeAttribute("aria-activedescendant");
+  departmentOptions.forEach(option => option.classList.remove("is-active"));
+  activeOptionIndex = -1;
+}
+
+function highlightOption(index) {
+  if (!departmentOptions.length) return;
+
+  if (index < 0) index = departmentOptions.length - 1;
+  if (index >= departmentOptions.length) index = 0;
+
+  departmentOptions.forEach(option => option.classList.remove("is-active"));
+
+  activeOptionIndex = index;
+  const option = departmentOptions[index];
+  option.classList.add("is-active");
+  departmentTrigger.setAttribute("aria-activedescendant", option.id);
+  option.scrollIntoView({ block: "nearest" });
+}
+
+function chooseDepartment(option) {
+  departmentInput.value = option.dataset.value;
+  departmentValue.textContent = option.textContent.trim();
+  departmentValue.classList.remove("placeholder");
+  departmentDropdown.classList.remove("is-invalid");
+
+  departmentOptions.forEach(item => {
+    item.setAttribute("aria-selected", item === option ? "true" : "false");
+  });
+
+  closeDepartmentMenu();
+  departmentTrigger.focus();
+}
+
+function resetDepartmentDropdown() {
+  departmentInput.value = "";
+  departmentValue.textContent = DEPARTMENT_PLACEHOLDER;
+  departmentValue.classList.add("placeholder");
+  departmentOptions.forEach(option => option.setAttribute("aria-selected", "false"));
+  closeDepartmentMenu();
+  departmentDropdown.classList.remove("is-invalid");
+}
+
+if (departmentDropdown && departmentTrigger && departmentMenu) {
+  departmentOptions.forEach((option, index) => {
+    option.id = "departmentOption" + index;
+    option.setAttribute("aria-selected", "false");
+
+    // Stop the mousedown from moving focus, otherwise the trigger blurs and
+    // the blur guard closes the menu before this option's click can be handled.
+    option.addEventListener("mousedown", (event) => event.preventDefault());
+    option.addEventListener("click", () => chooseDepartment(option));
+    option.addEventListener("mousemove", () => {
+      if (activeOptionIndex !== index) highlightOption(index);
+    });
+  });
+
+  departmentTrigger.addEventListener("click", () => {
+    if (departmentDropdown.classList.contains("is-open")) closeDepartmentMenu();
+    else openDepartmentMenu();
+  });
+
+  departmentTrigger.addEventListener("keydown", (event) => {
+    const isOpen = departmentDropdown.classList.contains("is-open");
+
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      if (isOpen && activeOptionIndex > -1) chooseDepartment(departmentOptions[activeOptionIndex]);
+      else if (isOpen) closeDepartmentMenu();
+      else openDepartmentMenu();
+      return;
+    }
+
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!isOpen) {
+        openDepartmentMenu();
+        highlightOption(event.key === "ArrowDown" ? 0 : departmentOptions.length - 1);
+        return;
+      }
+      highlightOption(activeOptionIndex + (event.key === "ArrowDown" ? 1 : -1));
+      return;
+    }
+
+    if (event.key === "Escape" && isOpen) {
+      event.preventDefault();
+      closeDepartmentMenu();
+    }
+  });
+
+  // Close on outside click, and on Tab away.
+  document.addEventListener("click", (event) => {
+    if (!departmentDropdown.contains(event.target)) closeDepartmentMenu();
+  });
+  departmentTrigger.addEventListener("blur", () => {
+    setTimeout(() => {
+      if (!departmentDropdown.contains(document.activeElement)) closeDepartmentMenu();
+    }, 150);
+  });
+
+  form.addEventListener("reset", resetDepartmentDropdown);
+}
 
 newRegistration.addEventListener("click", () => {
   form.reset();
