@@ -265,14 +265,10 @@ form.addEventListener("submit", async (event) => {
 
   // A squad may register short-handed. Only the first two players are required,
   // but names must run from the top downwards, with no gaps in between.
+  // The gap is reported before the count: leaving the first name blank while a
+  // later one is filled should say which name is missing, not just "too few".
   const typedNames = names.map(input => input.value.trim());
   const playerCount = typedNames.filter(Boolean).length;
-
-  if (playerCount < 2) {
-    alert("Enter at least 2 players.");
-    names[0].focus();
-    return;
-  }
 
   for (let i = 0; i < typedNames.length; i++) {
     if (!typedNames[i] && typedNames.slice(i + 1).some(Boolean)) {
@@ -280,6 +276,12 @@ form.addEventListener("submit", async (event) => {
       names[i].focus();
       return;
     }
+  }
+
+  if (playerCount < 2) {
+    alert("Enter at least 2 players.");
+    names[0].focus();
+    return;
   }
 
   const members = typedNames.slice(0, playerCount).map((name, index) => ({
@@ -303,10 +305,21 @@ form.addEventListener("submit", async (event) => {
     return;
   }
 
+  // The confirmation tick used to be enforced by the browser's own "required"
+  // bubble — the one message on this form whose wording we do not control. The
+  // rule lives here now, so it still gates the submission and reads properly.
+  const consent = document.getElementById("confirm");
+  if (consent && !consent.checked) {
+    alert("Please tick the confirmation box to confirm your team details are correct.");
+    consent.focus();
+    return;
+  }
+
   const data = {
     submittedAt: new Date().toISOString(),
     teamName,
     department,
+    confirmed: true,
     leaderName: members[0].name,
     leaderWhatsApp: members[0].whatsapp,
     members

@@ -268,25 +268,40 @@ function errorResponse_(message) {
    ================================================================ */
 
 function readBody_(e) {
-  var raw = '';
+  // The website sends JSON in the request body. A plain HTML form POST instead
+  // arrives url-encoded, and then postData.contents holds the encoded body
+  // ('payload=%7B...') while the decoded JSON shows up in e.parameter.payload.
+  // Both are tried in order and the first one that parses as a JSON object
+  // wins, so neither sender is told its data is unreadable.
+  var candidates = [];
 
   if (e && e.postData && e.postData.contents) {
-    raw = e.postData.contents;
-  } else if (e && e.parameter && e.parameter.payload) {
-    raw = e.parameter.payload;
+    candidates.push(e.postData.contents);
+  }
+  if (e && e.parameter && e.parameter.payload) {
+    candidates.push(e.parameter.payload);
   }
 
-  if (!raw) return { ok: false, error: 'No data received.' };
+  if (candidates.length === 0) return { ok: false, error: 'No data received.' };
 
-  try {
-    var parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') {
-      return { ok: false, error: 'The submitted data is not valid.' };
+  var parsedSomething = false;
+
+  for (var i = 0; i < candidates.length; i++) {
+    try {
+      var parsed = JSON.parse(candidates[i]);
+      parsedSomething = true;
+      if (parsed && typeof parsed === 'object') {
+        return { ok: true, value: parsed };
+      }
+    } catch (ignored) {
+      // Not JSON — fall through and try the next candidate.
     }
-    return { ok: true, value: parsed };
-  } catch (error) {
-    return { ok: false, error: 'The submitted data is not valid JSON.' };
   }
+
+  // Valid JSON that is not an object (a bare number, string, boolean or null)
+  // is a different mistake from an unparseable body, and reads differently.
+  if (parsedSomething) return { ok: false, error: 'The submitted data is not valid.' };
+  return { ok: false, error: 'The submitted data is not valid JSON.' };
 }
 
 function validateRegistration_(payload) {

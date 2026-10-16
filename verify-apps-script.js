@@ -498,6 +498,416 @@ const afterShort = stats();
 check('stats still report the short squads',
   afterShort.ok === true && afterShort.teams === beforeDuo.teams + 2, JSON.stringify(afterShort));
 
+/* ================================================================
+   BRANCH MATRIX
+   Every accept and reject path the backend can take, in both
+   directions. Each rejection also proves it wrote no row, so a rule
+   that appears to reject by throwing or by half-writing is caught.
+   Runs on its own 'Matrix' sheet so the counters start from zero.
+   ================================================================ */
+
+console.log('\n12. request envelope');
+sandbox.CONFIG.SHEET_NAME = 'Matrix';
+sandbox.CONFIG.MAX_TEAMS = 0;
+propsStore.clear();
+cacheStore.clear();
+
+const matrix = spreadsheet.insertSheet('Matrix');
+const DEPT = 'CSE — Computer Science Engineering';
+
+const realOpenById = sandbox.SpreadsheetApp.openById;
+const realGetActive = sandbox.SpreadsheetApp.getActiveSpreadsheet;
+const realGetLock = sandbox.LockService.getScriptLock;
+
+function member(name, phone) {
+  return { name: name, whatsapp: phone };
+}
+
+function matrixRows() {
+  return matrix.getLastRow();
+}
+
+/** A rejection must be ok:false, carry the expected wording, and write nothing. */
+function rejects(label, payload, expected, raw) {
+  const before = matrixRows();
+  const result = post(payload, raw);
+  const wrote = matrixRows() !== before;
+  const matched = result.ok === false &&
+    typeof result.error === 'string' &&
+    result.error.indexOf(expected) !== -1 &&
+    !wrote;
+  check('rejects (no row written): ' + label, matched,
+    'got ' + JSON.stringify(result) + (wrote ? '  <-- IT WROTE A ROW' : ''));
+  return result;
+}
+
+/** An acceptance must be ok:true and append exactly one row. */
+function accepts(label, payload) {
+  const before = matrixRows();
+  const result = post(payload);
+  const wrote = matrixRows() === before + 1;
+  check('accepts: ' + label, result.ok === true && wrote,
+    JSON.stringify(result) + (wrote ? '' : '  <-- NO ROW WRITTEN'));
+  return result;
+}
+
+function teamNamesInSheet() {
+  const rows = matrixRows();
+  if (rows < 2) return [];
+  return matrix.getRange(2, 2, rows - 1, 1).getValues().map(function (line) { return line[0]; });
+}
+
+function rowOfTeam(name) {
+  const rows = matrixRows();
+  for (let r = 2; r <= rows; r++) {
+    if (matrix.getRange(r, 2).getValues()[0][0] === name) return r;
+  }
+  return -1;
+}
+
+function withMembers(teamName, edits) {
+  const payload = validPayload(teamName);
+  edits(payload);
+  return payload;
+}
+
+rejects('an empty request', undefined, 'No data received.');
+rejects('a non-JSON body', undefined, 'not valid JSON', 'this is not json at all');
+rejects('a JSON null body', undefined, 'is not valid', 'null');
+rejects('a JSON string body', undefined, 'is not valid', '"just a string"');
+rejects('a JSON number body', undefined, 'is not valid', '7');
+rejects('a JSON boolean body', undefined, 'is not valid', 'true');
+rejects('a JSON array body', undefined, 'Team name is required', '[]');
+
+const encodedBad = JSON.parse(sandbox.doPost({ parameter: {
+  payload: JSON.stringify({ teamName: 'Encoded', department: DEPT })
+} }).getContent());
+check('rejects: a form-encoded payload with no players',
+  encodedBad.ok === false && encodedBad.error === 'Enter between 2 and 4 players.', JSON.stringify(encodedBad));
+const encodedThin = JSON.parse(sandbox.doPost({ parameter: { payload: '{"teamName":"Encoded"}' } }).getContent());
+check('rejects: a form-encoded payload with no players or department',
+  encodedThin.ok === false && encodedThin.error === 'Department is required.', JSON.stringify(encodedThin));
+
+const encodedGood = JSON.parse(sandbox.doPost({ parameter: { payload: JSON.stringify(validPayload('Encoded Team')) } }).getContent());
+check('accepts: a valid form-encoded payload', encodedGood.ok === true, JSON.stringify(encodedGood));
+
+const precedence = JSON.parse(sandbox.doPost({
+  postData: { contents: JSON.stringify(validPayload('Precedence Team')) },
+  parameter: { payload: 'not json at all' }
+}).getContent());
+check('postData wins over the form-encoded fallback', precedence.ok === true, JSON.stringify(precedence));
+
+// A real HTML form POST: postData holds the url-encoded body, and Apps Script
+// also exposes the decoded field in e.parameter.payload. Reading only postData
+// made every such submission fail with "The submitted data is not valid JSON."
+const realisticForm = JSON.parse(sandbox.doPost({
+  postData: { contents: 'payload=' + encodeURIComponent(JSON.stringify(validPayload('Form Post Team'))) },
+  parameter: { payload: JSON.stringify(validPayload('Form Post Team')) }
+}).getContent());
+check('accepts: a real form POST where postData holds the encoded body',
+  realisticForm.ok === true, JSON.stringify(realisticForm));
+
+const formThin = JSON.parse(sandbox.doPost({
+  postData: { contents: 'payload=' + encodeURIComponent(JSON.stringify({ teamName: 'Form Thin' })) },
+  parameter: { payload: JSON.stringify({ teamName: 'Form Thin' }) }
+}).getContent());
+check('a form POST reaches validation instead of being called unreadable',
+  formThin.ok === false && formThin.error === 'Department is required.', JSON.stringify(formThin));
+
+const encodedOnly = JSON.parse(sandbox.doPost({
+  postData: { contents: 'payload=' + encodeURIComponent(JSON.stringify(validPayload('Form Encoded Only'))) }
+}).getContent());
+check('rejects: a form POST when nothing decoded the payload field',
+  encodedOnly.ok === false && encodedOnly.error === 'The submitted data is not valid JSON.', JSON.stringify(encodedOnly));
+
+// The wording still distinguishes an unparseable body from valid JSON that is
+// simply not an object.
+const bareNumber = JSON.parse(sandbox.doPost({ postData: { contents: '7' } }).getContent());
+check('valid JSON that is not an object keeps its own wording',
+  bareNumber.ok === false && bareNumber.error === 'The submitted data is not valid.', JSON.stringify(bareNumber));
+
+console.log('\n13. team name rules');
+rejects('a missing team name', withMembers('X', function (p) { p.teamName = undefined; }), 'Team name is required.');
+rejects('a whitespace-only team name', withMembers('X', function (p) { p.teamName = '     '; }), 'Team name is required.');
+rejects('a null team name', withMembers('X', function (p) { p.teamName = null; }), 'Team name is required.');
+rejects('an empty team name', withMembers('X', function (p) { p.teamName = ''; }), 'Team name is required.');
+rejects('a 1-character team name', withMembers('X', function (p) { p.teamName = 'A'; }), 'Team name must be between 2 and 40 characters.');
+rejects('a 41-character team name', withMembers('X', function (p) { p.teamName = 'A'.repeat(41); }), 'Team name must be between 2 and 40 characters.');
+rejects('a 5000-character team name', withMembers('X', function (p) { p.teamName = 'A'.repeat(5000); }), 'Team name must be between 2 and 40 characters.');
+rejects('an HTML tag in the team name', withMembers('X', function (p) { p.teamName = '<script>alert(1)</script>'; }), 'Team name contains characters that are not allowed.');
+rejects('a bare angle bracket pair', withMembers('X', function (p) { p.teamName = '<>'; }), 'Team name contains characters that are not allowed.');
+rejects('a percent-encoded tag', withMembers('X', function (p) { p.teamName = 'A%3CB'; }), 'Team name contains characters that are not allowed.');
+rejects('an HTML entity', withMembers('X', function (p) { p.teamName = 'A&lt;B'; }), 'Team name contains characters that are not allowed.');
+rejects('a javascript: scheme', withMembers('X', function (p) { p.teamName = 'javascript:x'; }), 'Team name contains characters that are not allowed.');
+// Team name is validated before the department, so the player sees the more
+// actionable message when both are wrong.
+rejects('a short team name and a bad department together',
+  { teamName: 'A', department: 'Nope', members: validPayload('X').members },
+  'Team name must be between 2 and 40 characters.');
+
+accepts('a 2-character team name', validPayload('AB'));
+accepts('a 40-character team name', validPayload('B'.repeat(40)));
+accepts('an ampersand in the team name', validPayload('Smith & Co'));
+accepts('a unicode team name', validPayload('★彡 Squad 彡★'));
+accepts('a numeric team name', validPayload(12345));
+accepts('a team name with padding and doubled spaces', validPayload('  Tidy   Squad  '));
+accepts('a team name containing a newline', validPayload('Line\nBreak'));
+check('the stored name has whitespace collapsed',
+  teamNamesInSheet().indexOf('Tidy Squad') !== -1, JSON.stringify(teamNamesInSheet()));
+check('a multi-line name is stored on one line',
+  teamNamesInSheet().indexOf('Line Break') !== -1);
+
+const echo = accepts('a team name that needs cleaning', validPayload('  Echo Team  '));
+check('the response echoes the cleaned team name', echo.team === 'Echo Team', JSON.stringify(echo));
+check('the response reports the real row number', echo.row === rowOfTeam('Echo Team'),
+  echo.row + ' vs ' + rowOfTeam('Echo Team'));
+
+console.log('\n14. department rules');
+rejects('a missing department', withMembers('Xy', function (p) { p.department = undefined; }), 'Department is required.');
+rejects('a whitespace department', withMembers('Xy', function (p) { p.department = '   '; }), 'Department is required.');
+rejects('an unknown department', withMembers('Xy', function (p) { p.department = 'Hacking Engineering'; }), 'Please choose a department from the list.');
+rejects('a lowercase department', withMembers('Xy', function (p) { p.department = 'mechanical engineering'; }), 'Please choose a department from the list.');
+rejects('a hyphen where the option has an em dash', withMembers('Xy', function (p) { p.department = 'CSE - Computer Science Engineering'; }), 'Please choose a department from the list.');
+rejects('a partially typed department', withMembers('Xy', function (p) { p.department = 'CSE'; }), 'Please choose a department from the list.');
+accepts('a department with a trailing space', withMembers('Trailing Dept', function (p) { p.department = 'Civil Engineering  '; }));
+accepts('a department with doubled inner spaces', withMembers('Doubled Dept', function (p) { p.department = 'Civil  Engineering'; }));
+sandbox.DEPARTMENTS.forEach(function (department, index) {
+  accepts('the dropdown option "' + department + '"',
+    withMembers('Dept ' + (index + 1), function (p) { p.department = department; }));
+});
+
+console.log('\n15. roster rules (2 to 4 players)');
+rejects('a payload with no members key', { teamName: 'Xy', department: DEPT }, 'Enter between 2 and 4 players.');
+rejects('null members', withMembers('Xy', function (p) { p.members = null; }), 'Enter between 2 and 4 players.');
+rejects('members as a string', withMembers('Xy', function (p) { p.members = 'PHANTOM,FENZ'; }), 'Enter between 2 and 4 players.');
+rejects('members as a plain object', withMembers('Xy', function (p) { p.members = { 0: member('PHANTOM', '7075593104') }; }), 'Enter between 2 and 4 players.');
+rejects('an empty members array', withMembers('Xy', function (p) { p.members = []; }), 'Enter between 2 and 4 players.');
+rejects('one player', shortPayload('Xy', 1), 'Enter between 2 and 4 players.');
+rejects('five players', withMembers('Xy', function (p) {
+  p.members = p.members.concat([member('FIVE', '')]);
+}), 'Enter between 2 and 4 players.');
+rejects('a null player entry', withMembers('Xy', function (p) { p.members[1] = null; }), 'Player 2 details are missing.');
+rejects('a player entry that is a string', withMembers('Xy', function (p) { p.members[0] = 'PHANTOM'; }), 'Player 1 details are missing.');
+rejects('a player entry that is a number', withMembers('Xy', function (p) { p.members[2] = 7; }), 'Player 3 details are missing.');
+rejects('a player entry with no name', withMembers('Xy', function (p) { p.members[0] = { whatsapp: '7075593104' }; }), 'Player 1 name is required.');
+rejects('a whitespace player 1 name', withMembers('Xy', function (p) { p.members[0].name = '   '; }), 'Player 1 name is required.');
+rejects('a 1-character player 1 name', withMembers('Xy', function (p) { p.members[0].name = 'A'; }), 'Player 1 name must be between 2 and 50 characters.');
+rejects('a 51-character player 1 name', withMembers('Xy', function (p) { p.members[0].name = 'A'.repeat(51); }), 'Player 1 name must be between 2 and 50 characters.');
+rejects('markup in a player 2 name', withMembers('Xy', function (p) { p.members[1].name = 'A<b'; }), 'Player 2 name contains characters that are not allowed.');
+rejects('a 1-character player 2 name', withMembers('Xy', function (p) { p.members[1].name = 'A'; }), 'Player 2 name must be between 2 and 50 characters.');
+rejects('a blank player 3 with player 4 filled', withMembers('Xy', function (p) { p.members[2].name = ''; }), 'Player 3 name is required.');
+rejects('a blank player 4', withMembers('Xy', function (p) { p.members[3].name = ''; }), 'Player 4 name is required.');
+rejects('a 4-player squad with player 3 missing entirely', withMembers('Xy', function (p) {
+  p.members = [p.members[0], p.members[1], { name: '' }, p.members[3]];
+}), 'Player 3 name is required.');
+
+accepts('a 2-character player name', withMembers('Min Name', function (p) { p.members[0].name = 'AB'; }));
+accepts('a 50-character player name', withMembers('Max Name', function (p) { p.members[0].name = 'A'.repeat(50); }));
+accepts('a unicode player name', withMembers('Unicode Name', function (p) { p.members[1].name = '彡★ZERO★彡'; }));
+accepts('a player name with padding and doubled spaces', withMembers('Collapse Name', function (p) { p.members[0].name = '  PHANTOM   X  '; }));
+check('player name whitespace is collapsed in the sheet',
+  String(matrix.getRange(rowOfTeam('Collapse Name'), 4).getValues()[0][0]) === 'PHANTOM X',
+  String(matrix.getRange(rowOfTeam('Collapse Name'), 4).getValues()[0][0]));
+const twoStrong = accepts('an exactly 2-player squad', shortPayload('Duo Only', 2));
+check('a 2-player squad reports 2 members worth of players',
+  twoStrong.ok === true && typeof twoStrong.players === 'number');
+check('a 2-player squad leaves player 3 and 4 cells blank',
+  matrix.getRange(rowOfTeam('Duo Only'), 8, 1, 2).getValues()[0].every(function (v) { return v === ''; }),
+  JSON.stringify(matrix.getRange(rowOfTeam('Duo Only'), 8, 1, 2).getValues()[0]));
+const threeStrong = accepts('an exactly 3-player squad', shortPayload('Trio Only', 3));
+check('a 3-player squad leaves only player 4 blank',
+  matrix.getRange(rowOfTeam('Trio Only'), 8).getValues()[0][0] !== '' &&
+  matrix.getRange(rowOfTeam('Trio Only'), 9).getValues()[0][0] === '',
+  JSON.stringify(matrix.getRange(rowOfTeam('Trio Only'), 8, 1, 2).getValues()[0]));
+check('a 3-player squad adds 3 players to the counter', threeStrong.players - twoStrong.players === 3,
+  threeStrong.players + ' vs ' + twoStrong.players);
+
+console.log('\n16. WhatsApp number rules');
+rejects('a missing player 1 phone', withMembers('Xy', function (p) { delete p.members[0].whatsapp; }), 'Player 1 WhatsApp number must be exactly 10 digits.');
+rejects('a null player 1 phone', withMembers('Xy', function (p) { p.members[0].whatsapp = null; }), 'Player 1 WhatsApp number must be exactly 10 digits.');
+rejects('a 9-digit phone', withMembers('Xy', function (p) { p.members[0].whatsapp = '707559310'; }), 'Player 1 WhatsApp number must be exactly 10 digits.');
+rejects('an 11-digit phone', withMembers('Xy', function (p) { p.members[0].whatsapp = '70755931045'; }), 'Player 1 WhatsApp number must be exactly 10 digits.');
+rejects('letters as a phone number', withMembers('Xy', function (p) { p.members[1].whatsapp = 'abcdefghij'; }), 'Player 2 WhatsApp number must be exactly 10 digits.');
+rejects('an international phone number', withMembers('Xy', function (p) { p.members[0].whatsapp = '+91 7075593104'; }), 'Player 1 WhatsApp number must be exactly 10 digits.');
+rejects('a phone number with a leading zero', withMembers('Xy', function (p) { p.members[0].whatsapp = '07075593104'; }), 'Player 1 WhatsApp number must be exactly 10 digits.');
+rejects('an all-zero player 1 phone', withMembers('Xy', function (p) { p.members[0].whatsapp = '0000000000'; }), 'Player 1 WhatsApp number is not valid.');
+rejects('an all-zero player 2 phone', withMembers('Xy', function (p) { p.members[1].whatsapp = '0000000000'; }), 'Player 2 WhatsApp number is not valid.');
+rejects('a blank player 2 phone', withMembers('Xy', function (p) { p.members[1].whatsapp = ''; }), 'Player 2 WhatsApp number must be exactly 10 digits.');
+rejects('non-ASCII digits', withMembers('Xy', function (p) { p.members[0].whatsapp = '٧٠٧٥٥٩٣١٠٤'; }), 'Player 1 WhatsApp number must be exactly 10 digits.');
+rejects('the same phone number for both players', withMembers('Xy', function (p) { p.members[1].whatsapp = p.members[0].whatsapp; }), 'Player 1 and Player 2 cannot use the same WhatsApp number.');
+// The digit check for each player runs before the shared-number comparison, so
+// two identically broken numbers report the digit fault, not the duplicate.
+rejects('two identical malformed phones', withMembers('Xy', function (p) {
+  p.members[0].whatsapp = '111';
+  p.members[1].whatsapp = '111';
+}), 'Player 1 WhatsApp number must be exactly 10 digits.');
+
+accepts('a phone number written with a space', withMembers('Spaced Phone', function (p) { p.members[0].whatsapp = '7075 593104'; }));
+check('the space is stripped before storing',
+  String(matrix.getRange(rowOfTeam('Spaced Phone'), 5).getValues()[0][0]) === '7075593104',
+  String(matrix.getRange(rowOfTeam('Spaced Phone'), 5).getValues()[0][0]));
+accepts('a phone number written with dashes', withMembers('Dashed Phone', function (p) { p.members[0].whatsapp = '707-559-3104'; }));
+check('the dashes are stripped before storing',
+  String(matrix.getRange(rowOfTeam('Dashed Phone'), 5).getValues()[0][0]) === '7075593104');
+accepts('a phone number sent as a JSON number', withMembers('Numeric Phone', function (p) { p.members[0].whatsapp = 7075593104; }));
+check('a numeric phone is stored as digits',
+  String(matrix.getRange(rowOfTeam('Numeric Phone'), 5).getValues()[0][0]) === '7075593104');
+accepts('an all-zero-except-the-last phone', withMembers('Edge Phone', function (p) { p.members[0].whatsapp = '0000000001'; }));
+accepts('a 3-player squad that also sends a phone for player 3', (function () {
+  const p = shortPayload('Ignored Phone', 3);
+  p.members[2].whatsapp = '12345';
+  return p;
+})());
+check('a phone sent for player 3 is dropped, not written anywhere',
+  JSON.stringify(matrix.getRange(rowOfTeam('Ignored Phone'), 1, 1, 9).getValues()[0]).indexOf('12345') === -1);
+accepts('team A using a number also used elsewhere', withMembers('Number A', function (p) { p.members[0].whatsapp = '9000000001'; }));
+accepts('team B reusing that same number', withMembers('Number B', function (p) { p.members[0].whatsapp = '9000000001'; }));
+check('a number shared across two teams is accepted by the validator (the sheet highlights it instead)',
+  rowOfTeam('Number A') !== -1 && rowOfTeam('Number B') !== -1);
+
+console.log('\n17. duplicate team names across days');
+accepts('the first registration of a spaced name', validPayload('Space Squad'));
+rejects('the same name with doubled spaces', validPayload('Space   Squad'), 'already registered today');
+rejects('the same name in a different case', validPayload('SPACE SQUAD'), 'already registered today');
+rejects('the same name with padding', validPayload('  Space Squad  '), 'already registered today');
+
+accepts('a team used for the cross-day probe', validPayload('Yesterday Squad'));
+matrix.getRange(rowOfTeam('Yesterday Squad'), 1).setValues([[new Date(Date.now() - 26 * 3600 * 1000)]]);
+accepts('the same name on a later day', validPayload('Yesterday Squad'));
+
+accepts('a team used for the text-timestamp probe', validPayload('Text Stamp Squad'));
+matrix.getRange(rowOfTeam('Text Stamp Squad'), 1).setValues([['16 Oct 2026, 06:43 PM']]);
+accepts('the same name when its timestamp is stored as text (known gap)', validPayload('Text Stamp Squad'));
+check('a text timestamp defeats the same-day duplicate rule',
+  teamNamesInSheet().filter(function (n) { return n === 'Text Stamp Squad'; }).length === 2);
+
+console.log('\n18. team cap and slots left');
+const uncappedStats = stats();
+check('capacity is 0 when no cap is configured', uncappedStats.capacity === 0, JSON.stringify(uncappedStats));
+check('slotsLeft is null when no cap is configured', uncappedStats.slotsLeft === null);
+
+const capValue = uncappedStats.teams + 1;
+sandbox.CONFIG.MAX_TEAMS = capValue;
+cacheStore.clear(); // a warm cache would otherwise serve the old capacity
+const cappedStats = stats();
+check('capacity reports the configured cap', cappedStats.capacity === capValue, JSON.stringify(cappedStats));
+check('slotsLeft counts the remaining slots', cappedStats.slotsLeft === 1, JSON.stringify(cappedStats));
+accepts('the last team inside the cap', validPayload('Final Slot Team'));
+cacheStore.clear();
+const fullStats = stats();
+check('slotsLeft reaches zero exactly at the cap', fullStats.slotsLeft === 0, JSON.stringify(fullStats));
+check('the cap counts the team that just registered', fullStats.teams === capValue, JSON.stringify(fullStats));
+const overCap = rejects('a team past the cap', validPayload('Over Cap Team'),
+  'All ' + capValue + ' team slots are taken. Registration is closed.');
+check('the refusal names the configured cap', overCap.error.indexOf(String(capValue)) !== -1, overCap.error);
+sandbox.CONFIG.MAX_TEAMS = 0;
+cacheStore.clear();
+
+console.log('\n19. locking and fault containment');
+const lockState = { tryLock: true, attempts: 0, releases: 0, throwOnRelease: false };
+sandbox.LockService.getScriptLock = function () {
+  return {
+    tryLock: function () { lockState.attempts++; return lockState.tryLock; },
+    releaseLock: function () {
+      lockState.releases++;
+      // Real Apps Script can throw here when the lock was never acquired, so the
+      // release in doPost's finally block has to stay inside a guard.
+      if (lockState.throwOnRelease) throw new Error('Lock has not been acquired.');
+    }
+  };
+};
+
+lockState.tryLock = false;
+lockState.throwOnRelease = true;
+const busy = rejects('a registration while the lock is held', validPayload('Busy Team'), 'The server is busy.');
+check('a refused lock is reported with the back-off wording',
+  busy.error === 'The server is busy. Please try again in a few seconds.', busy.error);
+check('a release that throws cannot break the response',
+  busy.ok === false && lockState.releases === 1, 'releases: ' + lockState.releases);
+lockState.throwOnRelease = false;
+
+lockState.tryLock = true;
+lockState.attempts = 0;
+lockState.releases = 0;
+rejects('a bad payload with a free lock', withMembers('Xy', function (p) { p.teamName = 'A'; }), 'between 2 and 40 characters');
+check('a payload rejected by validation never takes the lock', lockState.attempts === 0, String(lockState.attempts));
+
+accepts('a registration once the lock is free', validPayload('Unlocked Team'));
+check('a successful registration releases the lock exactly once', lockState.releases === 1, String(lockState.releases));
+
+const rowsBeforeOutage = matrixRows();
+lockState.releases = 0;
+sandbox.CONFIG.SHEET_ID = 'outage';
+sandbox.SpreadsheetApp.openById = function () { throw new Error('Simulated spreadsheet outage'); };
+const outage = post(validPayload('Outage Team'));
+check('a write outage is contained as JSON, not a crash',
+  outage.ok === false && outage.error.indexOf('Server error:') === 0, JSON.stringify(outage));
+check('a write outage names the underlying cause',
+  outage.error.indexOf('Simulated spreadsheet outage') !== -1, outage.error);
+check('a write outage writes no row', matrixRows() === rowsBeforeOutage,
+  matrixRows() + ' vs ' + rowsBeforeOutage);
+check('the lock is still released when the write throws', lockState.releases === 1, String(lockState.releases));
+sandbox.SpreadsheetApp.openById = realOpenById;
+sandbox.CONFIG.SHEET_ID = '';
+sandbox.LockService.getScriptLock = realGetLock;
+
+console.log('\n20. stats, cache and info endpoint');
+sandbox.CONFIG.SHEET_NAME = 'Registrations';
+cacheStore.clear();
+const freshBook = new Spreadsheet();
+sandbox.SpreadsheetApp.getActiveSpreadsheet = function () { return freshBook; };
+const emptyStats = JSON.parse(sandbox.doGet({ parameter: { action: 'stats' } }).getContent());
+check('a sheet with no registrations reports 0 teams', emptyStats.ok === true && emptyStats.teams === 0, JSON.stringify(emptyStats));
+check('a sheet with no registrations reports 0 players', emptyStats.players === 0);
+check('a sheet with no registrations reports no last entry', emptyStats.lastRegistration === '');
+check('a sheet with no registrations reports 0 departments',
+  emptyStats.departments === 0 && Object.keys(emptyStats.byDepartment).length === 0);
+check('a brand new sheet is created with its header row',
+  freshBook.getSheetByName('Registrations') !== null &&
+  freshBook.getSheetByName('Registrations').grid.cells[0][0] === 'Timestamp');
+check('the first stats call on an empty sheet is still valid JSON',
+  sandbox.doGet({ parameter: { action: 'stats' } }).getMimeType() === 'application/json');
+sandbox.SpreadsheetApp.getActiveSpreadsheet = realGetActive;
+
+sandbox.CONFIG.SHEET_NAME = 'Matrix';
+cacheStore.clear();
+const warmOne = stats();
+const warmTwo = stats();
+check('a warm cache serves the identical payload', warmOne.generatedAt === warmTwo.generatedAt,
+  warmOne.generatedAt + ' vs ' + warmTwo.generatedAt);
+const teamsBeforeWrite = warmOne.teams;
+accepts('a registration while the cache is warm', validPayload('Cache Buster'));
+check('a registration clears the cached counters', !cacheStore.has(sandbox.CACHE_KEY_STATS));
+const afterWrite = stats();
+check('the counters reflect a new registration immediately', afterWrite.teams === teamsBeforeWrite + 1,
+  afterWrite.teams + ' vs ' + teamsBeforeWrite);
+
+cacheStore.set(sandbox.CACHE_KEY_STATS, '{ this is not json');
+const recovered = stats();
+check('a corrupt cache entry is rebuilt instead of thrown',
+  recovered.ok === true && typeof recovered.teams === 'number', JSON.stringify(recovered));
+
+const unknownAction = JSON.parse(sandbox.doGet({ parameter: { action: 'nonsense' } }).getContent());
+check('an unknown action falls back to the info payload',
+  unknownAction.ok === true && unknownAction.service !== undefined, JSON.stringify(unknownAction));
+const upperAction = JSON.parse(sandbox.doGet({ parameter: { action: 'STATS' } }).getContent());
+check('the action name is case-sensitive', upperAction.teams === undefined && upperAction.ok === true);
+const bareGet = JSON.parse(sandbox.doGet({}).getContent());
+check('a bare GET lists the stats endpoint',
+  Array.isArray(bareGet.endpoints) && bareGet.endpoints.indexOf('?action=stats') !== -1, JSON.stringify(bareGet));
+check('error responses are JSON as well', sandbox.errorResponse_('x').getMimeType() === 'application/json');
+
+sandbox.CONFIG.SHEET_ID = 'outage';
+cacheStore.clear();
+sandbox.SpreadsheetApp.openById = function () { throw new Error('Simulated spreadsheet outage'); };
+const brokenGet = JSON.parse(sandbox.doGet({ parameter: { action: 'stats' } }).getContent());
+check('a stats outage is contained as JSON, not a crash',
+  brokenGet.ok === false && brokenGet.error.indexOf('Server error:') === 0, JSON.stringify(brokenGet));
+sandbox.SpreadsheetApp.openById = realOpenById;
+sandbox.CONFIG.SHEET_ID = '';
+sandbox.CONFIG.SHEET_NAME = 'Registrations';
+sandbox.CONFIG.MAX_TEAMS = 0;
+
 console.log('\n10. error containment');
 check('no unexpected console errors', log.filter(l => l.startsWith('ERROR')).length === 0, log.join(' | '));
 
