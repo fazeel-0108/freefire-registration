@@ -537,8 +537,11 @@ function collectStats_(sheet) {
 
     var lastStamp = values[values.length - 1][COL.TIMESTAMP - 1];
     if (Object.prototype.toString.call(lastStamp) === '[object Date]') {
+      // NOTE: the am/pm marker must be a lowercase 'a'. SimpleDateFormat treats
+      // every unquoted letter as a pattern letter, so 'AM/PM' throws
+      // "Invalid argument" and took the whole stats response down with it.
       lastRegistration = Utilities.formatDate(
-        lastStamp, Session.getScriptTimeZone(), 'dd MMM, hh:mm AM/PM'
+        lastStamp, Session.getScriptTimeZone(), 'dd MMM, hh:mm a'
       );
     }
   }

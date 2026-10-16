@@ -185,6 +185,21 @@ const sandbox = {
   },
   Utilities: {
     formatDate: (date, tz, fmt) => {
+      // Real Apps Script is backed by java.text.SimpleDateFormat, where every
+      // unquoted A-Z/a-z character is a pattern letter and anything outside the
+      // documented set makes the call throw "Invalid argument: <pattern>".
+      // A naive string-replace mock happily accepts such patterns, which is how
+      // an invalid 'AM/PM' token once shipped while the suite stayed green.
+      const LEGAL_PATTERN_LETTERS = 'GyYMLwWDdFEuaHkKhmsSzZX';
+      let inQuote = false;
+      for (let i = 0; i < fmt.length; i++) {
+        const ch = fmt.charAt(i);
+        if (ch === "'") { inQuote = !inQuote; continue; }
+        if (!inQuote && /[A-Za-z]/.test(ch) && LEGAL_PATTERN_LETTERS.indexOf(ch) === -1) {
+          throw new Error('Invalid argument: ' + fmt);
+        }
+      }
+
       const pad = n => String(n).padStart(2, '0');
       const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
       let h = date.getHours();
@@ -197,7 +212,8 @@ const sandbox = {
         .replace('dd', pad(date.getDate()))
         .replace('hh', pad(h))
         .replace('mm', pad(date.getMinutes()))
-        .replace('AM/PM', ampm);
+        .replace('AM/PM', ampm)
+        .replace(/\ba\b/, ampm);
     }
   },
   Session: { getScriptTimeZone: () => 'Asia/Kolkata' },
@@ -281,6 +297,37 @@ check('stats teams = 2', live.teams === 2);
 check('stats players = 8', live.players === 8);
 check('stats departments = 1', live.departments === 1, JSON.stringify(live.byDepartment));
 check('stats lastRegistration set', typeof live.lastRegistration === 'string' && live.lastRegistration.length > 0);
+// Regression guard. The am/pm marker is a lowercase 'a'; an uppercase 'AM/PM'
+// is not a SimpleDateFormat pattern letter and makes real Apps Script throw
+// "Invalid argument", which previously zeroed out the whole stats response and
+// left the live counter stuck on dashes.
+check(
+  'stats lastRegistration uses a legal date pattern',
+  /^\d{2} [A-Za-z]{3}, \d{2}:\d{2} (AM|PM)$/.test(live.lastRegistration),
+  'got: ' + JSON.stringify(live.lastRegistration)
+);
+check(
+  'mock rejects illegal pattern letters exactly like SimpleDateFormat',
+  (() => {
+    try {
+      sandbox.Utilities.formatDate(new Date(), 'Asia/Kolkata', 'dd MMM, hh:mm AM/PM');
+      return false;
+    } catch (e) {
+      return /Invalid argument/.test(e.message);
+    }
+  })()
+);
+check(
+  'a bad pattern really would break the stats endpoint',
+  (() => {
+    try {
+      sandbox.Utilities.formatDate(new Date(), 'Asia/Kolkata', 'yyyy-MMMM');
+      return true; // 'yyyy-MMMM' is legal, so this must NOT throw
+    } catch (e) {
+      return false;
+    }
+  })()
+);
 
 console.log('\n4. bad input is rejected, never written');
 const before = sheet.getLastRow();
