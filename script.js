@@ -82,7 +82,14 @@ function markStatsOffline() {
   if (statTeamsNote) statTeamsNote.textContent = "Updates automatically";
 }
 
-async function loadStats() {
+/* Apps Script pays a cold-start cost on the first request after a deploy, and a
+   cold start can run well past any sane timeout. A single slow load used to
+   leave the board showing dashes until someone manually refreshed, so the call
+   now retries a couple of times before giving up. */
+const STATS_TIMEOUT_MS = 20000;
+const STATS_MAX_ATTEMPTS = 3;
+
+async function loadStats(attempt = 1) {
   if (!statsSection) return;
 
   if (APPS_SCRIPT_URL.includes("PASTE_YOUR")) {
@@ -92,8 +99,7 @@ async function loadStats() {
 
   const url = APPS_SCRIPT_URL + (APPS_SCRIPT_URL.includes("?") ? "&" : "?") + "action=stats";
   const controller = new AbortController();
-  // Apps Script can be slow on a cold start, so allow a generous window.
-  const timer = setTimeout(() => controller.abort(), 12000);
+  const timer = setTimeout(() => controller.abort(), STATS_TIMEOUT_MS);
 
   try {
     const response = await fetch(url, { method: "GET", cache: "no-store", signal: controller.signal });
@@ -106,6 +112,11 @@ async function loadStats() {
 
     renderStats(data);
   } catch (error) {
+    if (attempt < STATS_MAX_ATTEMPTS) {
+      // Leave the last known-good numbers in place while we try again.
+      setTimeout(() => loadStats(attempt + 1), 1500 * attempt);
+      return;
+    }
     markStatsOffline();
     console.warn("Live counter unavailable:", error.message);
   } finally {
