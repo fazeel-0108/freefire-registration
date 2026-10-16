@@ -263,25 +263,43 @@ form.addEventListener("submit", async (event) => {
     return;
   }
 
-  const members = names.map((nameInput, index) => ({
-    player: index + 1,
-    name: nameInput.value.trim(),
-    whatsapp: index < 2 ? phones[index].value.trim() : ""
-  }));
+  // A squad may register short-handed. Only the first two players are required,
+  // but names must run from the top downwards, with no gaps in between.
+  const typedNames = names.map(input => input.value.trim());
+  const playerCount = typedNames.filter(Boolean).length;
 
-  const missingName = members.some(m => !m.name);
-  const invalidPhone = members.slice(0, 2).some(m => !/^\d{10}$/.test(m.whatsapp));
-
-  if (missingName) {
-    alert("Please enter a name for every player.");
+  if (playerCount < 2) {
+    alert("Enter at least 2 players.");
+    names[0].focus();
     return;
   }
 
-  if (invalidPhone) {
-    const badPlayer = members.slice(0, 2).find(m => !/^\d{10}$/.test(m.whatsapp));
-    alert(`Please enter a valid 10-digit WhatsApp number for Player ${badPlayer.player}.`);
-    const phoneFields = document.querySelectorAll(".member-phone");
-    phoneFields[badPlayer.player - 1]?.focus();
+  for (let i = 0; i < typedNames.length; i++) {
+    if (!typedNames[i] && typedNames.slice(i + 1).some(Boolean)) {
+      alert(`Please fill Player ${i + 1}'s name before Player ${i + 2}.`);
+      names[i].focus();
+      return;
+    }
+  }
+
+  const members = typedNames.slice(0, playerCount).map((name, index) => ({
+    player: index + 1,
+    name,
+    whatsapp: index < 2 ? phones[index].value.trim() : ""
+  }));
+
+  const badPhone = members.slice(0, 2).find(m => !/^\d{10}$/.test(m.whatsapp));
+
+  if (badPhone) {
+    alert(`Please enter a valid 10-digit WhatsApp number for Player ${badPhone.player}.`);
+    phones[badPhone.player - 1]?.focus();
+    return;
+  }
+
+  // One shared number means the organisers can only reach one of the two.
+  if (members[0].whatsapp === members[1].whatsapp) {
+    alert("Player 1 and Player 2 cannot use the same WhatsApp number.");
+    phones[1].focus();
     return;
   }
 

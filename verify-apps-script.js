@@ -280,6 +280,13 @@ function validPayload(teamName) {
   };
 }
 
+/** The same payload, cut down to a short-handed squad. */
+function shortPayload(teamName, playerCount) {
+  const payload = validPayload(teamName);
+  payload.members = payload.members.slice(0, playerCount);
+  return payload;
+}
+
 const sheet = spreadsheet.insertSheet('Registrations');
 
 console.log('\n1. helpers');
@@ -383,7 +390,17 @@ const cases = [
   ['team name with html', Object.assign(validPayload('X'), { teamName: '<script>x</script>' })],
   ['bad department', Object.assign(validPayload('Xy'), { department: 'Hacking Engineering' })],
   ['missing department', Object.assign(validPayload('Xy'), { department: '' })],
-  ['only 3 players', Object.assign(validPayload('Xy'), { members: validPayload('Xy').members.slice(0, 3) })],
+  ['only 1 player', shortPayload('Xy', 1)],
+  ['5 players', (() => {
+    const p = validPayload('Xy');
+    p.members = p.members.concat([{ player: 5, name: 'FIVE', whatsapp: '' }]);
+    return p;
+  })()],
+  ['the same number for both players', (() => {
+    const p = validPayload('Xy');
+    p.members[1].whatsapp = p.members[0].whatsapp;
+    return p;
+  })()],
   ['9-digit phone', (() => { const p = validPayload('Xy'); p.members[0].whatsapp = '707559310'; return p; })()],
   ['letters in phone', (() => { const p = validPayload('Xy'); p.members[1].whatsapp = 'abcdefghij'; return p; })()],
   ['blank player 3 name', (() => { const p = validPayload('Xy'); p.members[2].name = '   '; return p; })()],
@@ -459,6 +476,27 @@ check('generatedAt is ISO', /^\d{4}-\d{2}-\d{2}T/.test(finalPayload.generatedAt)
 const info = JSON.parse(sandbox.doGet({}).getContent());
 check('bare GET returns info JSON', info.ok === true);
 check('info is JSON mime', sandbox.doGet({}).getMimeType() === 'application/json');
+
+console.log('\n11. short-handed squads (2 to 4 players)');
+const beforeDuo = stats();
+
+const duo = post(shortPayload('Duo Squad', 2));
+check('accepts a 2-player squad', duo.ok === true, JSON.stringify(duo));
+check('a 2-player squad counts 2 players', duo.players === beforeDuo.players + 2, JSON.stringify(duo));
+check('a short squad still counts as a team', duo.teams === beforeDuo.teams + 1, JSON.stringify(duo));
+
+const trio = post(shortPayload('Trio Squad', 3));
+check('accepts a 3-player squad', trio.ok === true, JSON.stringify(trio));
+check('a 3-player squad counts 3 more players', trio.players === beforeDuo.players + 5, JSON.stringify(trio));
+
+// The spare player columns must be blank, never the string "undefined".
+const duoRow = sheet.grid.cells[sheet.getLastRow() - 2].slice(0, 9);
+check('a short squad leaves the spare player columns blank',
+  duoRow[7] === '' && duoRow[8] === '', JSON.stringify(duoRow));
+
+const afterShort = stats();
+check('stats still report the short squads',
+  afterShort.ok === true && afterShort.teams === beforeDuo.teams + 2, JSON.stringify(afterShort));
 
 console.log('\n10. error containment');
 check('no unexpected console errors', log.filter(l => l.startsWith('ERROR')).length === 0, log.join(' | '));

@@ -63,6 +63,10 @@ var HEADERS = [
   'Player 4 Name'
 ];
 
+// A squad may register short-handed: 2 to 4 players is a valid entry.
+var MIN_PLAYERS = 2;
+var MAX_PLAYERS = 4;
+
 var DEPARTMENTS = [
   'CSE — Computer Science Engineering',
   'EEE — Electrical & Electronics Engineering',
@@ -304,15 +308,19 @@ function validateRegistration_(payload) {
   }
 
   // --- Players ---
-  if (!payload.members || Object.prototype.toString.call(payload.members) !== '[object Array]') {
-    return { ok: false, error: 'Exactly 4 players are required.' };
-  }
-  if (payload.members.length !== 4) {
-    return { ok: false, error: 'Exactly 4 players are required.' };
+  // Not every squad fields a full four, so anything from 2 to 4 is accepted.
+  var playerCount = (payload.members && Object.prototype.toString.call(payload.members) === '[object Array]')
+    ? payload.members.length
+    : -1;
+  if (playerCount < MIN_PLAYERS || playerCount > MAX_PLAYERS) {
+    return {
+      ok: false,
+      error: 'Enter between ' + MIN_PLAYERS + ' and ' + MAX_PLAYERS + ' players.'
+    };
   }
 
   var members = [];
-  for (var i = 0; i < 4; i++) {
+  for (var i = 0; i < playerCount; i++) {
     var member = payload.members[i];
     if (!member || typeof member !== 'object') {
       return { ok: false, error: 'Player ' + (i + 1) + ' details are missing.' };
@@ -342,6 +350,15 @@ function validateRegistration_(payload) {
     }
 
     members.push({ name: name, whatsapp: whatsapp });
+  }
+
+  // The two contact numbers must differ. A shared number is almost always a
+  // typo, and it leaves the organisers with only one reachable person.
+  if (members[0].whatsapp === members[1].whatsapp) {
+    return {
+      ok: false,
+      error: 'Player 1 and Player 2 cannot use the same WhatsApp number.'
+    };
   }
 
   return {
@@ -470,8 +487,9 @@ function appendRegistration_(sheet, registration) {
     registration.department,
     members[0].name, members[0].whatsapp,
     members[1].name, members[1].whatsapp,
-    members[2].name,
-    members[3].name
+    // A short-handed squad simply leaves the later columns empty.
+    members[2] ? members[2].name : '',
+    members[3] ? members[3].name : ''
   ];
 
   var target = sheet.getLastRow() + 1;
