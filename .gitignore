@@ -1,6 +1,9 @@
 # Local editor / tool state — not part of the website
 .freebuff/
 
+# Local-only sheet layout preview (not part of the website, not deployed)
+sheet-preview.html
+
 # OS and OneDrive clutter
 Thumbs.db
 desktop.ini

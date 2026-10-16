@@ -38,7 +38,21 @@ class Range {
   }
   setDataValidation(rule) {
     this.validation = rule;
-    this.sheet.validationCells[this.row + ',' + this.col] = rule;
+    // Register every cell in the range, the way a real dropdown covers the range.
+    for (let r = 0; r < this.numRows; r++) {
+      for (let c = 0; c < this.numCols; c++) {
+        this.sheet.validationCells[(this.row + r) + ',' + (this.col + c)] = rule;
+      }
+    }
+    return this;
+  }
+  clearDataValidations() {
+    for (let r = 0; r < this.numRows; r++) {
+      for (let c = 0; c < this.numCols; c++) {
+        delete this.sheet.validationCells[(this.row + r) + ',' + (this.col + c)];
+      }
+    }
+    this.sheet.calls.clearDataValidations = (this.sheet.calls.clearDataValidations || 0) + 1;
     return this;
   }
   getValues() {
@@ -141,7 +155,17 @@ const log = [];
 
 function builder(body) {
   const api = {};
-  const chain = ['requireValueInList', 'setAllowInvalid', 'setHelpText', 'whenFormulaSatisfied', 'setBackground', 'setRanges'];
+  // Mirrors the real DataValidationBuilder / ConditionalFormatRuleBuilder
+  // surface, so calling a method Apps Script does not actually have fails here
+  // rather than silently degrading on the live sheet.
+  const chain = [
+    'requireValueInList', 'setAllowInvalid', 'setHelpText',
+    'whenFormulaSatisfied', 'whenNumberGreaterThan', 'whenNumberLessThan',
+    'whenTextContains', 'whenDateAfter', 'whenDateBefore',
+    'setBackground', 'setBackgroundObject',
+    'setFontColor', 'setFontColorObject', 'setBold', 'setItalic',
+    'setUnderline', 'setStrikethrough', 'setRanges'
+  ];
   chain.forEach(method => { api[method] = (...args) => { body[method] = args; return api; }; });
   api.build = () => ({ kind: 'rule', ...body });
   return api;
@@ -154,7 +178,7 @@ const sandbox = {
     openById: () => spreadsheet,
     newDataValidation: () => builder({}),
     newConditionalFormatRule: () => builder({}),
-    BorderStyle: { SOLID: 'SOLID' },
+    BorderStyle: { SOLID: 'SOLID', SOLID_MEDIUM: 'SOLID_MEDIUM' },
     getUi: () => { throw new Error('no UI in harness'); }
   },
   ContentService: {
@@ -280,6 +304,28 @@ check('header formatted', sheet.calls.setValues > 0);
 check('frozen header row', sheet.frozenRows === 1);
 check('duplicate rules installed', sheet.rules.length === 2, String(sheet.rules.length));
 check('department dropdown installed', sheet.validationCells['2,3'] !== undefined);
+// Regression guard: a dropdown stamped onto hundreds of empty rows put an arrow
+// in every one of them and made the sheet look broken.
+check(
+  'dropdown stops near the data instead of running to row 1000',
+  sheet.validationCells['900,3'] === undefined,
+  'row 900 still has a dropdown'
+);
+check(
+  'the registered row keeps its dropdown',
+  sheet.validationCells['2,3'] !== undefined,
+  'the registered row lost its dropdown'
+);
+check(
+  'the first empty row has no dropdown arrow',
+  sheet.validationCells['3,3'] === undefined,
+  'row 3 shows a stray dropdown arrow'
+);
+check(
+  'stale dropdowns below the runway are cleared',
+  sheet.calls.clearDataValidations > 0,
+  'clearDataValidations was never called'
+);
 check('no column 10 chatter', sheet.grid.cells[0].slice(9).every(v => v === '') && sheet.grid.cells[1].slice(9).every(v => v === ''));
 
 console.log('\n3. duplicate and counter');

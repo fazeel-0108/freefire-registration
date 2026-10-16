@@ -82,15 +82,22 @@ var COL = {
 var PHONE_COLUMNS = [COL.P1_WA, COL.P2_WA];
 var NAME_COLUMNS = [COL.P1, COL.P2, COL.P3, COL.P4];
 
-var COLUMN_WIDTHS = [155, 165, 215, 130, 145, 130, 145, 130, 130];
+var COLUMN_WIDTHS = [160, 170, 280, 135, 150, 135, 150, 135, 135];
 
+// A calm, record-like palette. The brand lime survives only as one thin rule
+// under the header and on the tab. Lime text on near-black read as cheap, and
+// the green-tinted stripes muddied the data instead of separating it.
 var THEME = {
-  headerBg: '#10141b',
-  headerText: '#b8ff39',
+  headerBg: '#1f2933',
+  headerText: '#ffffff',
+  headerRule: '#b8ff39',
   rowEven: '#ffffff',
-  rowOdd: '#f6f8f3',
-  border: '#e3e7ee',
-  tab: '#b8ff39'
+  rowOdd: '#f7f8fa',
+  border: '#e4e7eb',
+  bodyText: '#1c2430',
+  tab: '#1f2933',
+  duplicateBg: '#fdecec',
+  duplicateText: '#b3261e'
 };
 
 // Includes the sheet name so renaming the tab can never serve stale counters.
@@ -595,7 +602,11 @@ function applySheetFormatting_(sheet) {
     .setVerticalAlignment('middle')
     .setHorizontalAlignment('left')
     .setWrap(false);
-  sheet.setRowHeight(1, 38);
+  // A single hairline in the brand colour does the branding that neon text used
+  // to shout, and keeps the header readable when this sheet is printed.
+  header.setBorder(null, null, true, null, null, null,
+    THEME.headerRule, SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+  sheet.setRowHeight(1, 36);
   sheet.setFrozenRows(1);
   sheet.setFrozenColumns(2);
   sheet.setTabColor(THEME.tab);
@@ -611,7 +622,7 @@ function applySheetFormatting_(sheet) {
 
   body.setVerticalAlignment('middle');
   body.setFontSize(10);
-  body.setFontColor('#171b21');
+  body.setFontColor(THEME.bodyText);
   body.setNumberFormat('@');
 
   // Timestamps read like a real date, names read like names.
@@ -620,24 +631,23 @@ function applySheetFormatting_(sheet) {
   sheet.getRange(2, COL.TEAM, bodyRows, 1).setFontWeight('bold');
   sheet.getRange(2, COL.DEPARTMENT, bodyRows, 1).setWrap(true);
 
-  // --- Department dropdown, so future edits stay consistent ---
-  var departmentRule = SpreadsheetApp.newDataValidation()
-    .requireValueInList(DEPARTMENTS, true)
-    .setAllowInvalid(true)
-    .setHelpText('Pick a department from the list.')
-    .build();
-  sheet.getRange(2, COL.DEPARTMENT, bodyRows, 1).setDataValidation(departmentRule);
+  // The department dropdown is installed by refreshBodyStyles_, which also runs
+  // on every registration, so its range always matches the registered rows.
 
   // --- Highlight a WhatsApp number that appears in more than one team ---
   applyDuplicateRules_(sheet, width);
 
-  // --- Row stripes and borders ---
+  // --- Row stripes, borders and the department dropdown ---
   refreshBodyStyles_(sheet);
 }
 
 /** Alternating row colours + light separators, applied only to real data rows. */
 function refreshBodyStyles_(sheet) {
   var rows = countTeams_(sheet);
+
+  // Called before the early return so an emptied sheet still loses stale arrows.
+  refreshDepartmentDropdown_(sheet);
+
   if (rows === 0) return;
 
   var width = HEADERS.length;
@@ -655,6 +665,32 @@ function refreshBodyStyles_(sheet) {
   range.setBorder(null, null, true, null, true, null, THEME.border, SpreadsheetApp.BorderStyle.SOLID);
 }
 
+/**
+ * Keeps the department dropdown on the registered rows and nowhere else.
+ * A validated blank cell draws a small dropdown arrow, so covering the whole
+ * column stamped hundreds of arrows onto empty rows and made a tidy record look
+ * broken. Runs on every write, so the range always tracks the real data.
+ */
+function refreshDepartmentDropdown_(sheet) {
+  var bodyRows = Math.max(sheet.getMaxRows() - 1, 1);
+  var dataRows = Math.min(Math.max(countTeams_(sheet), 0), bodyRows);
+
+  if (dataRows > 0) {
+    var departmentRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(DEPARTMENTS, true)
+      .setAllowInvalid(true)
+      .setHelpText('Pick a department from the list.')
+      .build();
+    sheet.getRange(2, COL.DEPARTMENT, dataRows, 1).setDataValidation(departmentRule);
+  }
+
+  // Drop any arrows a previous run (or the old script) left on empty rows.
+  var staleRows = bodyRows - dataRows;
+  if (staleRows > 0) {
+    sheet.getRange(2 + dataRows, COL.DEPARTMENT, staleRows, 1).clearDataValidations();
+  }
+}
+
 function applyDuplicateRules_(sheet, width) {
   var rows = Math.max(sheet.getMaxRows() - 1, 1);
   var rules = [];
@@ -666,7 +702,8 @@ function applyDuplicateRules_(sheet, width) {
       'COUNTIF($' + columnLetter_(COL.P1_WA) + '$2:$' + columnLetter_(COL.P1_WA) + ',$' + columnLetter_(COL.P1_WA) + '2)+' +
       'COUNTIF($' + columnLetter_(COL.P2_WA) + '$2:$' + columnLetter_(COL.P2_WA) + ',$' + columnLetter_(COL.P1_WA) + '2)>1)'
     )
-    .setBackground('#ffe3e3')
+    .setBackground(THEME.duplicateBg)
+    .setFontColor(THEME.duplicateText)
     .setRanges([sheet.getRange(2, COL.P1_WA, rows, 1)])
     .build();
   rules.push(firstRule);
@@ -677,7 +714,8 @@ function applyDuplicateRules_(sheet, width) {
       'COUNTIF($' + columnLetter_(COL.P1_WA) + '$2:$' + columnLetter_(COL.P1_WA) + ',$' + columnLetter_(COL.P2_WA) + '2)+' +
       'COUNTIF($' + columnLetter_(COL.P2_WA) + '$2:$' + columnLetter_(COL.P2_WA) + ',$' + columnLetter_(COL.P2_WA) + '2)>1)'
     )
-    .setBackground('#ffe3e3')
+    .setBackground(THEME.duplicateBg)
+    .setFontColor(THEME.duplicateText)
     .setRanges([sheet.getRange(2, COL.P2_WA, rows, 1)])
     .build();
   rules.push(secondRule);
