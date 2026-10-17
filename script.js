@@ -3,7 +3,7 @@
   Paste your deployed Google Apps Script Web App URL below.
   Get this from: Apps Script > Deploy > Manage deployments > Web app URL
 */
-const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxqAaaPFNI-w54JFWzJby1ToNH1IpBjW2l-xocXBxIH0KcPGg2kyoM9BIQJ6PkiKEUi/exec";
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_-E7L9mE7xGk_Fypf6tnTvAbG4wZu9idrycpawkakihtgKndDMknDLdZnt333T3y-/exec";
 
 const form = document.getElementById("registrationForm");
 const submitBtn = document.getElementById("submitBtn");
