@@ -126,6 +126,32 @@ async function loadStats(attempt = 1) {
 
 loadStats();
 
+/* The board says "live from the tournament sheet", so it has to keep looking.
+   The server caches counters for 20 seconds and a registration clears that
+   cache, but a page already open on someone's phone never asked again — it
+   sat on the numbers from whenever they loaded it. Polling here means a new
+   team appears on its own, without anyone thinking to refresh.
+   Hidden tabs stop polling, so a page left in the background costs nothing. */
+const STATS_REFRESH_MS = 20000;
+let statsRefreshInFlight = false;
+
+async function refreshStats() {
+  if (statsRefreshInFlight || document.visibilityState === "hidden") return;
+  statsRefreshInFlight = true;
+  try {
+    await loadStats();
+  } finally {
+    statsRefreshInFlight = false;
+  }
+}
+
+setInterval(refreshStats, STATS_REFRESH_MS);
+
+// Coming back to the tab should feel instant, not up to 20 seconds stale.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") refreshStats();
+});
+
 
 /* ------------------------------------------------------------------
    RESULT POPUP
