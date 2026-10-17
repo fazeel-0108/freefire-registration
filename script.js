@@ -216,7 +216,13 @@ function playerFacingError(message) {
 function openResultPopup() {
   successModal.classList.add("show");
   successModal.setAttribute("aria-hidden", "false");
-  doneSuccess.focus();
+  // Hold the page still behind the dialog. Without this a phone kept the
+  // document scrolled under the overlay and the popup read as "somewhere up
+  // there", so people had to scroll back to the top to find it.
+  document.documentElement.classList.add("modal-open");
+  document.body.classList.add("modal-open");
+  // preventScroll: focusing DONE must never move the document sideways or up.
+  if (doneSuccess && doneSuccess.focus) doneSuccess.focus({ preventScroll: true });
 }
 
 function showSuccessPopup(teamName) {
@@ -241,6 +247,8 @@ function showErrorPopup(message) {
 function closeSuccessPopup() {
   successModal.classList.remove("show");
   successModal.setAttribute("aria-hidden", "true");
+  document.documentElement.classList.remove("modal-open");
+  document.body.classList.remove("modal-open");
   form.reset();
   success.classList.remove("show");
   window.scrollTo({ top: document.querySelector(".form-shell").offsetTop - 20, behavior: "smooth" });

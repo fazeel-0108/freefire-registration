@@ -343,7 +343,11 @@ button:disabled { opacity: .55; cursor: wait; transform: none; }
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 20px;
+  /* The dialog can be taller than a short landscape phone; let the overlay
+     itself scroll rather than pushing the buttons out of reach. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom));
   background: rgba(2, 4, 8, 0.82);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -359,10 +363,16 @@ button:disabled { opacity: .55; cursor: wait; transform: none; }
   pointer-events: auto;
 }
 
+/* The page behind the dialog must not scroll under it: on a phone that is what
+   left the sheet half-scrolled when the popup closed. Both elements need it --
+   with only body locked, the viewport itself can still be scrolled. */
+html.modal-open, body.modal-open { overflow: hidden; }
+
 .success-modal {
   position: relative;
   width: 100%;
   max-width: 460px;
+  margin: auto;
   padding: 42px 30px 25px;
   text-align: center;
   overflow: hidden;
