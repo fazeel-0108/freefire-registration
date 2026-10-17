@@ -102,27 +102,89 @@ h1 span { color: transparent; -webkit-text-stroke: 1px rgba(244,246,248,.75); }
 .progress i { display: block; width: 100%; height: 100%; background: var(--accent); box-shadow: 0 0 16px rgba(184,255,57,.5); }
 .hero-card p { color: var(--muted); line-height: 1.7; font-size: 13px; margin: 0; }
 
-/* live registration counter */
+/* Live registration counter.
+   Deliberately not two bordered cards: the figures sit directly on the page
+   and are parted by a single hairline, so the board reads as a scoreline
+   rather than a pair of dashboard tiles. */
 .stats {
-  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gap-sm);
+  position: relative;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
   margin: -6px 0 var(--gap-xl);
+  padding: clamp(24px, 3.6vw, 38px) 0 clamp(22px, 3.2vw, 34px);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
 }
-.stat {
-  position: relative; overflow: hidden;
-  padding: 22px 22px 20px;
-  border: 1px solid var(--line); border-radius: var(--radius);
-  background: linear-gradient(150deg, rgba(255,255,255,.05), rgba(255,255,255,.012));
-  transition: border-color .2s ease, transform .2s ease;
+/* A single accent hairline laid over the top rule, drawn left to right when the
+   strip arrives. It reads as light catching an edge rather than as a panel. */
+.stats::before {
+  content: ""; position: absolute; left: 0; top: -1px; height: 1px; width: 100%;
+  background: linear-gradient(90deg, var(--accent), rgba(184,255,57,.28) 34%, transparent 72%);
+  transform: scaleX(0); transform-origin: left center;
+  transition: transform 1.1s cubic-bezier(.2,.7,.2,1) .15s;
 }
-.stat:hover { border-color: rgba(255,255,255,.16); transform: translateY(-2px); }
-.stat p { margin: 0 0 13px; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .16em; }
+.stats.is-visible::before { transform: scaleX(1); }
+
+.stat { position: relative; padding-right: clamp(16px, 3vw, 40px); transition: opacity .7s ease, transform .7s cubic-bezier(.2,.7,.2,1); }
+.stat + .stat { padding-left: clamp(24px, 4vw, 56px); border-left: 1px solid var(--line); }
+
+.stat p {
+  display: flex; align-items: center; gap: 9px;
+  margin: 0 0 clamp(12px, 1.6vw, 18px);
+  color: #8b95a2; font-size: 10px; font-weight: 800; letter-spacing: .22em;
+}
+.stat p::before {
+  content: ""; flex: 0 0 auto; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 10px rgba(184,255,57,.85);
+  animation: statPulse 2.8s ease-in-out infinite;
+}
+
 .stat strong {
-  display: block; line-height: 1;
-  font: 700 clamp(30px, 3.4vw, 40px) "Space Grotesk", sans-serif;
-  letter-spacing: -.04em; color: var(--text);
+  display: block;
+  font-family: "Space Grotesk", sans-serif; font-weight: 700;
+  font-size: clamp(54px, 8.4vw, 104px); line-height: .78; letter-spacing: -.055em;
+  color: #f7f9fb;
+  font-variant-numeric: tabular-nums;
 }
-.stat-note { display: block; margin-top: 11px; color: #6f7885; font-size: 10px; }
-.stats.is-offline .stat strong { color: #5d6672; }
+/* gradient ink, but only where it can be clipped safely; the plain colour above
+   is the fallback so the numbers are never invisible */
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .stat strong {
+    background: linear-gradient(180deg, #ffffff 26%, #ccd4dc 78%, rgba(204,212,220,.55));
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent; -webkit-text-fill-color: transparent;
+  }
+}
+
+.stat-note {
+  display: block; margin-top: clamp(14px, 1.8vw, 20px);
+  color: #6e7885; font-size: 10px; letter-spacing: .09em;
+}
+
+.stats.is-offline .stat strong { color: #59616d; background: none; -webkit-text-fill-color: #59616d; }
+.stats.is-offline .stat p::before { background: #59616d; box-shadow: none; animation: none; }
+
+/* Entrance and value motion. The hiding rule is scoped to .is-animatable, which
+   only script.js adds once it has an observer in hand -- if that never runs, the
+   numbers simply appear normally instead of staying invisible forever. */
+.stats.is-animatable .stat { opacity: 0; transform: translateY(18px); }
+.stats.is-visible .stat { opacity: 1; transform: none; }
+.stats.is-visible .stat + .stat { transition-delay: .1s; }
+.stat strong.is-bumping { animation: statBump .6s cubic-bezier(.2,.8,.2,1); }
+
+@keyframes statBump {
+  0%   { transform: scale(1); }
+  38%  { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+@keyframes statPulse {
+  0%, 100% { opacity: .45; transform: scale(.85); }
+  50%      { opacity: 1;   transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stats.is-animatable .stat { opacity: 1; transform: none; }
+  .stat p::before { animation: none; opacity: .8; }
+  .stat strong.is-bumping { animation: none; }
+}
 
 .form-shell {
   position: relative; border: 1px solid var(--line); border-radius: 30px;
@@ -501,11 +563,14 @@ footer {
   h1 { font-size: clamp(52px, 16vw, 86px); }
   .hero-card { max-width: 500px; }
   .grid.two { grid-template-columns: 1fr; }
-  .stats { grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: var(--gap-lg); }
-  .stat { padding: 18px 16px 16px; border-radius: 18px; }
+  .stats { grid-template-columns: 1fr 1fr; margin-bottom: var(--gap-lg); padding: 20px 0 18px; }
+  .stat { padding-right: 14px; }
+  .stat + .stat { padding-left: 18px; }
   /* reserve two lines so a wrapped label cannot knock the numbers out of line */
-  .stat p { min-height: 2.4em; }
-  .stat strong { font-size: 28px; }
+  .stat p { min-height: 2.6em; align-items: flex-start; font-size: 9px; letter-spacing: .18em; }
+  .stat p::before { margin-top: 3px; }
+  .stat strong { font-size: clamp(42px, 12vw, 56px); }
+  .stat-note { font-size: 9px; }
   .form-shell { padding: 26px 18px 24px; border-radius: 22px; }
   .section-heading { gap: 14px; margin-bottom: 22px; }
   .number { flex: 0 0 36px; width: 36px; height: 36px; font-size: 11px; }

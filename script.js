@@ -46,6 +46,12 @@ function countUp(el, target) {
     return;
   }
 
+  // A short pulse on the figure itself, not on its container, so the number
+  // reads as having just changed without the whole strip twitching.
+  el.classList.remove("is-bumping");
+  void el.offsetWidth;
+  el.classList.add("is-bumping");
+
   const duration = 650;
   const start = performance.now();
 
@@ -57,6 +63,26 @@ function countUp(el, target) {
   }
 
   requestAnimationFrame(frame);
+}
+
+/* The strip rises into place the first time it scrolls into view. The hiding
+   rule is only switched on here, after the observer exists, so a failure in
+   this block can never leave the live numbers permanently invisible. */
+if (statsSection) {
+  if (!REDUCED_MOTION && "IntersectionObserver" in window) {
+    const statsReveal = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add("is-visible");
+        statsReveal.unobserve(entry.target);
+      });
+    }, { threshold: 0.25 });
+
+    statsSection.classList.add("is-animatable");
+    statsReveal.observe(statsSection);
+  } else {
+    statsSection.classList.add("is-visible");
+  }
 }
 
 function renderStats(data) {
