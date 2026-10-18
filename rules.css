@@ -1,0 +1,138 @@
+/* ==================================================================
+   Tournament rules page — layering only.
+   Colours, type and tokens come from style.css, so the rules page and
+   the registration page can never drift apart.
+   ================================================================== */
+
+.rules-page { max-width: 900px; padding-bottom: 40px; }
+
+/* ------------------------------- hero ------------------------------- */
+
+.rules-hero { padding: 64px 0 8px; }
+.rules-hero h1 { font-size: clamp(46px, 8vw, 92px); margin-bottom: 22px; }
+.rules-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 30px 0 22px; }
+
+/* .cta-primary / .cta-ghost / .topnav come from style.css so the rules page and
+   the registration page always share one set of buttons and nav pills. */
+.placeholder-legend {
+  color: #7C8492; font-size: 11px; line-height: 1.9; margin: 0;
+  border-left: 2px solid rgba(var(--silver-rgb),.45); padding-left: 14px;
+}
+
+/* An unconfirmed detail is marked, never written as policy. */
+.todo {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px dashed rgba(var(--silver-rgb),.5);
+  border-radius: 7px;
+  color: var(--silver);
+  font-size: .92em;
+  letter-spacing: .01em;
+  background: rgba(var(--silver-rgb),.06);
+}
+
+/* ------------------------------ contents ---------------------------- */
+
+.toc {
+  margin: 42px 0 10px; padding: 24px clamp(18px, 3vw, 30px);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: linear-gradient(155deg, rgba(255,255,255,.045), rgba(255,255,255,.012));
+}
+.toc h2 {
+  margin: 0 0 14px; font: 800 10px/1 Inter, sans-serif;
+  letter-spacing: .2em; text-transform: uppercase; color: var(--accent-2);
+}
+.toc ol {
+  margin: 0; padding: 0; list-style: none;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 24px;
+  counter-reset: toc;
+}
+.toc a {
+  display: block; padding: 7px 0; color: var(--muted); text-decoration: none;
+  font-size: 13px; border-bottom: 1px solid rgba(255,255,255,.04);
+  transition: color .18s ease, padding-left .18s ease;
+}
+.toc a::before {
+  counter-increment: toc; content: counter(toc, decimal-leading-zero);
+  margin-right: 12px; color: #6B727E; font: 700 11px "Space Grotesk", sans-serif;
+}
+.toc a:hover, .toc a:focus-visible { color: var(--text); padding-left: 4px; outline: none; }
+.toc a:hover::before { color: var(--accent-2); }
+
+/* ------------------------------- rules ------------------------------ */
+
+.rule-card {
+  margin: 18px 0 0; padding: clamp(20px, 3.4vw, 34px);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: rgba(13, 18, 38, .6);
+  scroll-margin-top: 92px;
+  transition: border-color .25s ease, transform .25s ease;
+}
+.rule-card:hover { border-color: rgba(var(--accent-rgb),.28); }
+.rule-card:target { border-color: rgba(var(--accent-rgb),.55); box-shadow: 0 0 0 3px rgba(var(--accent-rgb),.1); }
+
+.rule-card h2 {
+  display: flex; align-items: center; gap: 14px;
+  margin: 0 0 16px; font-family: "Space Grotesk", sans-serif;
+  font-size: clamp(19px, 2.6vw, 24px); letter-spacing: -.02em; line-height: 1.2;
+}
+.num {
+  flex: 0 0 auto; width: 38px; height: 38px; display: grid; place-items: center;
+  border: 1px solid rgba(var(--accent-rgb),.3); border-radius: 11px;
+  color: var(--accent-2); background: rgba(var(--accent-rgb),.07);
+  font: 700 12px "Space Grotesk", sans-serif;
+}
+.rule-card ul { margin: 0; padding-left: 20px; }
+.rule-card li {
+  color: #B5BAC3; font-size: 13.5px; line-height: 1.85; margin-bottom: 9px;
+}
+.rule-card li::marker { color: rgba(var(--accent-rgb),.75); }
+.rule-card li strong { color: var(--text); }
+.rule-card ul ul { margin-top: 9px; }
+.rule-card ul ul li { color: var(--muted); font-size: 13px; list-style: circle; }
+
+.rules-contact {
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+  margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line);
+}
+
+.footer-link { color: var(--muted); text-decoration: none; font-weight: 800; letter-spacing: .1em; }
+.footer-link:hover { color: var(--accent-2); }
+
+/* ----------------------------- responsive --------------------------- */
+
+@media (max-width: 800px) {
+  .rules-hero { padding: 34px 0 4px; }
+  .toc ol { grid-template-columns: 1fr; }
+  .rules-actions { gap: 10px; }
+  .cta-primary, .cta-ghost { flex: 1 1 100%; justify-content: center; }
+  .rule-card li { font-size: 13px; line-height: 1.8; }
+  .rules-contact .whatsapp-link, .rules-contact .cta-ghost { width: 100%; justify-content: center; }
+  .topnav a { padding: 0 13px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rule-card, .toc a, .cta-primary { transition: none; }
+  .cta-primary:hover { transform: none; }
+}
+
+/* A printed copy should read like a document, not a dark web page. */
+@media print {
+  .ambient, .topbar, .rules-actions, .toc, .rules-contact, footer { display: none !important; }
+  html, body { background: #fff !important; color: #111 !important; }
+  body::before { display: none; }
+  .page { width: 100%; }
+  .rules-hero { padding: 0 0 12px; }
+  .rules-hero h1 { font-size: 32px; color: #111; }
+  .rules-hero h1 span { color: #111; -webkit-text-stroke: 0; }
+  .eyebrow, .rules-hero .hero-text, .placeholder-legend, .toc h2 { color: #333 !important; }
+  .placeholder-legend { border-color: #999; }
+  .todo { color: #333; border-color: #999; background: none; }
+  .rule-card {
+    border: 0; border-bottom: 1px solid #ddd; border-radius: 0;
+    background: none; padding: 12px 0; page-break-inside: avoid;
+  }
+  .rule-card h2 { color: #111; font-size: 15px; }
+  .num { border-color: #bbb; color: #333; background: none; }
+  .rule-card li, .rule-card ul ul li { color: #111; font-size: 11.5pt; line-height: 1.5; }
+}

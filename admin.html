@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="Organiser dashboard for the QQSGP Free Fire Championship registrations.">
+  <title>Organiser Dashboard | QQSGP Free Fire</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="admin.css">
+  <link rel="icon" href="favicon.png" type="image/png">
+</head>
+<body>
+  <a class="skip-link" href="#registrations">Skip to registrations</a>
+
+  <!-- ============================ SIGN IN ============================ -->
+  <section class="gate" id="gate" aria-labelledby="gateTitle">
+    <div class="gate-card">
+      <div class="gate-brand">
+        <img src="logo.png" alt="" width="44" height="48">
+        <div>
+          <strong>QQSGP</strong>
+          <span>Free Fire Championship</span>
+        </div>
+      </div>
+
+      <h1 id="gateTitle">Organiser dashboard</h1>
+      <p class="gate-copy">
+        This page reads and changes live registration records. Enter the dashboard
+        key that was created in the Apps Script project. The key is checked on the
+        server for every action and is kept only in this tab.
+      </p>
+
+      <form id="gateForm" autocomplete="off">
+        <label class="field">
+          <span>Dashboard key</span>
+          <input id="gateKey" type="password" name="key" required minlength="20"
+                 autocomplete="off" spellcheck="false"
+                 placeholder="Paste the key from setupAdminKey()">
+        </label>
+        <label class="checkbox">
+          <input id="gateRemember" type="checkbox">
+          <span>Keep me signed in while this tab stays open</span>
+        </label>
+        <button class="btn btn-primary" id="gateSubmit" type="submit">Open dashboard</button>
+        <p class="gate-error" id="gateError" role="alert" hidden></p>
+      </form>
+
+      <p class="gate-note">
+        No key yet? In the Apps Script editor run <code>setupAdminKey()</code> once and
+        copy the value it prints. Anyone without the key gets nothing from the API.
+      </p>
+      <a class="gate-back" href="index.html">← Back to the registration site</a>
+    </div>
+  </section>
+
+  <!-- =========================== DASHBOARD =========================== -->
+  <div class="shell" id="shell" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <img src="logo.png" alt="" width="38" height="42">
+        <div>
+          <strong>QQSGP</strong>
+          <span>Organiser dashboard</span>
+        </div>
+      </div>
+
+      <div class="topbar-actions">
+        <span class="live-pill" id="refreshState"><i></i> Live</span>
+        <button class="btn btn-ghost" id="refreshBtn" type="button">Refresh</button>
+        <button class="btn btn-ghost" id="exportBtn" type="button">Export CSV</button>
+        <button class="btn btn-ghost" id="signOutBtn" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="stats-grid" aria-label="Overview">
+        <article class="stat-card">
+          <p>Teams</p>
+          <strong id="statTeams">—</strong>
+          <span id="statTeamsNote">Total submitted</span>
+        </article>
+        <article class="stat-card">
+          <p>Players</p>
+          <strong id="statPlayers">—</strong>
+          <span>Across all squads</span>
+        </article>
+        <article class="stat-card">
+          <p>Pending</p>
+          <strong id="statPending">—</strong>
+          <span>Waiting for a decision</span>
+        </article>
+        <article class="stat-card">
+          <p>Approved</p>
+          <strong id="statApproved">—</strong>
+          <span>Confirmed squads</span>
+        </article>
+        <article class="stat-card">
+          <p>Waitlisted</p>
+          <strong id="statWaitlisted">—</strong>
+          <span>Holding for a slot</span>
+        </article>
+        <article class="stat-card">
+          <p>Rejected</p>
+          <strong id="statRejected">—</strong>
+          <span>Kept as a record</span>
+        </article>
+      </section>
+
+      <section class="panel" id="registrations" aria-labelledby="regTitle">
+        <div class="panel-head">
+          <div>
+            <h2 id="regTitle">Registrations</h2>
+            <p id="regSummary">Loading…</p>
+          </div>
+          <div class="panel-tools">
+            <label class="search">
+              <span class="sr-only">Search registrations</span>
+              <input id="searchInput" type="search" placeholder="Team, player, UID or ID" autocomplete="off">
+            </label>
+            <label class="select">
+              <span class="sr-only">Filter by department</span>
+              <select id="departmentFilter">
+                <option value="">All departments</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div class="status-filters" role="group" aria-label="Filter by status">
+          <button class="chip is-active" data-status="ALL" type="button">All</button>
+          <button class="chip" data-status="PENDING" type="button">Pending</button>
+          <button class="chip" data-status="APPROVED" type="button">Approved</button>
+          <button class="chip" data-status="WAITLISTED" type="button">Waitlisted</button>
+          <button class="chip" data-status="REJECTED" type="button">Rejected</button>
+        </div>
+
+        <div class="table-wrap" id="tableWrap">
+          <table class="reg-table">
+            <thead>
+              <tr>
+                <th scope="col">Team</th>
+                <th scope="col">Department</th>
+                <th scope="col">Players</th>
+                <th scope="col">Registered</th>
+                <th scope="col">Status</th>
+                <th scope="col"><span class="sr-only">Open</span></th>
+              </tr>
+            </thead>
+            <tbody id="regRows"></tbody>
+          </table>
+
+          <div class="state" id="stateBox" hidden>
+            <p class="state-title" id="stateTitle">Nothing here yet</p>
+            <p class="state-copy" id="stateCopy">Registrations will appear as teams enter.</p>
+          </div>
+        </div>
+
+        <div class="pager">
+          <span id="pageInfo">—</span>
+          <div class="pager-buttons">
+            <button class="btn btn-ghost" id="prevBtn" type="button">Previous</button>
+            <button class="btn btn-ghost" id="nextBtn" type="button">Next</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ====================== WHATSAPP ====================== -->
+      <section class="panel wa-panel" id="whatsapp" aria-labelledby="waTitle">
+        <div class="panel-head">
+          <div>
+            <h2 id="waTitle">WhatsApp notifications</h2>
+            <p id="waState">Checking the provider…</p>
+          </div>
+          <div class="panel-tools">
+            <label class="select">
+              <span class="sr-only">Filter notifications</span>
+              <select id="waStateFilter">
+                <option value="ALL">All notifications</option>
+                <option value="SENT">Accepted by provider</option>
+                <option value="DELIVERED">Delivered</option>
+                <option value="READ">Read</option>
+                <option value="FAILED">Failed</option>
+                <option value="UNCERTAIN">Uncertain</option>
+                <option value="SKIPPED">Skipped</option>
+              </select>
+            </label>
+            <button class="btn btn-ghost" id="waRefresh" type="button">Refresh</button>
+          </div>
+        </div>
+
+        <div class="wa-grid">
+          <div class="wa-compose">
+            <h3>Send an announcement</h3>
+            <p class="hint" id="waComposeHint">
+              Uses the approved announcement template. Nothing is sent until you preview
+              and confirm.
+            </p>
+
+            <label class="field">
+              <span>Audience</span>
+              <select id="waAudience" class="wa-input">
+                <option value="APPROVED">Approved teams</option>
+                <option value="WAITLISTED">Waitlisted teams</option>
+                <option value="PENDING">Teams awaiting review</option>
+                <option value="ALL">Every team (rejected excluded)</option>
+                <option value="SELECTED">Selected teams</option>
+              </select>
+            </label>
+
+            <div class="wa-selected" id="waSelectedBox" hidden>
+              <p class="hint">Tick the teams that should receive this message.</p>
+              <ul class="wa-team-list" id="waTeamList"></ul>
+            </div>
+
+            <label class="field">
+              <span>Message</span>
+              <textarea id="waMessage" class="wa-input" rows="4" maxlength="900"
+                        placeholder="e.g. Reporting time is 4:30 PM in Lab 2. Room details follow on WhatsApp."></textarea>
+            </label>
+            <div class="note-row">
+              <span class="hint"><span id="waCount">0</span>/900 characters</span>
+              <span class="hint" id="waConsentNote">Only teams that opted in are messaged.</span>
+            </div>
+
+            <div class="wa-preview" id="waPreviewBox" hidden>
+              <p class="wa-preview-count" id="waPreviewCount">—</p>
+              <ul class="wa-preview-list" id="waPreviewList"></ul>
+              <p class="hint" id="waPreviewBlocked"></p>
+            </div>
+
+            <div class="note-row">
+              <button class="btn btn-ghost" id="waPreviewBtn" type="button">Preview recipients</button>
+              <button class="btn btn-primary" id="waSendBtn" type="button" disabled>Send announcement</button>
+            </div>
+            <p class="hint" id="waSendResult" hidden></p>
+          </div>
+
+          <div class="wa-log">
+            <h3>Notification log <span class="wa-totals" id="waTotals"></span></h3>
+            <div class="table-wrap">
+              <table class="reg-table wa-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Team</th>
+                    <th scope="col">Type</th>
+                    <th scope="col">Recipient</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">When</th>
+                    <th scope="col"><span class="sr-only">Action</span></th>
+                  </tr>
+                </thead>
+                <tbody id="waRows"></tbody>
+              </table>
+            </div>
+            <div class="state" id="waEmpty" hidden>
+              <p class="state-title">No notifications yet</p>
+              <p class="state-copy">Approve, reject or waitlist a team and the message appears here.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ============================= DRAWER ============================= -->
+  <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+  <aside class="drawer" id="drawer" hidden aria-labelledby="drawerTitle" role="dialog" aria-modal="true">
+    <header class="drawer-head">
+      <div>
+        <p class="drawer-eyebrow" id="drawerMeta">Registration</p>
+        <h2 id="drawerTitle">Team</h2>
+        <p class="drawer-sub" id="drawerDepartment">Department</p>
+      </div>
+      <button class="icon-btn" id="drawerClose" type="button" aria-label="Close details">×</button>
+    </header>
+
+    <div class="drawer-body">
+      <div class="drawer-status">
+        <span class="badge" id="drawerStatus">PENDING</span>
+        <span class="drawer-id" id="drawerId"></span>
+      </div>
+
+      <h3>Roster</h3>
+      <ul class="roster" id="drawerRoster"></ul>
+
+      <h3>Change status</h3>
+      <div class="status-actions">
+        <button class="btn btn-approve" data-set-status="APPROVED" type="button">Approve</button>
+        <button class="btn btn-wait" data-set-status="WAITLISTED" type="button">Waitlist</button>
+        <button class="btn btn-reject" data-set-status="REJECTED" type="button">Reject</button>
+        <button class="btn btn-ghost" data-set-status="PENDING" type="button">Back to pending</button>
+      </div>
+
+      <h3>Organiser note</h3>
+      <label class="field">
+        <span class="sr-only">Internal note</span>
+        <textarea id="noteInput" rows="3" maxlength="500" placeholder="Paid, kit issued, contacted on WhatsApp…"></textarea>
+      </label>
+      <div class="note-row">
+        <span class="hint"><span id="noteCount">0</span>/500 · only organisers see this</span>
+        <button class="btn btn-primary" id="noteSave" type="button">Save note</button>
+      </div>
+
+      <h3>Contact</h3>
+      <p class="hint" id="drawerContactHint">Copy a message and send it from your own WhatsApp.</p>
+      <div class="contact-actions">
+        <button class="btn btn-ghost" id="copyMessageBtn" type="button">Copy WhatsApp message</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============================ CONFIRM ============================ -->
+  <div class="confirm-backdrop" id="confirmBackdrop" hidden>
+    <div class="confirm" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle">
+      <h2 id="confirmTitle">Are you sure?</h2>
+      <p id="confirmCopy">This changes the live record.</p>
+      <div class="confirm-actions">
+        <button class="btn btn-ghost" id="confirmCancel" type="button">Cancel</button>
+        <button class="btn btn-reject" id="confirmOk" type="button">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+  <script src="admin.js"></script>
+</body>
+</html>

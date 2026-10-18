@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const crypto = require('crypto');
 
 const SOURCE = fs.readFileSync(path.join(__dirname, 'apps-script.js'), 'utf8');
 
@@ -75,6 +76,13 @@ class Range {
       });
     });
     this.sheet.calls.setValues++;
+    return this;
+  }
+  // Single-cell write, used by the dashboard when it changes a status or note.
+  setValue(value) {
+    if (this.numRows !== 1 || this.numCols !== 1) throw new Error('setValue needs a single cell');
+    this.sheet.grid.cells[this.row - 1][this.col - 1] = value;
+    this.sheet.calls.setValue = (this.sheet.calls.setValue || 0) + 1;
     return this;
   }
   setNumberFormat(f) { this.formats.push(f); this.sheet.calls.setNumberFormat++; return this; }
@@ -150,8 +158,19 @@ class Spreadsheet {
 const spreadsheet = new Spreadsheet();
 const cacheStore = new Map();
 const propsStore = new Map();
+const scriptProps = new Map();
 const emails = [];
 const log = [];
+
+/* Scriptable WhatsApp provider. Tests queue the next response (or an exception)
+   so the delivery states (accepted / rejected / no answer) can all be reached
+   without touching Meta. */
+const fetchCalls = [];
+const fetchQueue = [];
+let waMessageCounter = 0;
+
+function queueFetch(entry) { fetchQueue.push(entry); }
+function resetFetch() { fetchCalls.length = 0; fetchQueue.length = 0; }
 
 function builder(body) {
   const api = {};
@@ -187,7 +206,10 @@ const sandbox = {
       _mime: null,
       setMimeType(m) { this._mime = m; return this; },
       getContent() { return this._text; },
-      getMimeType() { return this._mime; }
+      getMimeType() { return this._mime; },
+      // Real TextOutput exposes setContent(); the harness needs it for the
+      // webhook challenge, which must answer plain text rather than JSON.
+      setContent(text) { this._text = text; return this; }
     }),
     MimeType: { JSON: 'application/json', TEXT: 'text/plain' }
   },
@@ -202,6 +224,11 @@ const sandbox = {
     getDocumentProperties: () => ({
       getProperty: k => (propsStore.has(k) ? propsStore.get(k) : null),
       setProperty: (k, v) => propsStore.set(k, v)
+    }),
+    // The admin key lives here in the real runtime: per-script, never published.
+    getScriptProperties: () => ({
+      getProperty: k => (scriptProps.has(k) ? scriptProps.get(k) : null),
+      setProperty: (k, v) => scriptProps.set(k, v)
     })
   },
   LockService: {
@@ -240,9 +267,45 @@ const sandbox = {
         .replace(/\ba\b/, ampm);
     }
   },
+  // DigestAlgorithm is an enum in Apps Script; the mock only needs the member
+  // the script actually asks for.
+  // (attached to Utilities below, after the object literal closes)
   Session: { getScriptTimeZone: () => 'Asia/Kolkata' },
-  MailApp: { sendEmail: (...args) => emails.push(args) }
+  MailApp: { sendEmail: (...args) => emails.push(args) },
+  UrlFetchApp: {
+    fetch: (url, options) => {
+      fetchCalls.push({ url: url, options: options });
+      const next = fetchQueue.length ? fetchQueue.shift() : null;
+      if (next && next.throws) throw new Error(next.throws);
+      if (next) {
+        return {
+          getResponseCode: () => next.code,
+          getContentText: () => next.body
+        };
+      }
+      // Default: the provider accepts the message and returns a message id.
+      waMessageCounter++;
+      return {
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({ messages: [{ id: 'wamid.TEST' + waMessageCounter }] })
+      };
+    }
+  }
 };
+
+// Apps Script's digest returns signed bytes; records only care that the same
+// input always produces the same id, so a real SHA-256 keeps that property.
+const realDigest = sandbox.Utilities.computeDigest;
+sandbox.Utilities.DigestAlgorithm = { SHA_256: 'SHA_256' };
+sandbox.Utilities.computeDigest = (algorithm, value) => {
+  const buffer = crypto.createHash('sha256').update(String(value), 'utf8').digest();
+  return Array.from(buffer).map(b => (b > 127 ? b - 256 : b));
+};
+sandbox.Utilities.base64EncodeWebSafe = (bytes) => {
+  const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.map(b => (b + 256) % 256));
+  return buffer.toString('base64url');
+};
+sandbox.Utilities.getUuid = () => crypto.randomUUID();
 
 vm.createContext(sandbox);
 vm.runInContext(SOURCE, sandbox, { filename: 'apps-script.js' });
@@ -300,9 +363,25 @@ check('responds ok', first.ok === true, JSON.stringify(first));
 check('reports 1 team', first.teams === 1, JSON.stringify(first));
 check('reports 4 players', first.players === 4, JSON.stringify(first));
 check('row 1 is the header', sheet.grid.cells[0][1] === 'Team Name', sheet.grid.cells[0][1]);
-check('header has 9 columns', sandbox.HEADERS.length === 9 && sheet.grid.cells[0][8] === 'Player 4 Name');
-check('9 columns written for the row', sheet.grid.cells[1].slice(0, 10).filter(v => v !== '').length === 9,
-  JSON.stringify(sheet.grid.cells[1].slice(0, 10)));
+// The contract grew by Status and Note so the organiser dashboard can work on
+// the same rows the registrations already land in.
+check('header has 13 columns', sandbox.HEADERS.length === 13 &&
+  sheet.grid.cells[0][8] === 'Player 4 Name' &&
+  sheet.grid.cells[0][9] === 'Status' &&
+  sheet.grid.cells[0][10] === 'Note' &&
+  sheet.grid.cells[0][11] === 'WhatsApp Consent' &&
+  sheet.grid.cells[0][12] === 'Consent At',
+  JSON.stringify(sheet.grid.cells[0].slice(0, 13)));
+check('writes the row and marks it PENDING',
+  sheet.grid.cells[1].slice(0, 9).filter(v => v !== '').length === 9 &&
+  String(sheet.grid.cells[1][9]) === 'PENDING' &&
+  String(sheet.grid.cells[1][10] || '') === '',
+  JSON.stringify(sheet.grid.cells[1].slice(0, 13)));
+// No consent box was ticked on this payload, so the opt-in must be a plain NO
+// and no consent timestamp may be written.
+check('consent defaults to NO when not given',
+  String(sheet.grid.cells[1][11]) === 'NO' && String(sheet.grid.cells[1][12] || '') === '',
+  JSON.stringify(sheet.grid.cells[1].slice(11, 13)));
 check('timestamp is a real Date', Object.prototype.toString.call(sheet.grid.cells[1][0]) === '[object Date]');
 check('team name stored', sheet.grid.cells[1][1] === 'Shadow Squad');
 check('phone 1 stored', String(sheet.grid.cells[1][4]) === '7075593104');
@@ -333,7 +412,8 @@ check(
   sheet.calls.clearDataValidations > 0,
   'clearDataValidations was never called'
 );
-check('no column 10 chatter', sheet.grid.cells[0].slice(9).every(v => v === '') && sheet.grid.cells[1].slice(9).every(v => v === ''));
+check('no chatter past the last column',
+  sheet.grid.cells[0].slice(13).every(v => v === '') && sheet.grid.cells[1].slice(13).every(v => v === ''));
 
 console.log('\n3. duplicate and counter');
 const dup = post(validPayload('Shadow Squad'));
@@ -430,7 +510,12 @@ sandbox.CONFIG.MAX_TEAMS = 0;
 cacheStore.clear(); // a warm stats cache is expected to skip sheet reads
 const afterRepair = stats();
 check('repairs a wrong header label', sheet.grid.cells[0][8] === 'Player 4 Name', sheet.grid.cells[0][8]);
-check('clears stale leftover header', sheet.grid.cells[0][9] === '', JSON.stringify(sheet.grid.cells[0][9]));
+// Leftovers now begin after the consent columns (column 14), not after Note.
+sheet.grid.cells[0][13] = 'old column';
+cacheStore.clear(); // the repair only happens on a real sheet read, not a cached one
+const repairedAgain = stats();
+check('clears stale leftover header', sheet.grid.cells[0][13] === '', JSON.stringify(sheet.grid.cells[0][13]));
+check('repair keeps stats working', repairedAgain.ok === true);
 check('stats still work after repair', afterRepair.ok === true && afterRepair.teams === 2);
 
 console.log('\n7. existing sheet from the old script (numeric phones, extra columns)');
@@ -911,5 +996,455 @@ sandbox.CONFIG.MAX_TEAMS = 0;
 console.log('\n10. error containment');
 check('no unexpected console errors', log.filter(l => l.startsWith('ERROR')).length === 0, log.join(' | '));
 
+console.log('\n11. admin dashboard API');
+
+function adminCall(body) {
+  const res = sandbox.doPost({ parameter: { action: 'admin' }, postData: { contents: JSON.stringify(body) } });
+  return JSON.parse(res.getContent());
+}
+
+const noKey = adminCall({ action: 'list', key: 'anything' });
+check('denies the dashboard when no key is configured',
+  noKey.ok === false && noKey.code === 'AUTH', JSON.stringify(noKey));
+
+const adminKey = sandbox.setupAdminKey();
+check('setupAdminKey creates a long key',
+  typeof adminKey === 'string' && adminKey.length >= 32, String(adminKey && adminKey.length));
+check('the key is kept server-side, never in the source',
+  scriptProps.get('admin_key') === adminKey && SOURCE.indexOf(adminKey) === -1);
+
+const wrongKey = adminCall({ action: 'list', key: 'x'.repeat(adminKey.length) });
+check('a wrong key is refused', wrongKey.ok === false && wrongKey.code === 'AUTH', JSON.stringify(wrongKey));
+
+const list = adminCall({ action: 'list', key: adminKey, pageSize: 50 });
+check('a valid key lists the registrations',
+  list.ok === true && list.records.length >= 2, JSON.stringify(list).slice(0, 160));
+check('counts are calculated from the rows',
+  !!list.counts &&
+  list.counts.total === list.records.length &&
+  list.counts.players === list.records.reduce((sum, r) => sum + r.playerCount, 0),
+  JSON.stringify(list && list.counts));
+check('records carry an opaque id, not a row number',
+  Array.isArray(list.records) && list.records.every(r => typeof r.id === 'string' && r.id.length === 22));
+
+const target = list.records.filter(r => r.teamName === 'Shadow Squad')[0];
+check('the detail view exposes the roster',
+  target && target.players.length === 4 && target.players[0].whatsapp === '7075593104',
+  JSON.stringify(target && target.players));
+
+const approved = adminCall({ action: 'status', key: adminKey, id: target.id, status: 'APPROVED', expectedStatus: 'PENDING' });
+check('a status change is confirmed by the server',
+  approved.ok === true && approved.record.status === 'APPROVED', JSON.stringify(approved).slice(0, 200));
+check('the sheet cell really changed', sheet.grid.cells[1][9] === 'APPROVED', String(sheet.grid.cells[1][9]));
+
+const stale = adminCall({ action: 'status', key: adminKey, id: target.id, status: 'REJECTED', expectedStatus: 'PENDING' });
+check('a stale update is refused', stale.ok === false && stale.code === 'STALE', JSON.stringify(stale).slice(0, 160));
+
+const badStatus = adminCall({ action: 'status', key: adminKey, id: target.id, status: 'WINNER' });
+check('an unknown status is refused', badStatus.ok === false && badStatus.code === 'STATUS');
+
+const badId = adminCall({ action: 'status', key: adminKey, id: '<script>alert(1)</script>', status: 'APPROVED' });
+check('a malformed id is refused', badId.ok === false && badId.code === 'ID');
+
+const ghost = adminCall({ action: 'status', key: adminKey, id: 'A'.repeat(22), status: 'APPROVED' });
+check('an unknown id cannot touch a row', ghost.ok === false && ghost.code === 'ID');
+
+const noted = adminCall({ action: 'note', key: adminKey, id: target.id, note: 'Paid, kit issued' });
+check('an organiser note is saved', noted.ok === true && noted.record.note === 'Paid, kit issued');
+
+const badNote = adminCall({ action: 'note', key: adminKey, id: target.id, note: '<b>hi</b>' });
+check('markup in a note is refused', badNote.ok === false && badNote.code === 'NOTE');
+
+const longNote = adminCall({ action: 'note', key: adminKey, id: target.id, note: 'x'.repeat(600) });
+check('an over-long note is refused', longNote.ok === false && longNote.code === 'NOTE');
+
+const rejected = adminCall({ action: 'status', key: adminKey, id: target.id, status: 'REJECTED' });
+const afterReject = stats();
+check('a rejected team leaves the public counters',
+  rejected.ok === true && afterReject.teams === list.counts.total - 1,
+  JSON.stringify({ teams: afterReject.teams, total: list.counts.total }));
+check('the rejected row is kept as a record', sandbox.countTeams_(sheet) === list.counts.total);
+
+const exported = adminCall({ action: 'export', key: adminKey });
+check('export returns one CSV line per record plus a header',
+  exported.ok === true && exported.csv.split('\r\n').length === list.counts.total + 1,
+  String(exported.csv.split('\r\n').length));
+check('export includes the organisation note and status',
+  exported.csv.indexOf('Paid, kit issued') !== -1 && exported.csv.indexOf('REJECTED') !== -1);
+
+for (let i = 0; i < sandbox.CONFIG.ADMIN_MAX_FAILS; i++) {
+  adminCall({ action: 'list', key: 'z'.repeat(adminKey.length) });
+}
+const lockedOut = adminCall({ action: 'list', key: adminKey });
+check('repeated wrong keys lock the dashboard', lockedOut.ok === false && lockedOut.code === 'AUTH', JSON.stringify(lockedOut));
+cacheStore.delete('qqsgp_admin_lock');
+cacheStore.delete('qqsgp_admin_fails');
+const unlocked = adminCall({ action: 'list', key: adminKey });
+check('the lock lifts after its window', unlocked.ok === true);
+
+const sneaky = post(Object.assign(validPayload('Sneaky Team'), { status: 'APPROVED', note: 'set from the form' }));
+const sneakyRecord = adminCall({ action: 'list', key: adminKey, q: 'Sneaky Team' }).records[0];
+check('a public submission cannot choose its own status',
+  sneaky.ok === true && sneakyRecord && sneakyRecord.status === 'PENDING' && sneakyRecord.note === '',
+  JSON.stringify({ ok: sneaky.ok, record: sneakyRecord }));
+
+const filtered = adminCall({ action: 'list', key: adminKey, status: 'REJECTED' });
+check('the status filter returns only that status',
+  filtered.ok === true && filtered.records.every(r => r.status === 'REJECTED'), JSON.stringify(filtered.records.map(r => r.status)));
+
+const searched = adminCall({ action: 'list', key: adminKey, q: 'SHADOW' });
+check('search is case-insensitive on team names',
+  searched.ok === true && searched.records.length === 1 && searched.records[0].teamName === 'Shadow Squad',
+  JSON.stringify(searched.records.map(r => r.teamName)));
+
+// Every fixture squad shares the same roster names, so a roster search is
+// expected to match all of them -- the point is that it matches on players.
+const byPlayer = adminCall({ action: 'list', key: adminKey, q: 'phantom' });
+check('search also matches a player name',
+  byPlayer.ok === true && byPlayer.records.length >= 1 &&
+  byPlayer.records.every(r => r.players.some(p => /phantom/i.test(p.name))),
+  JSON.stringify(byPlayer.records.map(r => r.players.map(p => p.name))));
+
+const paged = adminCall({ action: 'list', key: adminKey, pageSize: 1, page: 2 });
+check('pagination slices the result, not the data',
+  paged.ok === true && paged.records.length === 1 && paged.page === 2 && paged.total >= 2,
+  JSON.stringify({ page: paged.page, total: paged.total }));
+
+const unknownAdminAction = adminCall({ action: 'drop-table', key: adminKey });
+check('an unknown admin action is refused', unknownAdminAction.ok === false && unknownAdminAction.code === 'ACTION');
+
+const missingAction = adminCall({ key: adminKey });
+check('a missing admin action is refused', missingAction.ok === false && missingAction.code === 'ACTION');
+
+console.log('\n12. WhatsApp notifications');
+
+/* The provider itself is mocked (see UrlFetchApp above); everything else here
+   is the real apps-script.js running against a real sheet model. */
+
+const WA_KEY = 'test-token-not-a-real-credential';
+const WA_PHONE_ID = '123456789012345';
+const WA_VERIFY = 'whsec_test_token_1234567890';
+
+function notifRows() {
+  const s = spreadsheet.getSheetByName('Notifications');
+  if (!s) return [];
+  const rows = s.getLastRow() - 1;
+  if (rows <= 0) return [];
+  return s.getRange(2, 1, rows, 15).getValues();
+}
+
+function notifFor(team) {
+  return notifRows().filter(r => String(r[3]) === team);
+}
+
+function registerTeam(name, consent) {
+  return post(Object.assign(validPayload(name), { whatsappConsent: consent === true }));
+}
+
+function recordFor(name) {
+  const list = adminCall({ action: 'list', key: adminKey, status: 'ALL', pageSize: 100, page: 1 });
+  return (list.records || []).filter(r => r.teamName === name)[0] || null;
+}
+
+function setStatus(name, status) {
+  const rec = recordFor(name);
+  return adminCall({ action: 'status', key: adminKey, id: rec.id, status: status, expectedStatus: rec.status });
+}
+
+/* --- before any credential is configured ------------------------------- */
+
+check('a 10-digit number gets the country code',
+  sandbox.normalisePhone_('9876543210') === '919876543210', sandbox.normalisePhone_('9876543210'));
+check('a number that already carries 91 is kept',
+  sandbox.normalisePhone_('+91 98765 43210') === '919876543210');
+check('a leading zero is normalised',
+  sandbox.normalisePhone_('09876543210') === '919876543210');
+check('short numbers are refused', sandbox.normalisePhone_('12345') === '');
+check('blank numbers are refused', sandbox.normalisePhone_('') === '');
+
+registerTeam('WA Unconfigured', true);
+resetFetch();
+const offChange = setStatus('WA Unconfigured', 'APPROVED');
+check('a status change works while WhatsApp is off',
+  offChange.ok === true && offChange.record.status === 'APPROVED', JSON.stringify(offChange.record && offChange.record.status));
+check('nothing is queued while WhatsApp is off',
+  notifRows().length === 0 && fetchCalls.length === 0,
+  'rows: ' + notifRows().length + ' calls: ' + fetchCalls.length);
+check('the response says it was not attempted',
+  offChange.notification && offChange.notification.state === 'DISABLED',
+  JSON.stringify(offChange.notification));
+
+/* --- configured ------------------------------------------------------- */
+
+scriptProps.set('whatsapp_token', WA_KEY);
+scriptProps.set('whatsapp_phone_number_id', WA_PHONE_ID);
+scriptProps.set('whatsapp_enabled', 'yes');
+scriptProps.set('whatsapp_verify_token', WA_VERIFY);
+
+const waCfg = adminCall({ action: 'notif-config', key: adminKey });
+check('config reports the integration as ready',
+  waCfg.ok === true && waCfg.configured === true && waCfg.mode === 'template', JSON.stringify(waCfg));
+check('the config response never contains the token',
+  JSON.stringify(waCfg).indexOf(WA_KEY) === -1);
+check('template names are reported for every type',
+  waCfg.templates.APPROVED === 'qqsgp_team_approved' &&
+  waCfg.templates.ANNOUNCEMENT === 'qqsgp_announcement',
+  JSON.stringify(waCfg.templates));
+
+/* --- consent gate ----------------------------------------------------- */
+
+registerTeam('WA No Consent', false);
+resetFetch();
+const noConsent = setStatus('WA No Consent', 'APPROVED');
+check('a team without consent still changes status', noConsent.ok === true);
+const skipped = notifFor('WA No Consent')[0];
+check('a team without consent is logged as SKIPPED',
+  skipped && String(skipped[10]) === 'SKIPPED', skipped && String(skipped[10]));
+check('a team without consent never reaches the provider', fetchCalls.length === 0);
+
+/* --- the happy path --------------------------------------------------- */
+
+registerTeam('WA Consent', true);
+const consentRow = (function () {
+  const rows = sheet.getLastRow() - 1;
+  const values = sheet.getRange(2, 1, rows, 13).getValues();
+  return values.filter(v => v[1] === 'WA Consent')[0];
+})();
+check('consent is stored as YES with a timestamp',
+  consentRow && String(consentRow[11]) === 'YES' && Object.prototype.toString.call(consentRow[12]) === '[object Date]',
+  consentRow && JSON.stringify(consentRow.slice(11, 13)));
+
+resetFetch();
+const waApproved = setStatus('WA Consent', 'APPROVED');
+check('approving a consented team sends a message',
+  waApproved.notification && waApproved.notification.state === 'SENT',
+  JSON.stringify(waApproved.notification));
+
+const call = fetchCalls[0];
+const sentBody = JSON.parse(call.options.payload);
+check('posts to the configured phone number id',
+  new RegExp('/' + WA_PHONE_ID + '/messages$').test(call.url), call.url);
+check('uses the approved template for approval',
+  sentBody.type === 'template' && sentBody.template.name === 'qqsgp_team_approved',
+  JSON.stringify(sentBody.template && sentBody.template.name));
+check('addresses the leader in E.164 form', sentBody.to === '917075593104', sentBody.to);
+check('passes leader, team and registration id in order',
+  sentBody.template.components[0].parameters.length === 3 &&
+  sentBody.template.components[0].parameters[0].text === 'PHANTOM' &&
+  sentBody.template.components[0].parameters[1].text === 'WA Consent' &&
+  sentBody.template.components[0].parameters[2].text.length > 10,
+  JSON.stringify(sentBody.template.components[0].parameters));
+check('the access token never leaves the Authorization header',
+  call.options.headers.Authorization === 'Bearer ' + WA_KEY &&
+  JSON.stringify(sentBody).indexOf(WA_KEY) === -1);
+
+const sentRow = notifFor('WA Consent')[0];
+check('the provider message id is stored',
+  /^wamid\./.test(String(sentRow[9])), String(sentRow[9]));
+check('the sent body is kept for the audit trail',
+  String(sentRow[8]).indexOf('congratulations') !== -1);
+
+/* --- duplicates ------------------------------------------------------- */
+
+resetFetch();
+const sameAgain = adminCall({
+  action: 'status', key: adminKey,
+  id: recordFor('WA Consent').id, status: 'APPROVED', expectedStatus: 'APPROVED'
+});
+check('the same status is never sent twice',
+  sameAgain.notification.duplicate === true && fetchCalls.length === 0,
+  JSON.stringify(sameAgain.notification));
+
+/* --- failure states --------------------------------------------------- */
+
+registerTeam('WA Provider Says No', true);
+resetFetch();
+queueFetch({
+  code: 400,
+  body: JSON.stringify({ error: { message: 'Template not found', code: 132001 } })
+});
+const waRejected = setStatus('WA Provider Says No', 'APPROVED');
+check('a provider rejection is recorded as FAILED',
+  waRejected.notification.state === 'FAILED' && /Template not found/.test(waRejected.notification.error),
+  JSON.stringify(waRejected.notification));
+check('a failed notification never rolls the status back',
+  waRejected.record.status === 'APPROVED', waRejected.record.status);
+
+registerTeam('WA Lost Response', true);
+resetFetch();
+queueFetch({ throws: 'socket hang up' });
+const uncertain = setStatus('WA Lost Response', 'APPROVED');
+check('a lost answer is UNCERTAIN, not "sent"',
+  uncertain.notification.state === 'UNCERTAIN', JSON.stringify(uncertain.notification));
+
+const unsafeRetry = adminCall({ action: 'notif-retry', key: adminKey, id: uncertain.notification.id });
+check('an uncertain message is not blindly resent',
+  unsafeRetry.ok === false && unsafeRetry.code === 'UNCERTAIN', JSON.stringify(unsafeRetry));
+
+/* --- retry ------------------------------------------------------------ */
+
+resetFetch();
+const retried = adminCall({ action: 'notif-retry', key: adminKey, id: waRejected.notification.id, force: true });
+check('a failed message can be retried',
+  retried.ok === true && retried.notification.state === 'SENT', JSON.stringify(retried));
+check('the retry increments the attempt count',
+  retried.notification.attempts === 2, String(retried.notification.attempts));
+
+const alreadySent = adminCall({ action: 'notif-retry', key: adminKey, id: waApproved.notification.id, force: true });
+check('a message the provider accepted is never resent',
+  alreadySent.ok === false && alreadySent.code === 'ALREADY_SENT', JSON.stringify(alreadySent));
+
+const skippedRetry = adminCall({ action: 'notif-retry', key: adminKey, id: skipped[0], force: true });
+check('a skipped notification cannot be retried', skippedRetry.ok === false);
+
+/* --- webhook / delivery receipts -------------------------------------- */
+
+const handshake = sandbox.doGet({
+  parameter: {
+    action: 'webhook', 'hub.mode': 'subscribe',
+    'hub.verify_token': WA_VERIFY, 'hub.challenge': '99887766'
+  }
+});
+check('the webhook answers Meta with the raw challenge',
+  handshake.getContent() === '99887766', handshake.getContent());
+
+const badHandshake = sandbox.doGet({
+  parameter: { action: 'webhook', 'hub.verify_token': 'wrong-token', 'hub.challenge': 'x' }
+});
+check('a wrong verify token is refused',
+  badHandshake.getContent() === 'forbidden', badHandshake.getContent());
+
+function webhook(statusValue, options) {
+  const opts = options || {};
+  const payload = {
+    entry: [{
+      changes: [{
+        value: {
+          statuses: [{
+            id: opts.id || String(sentRow[9]),
+            status: statusValue,
+            errors: opts.errors
+          }]
+        }
+      }]
+    }]
+  };
+  return JSON.parse(sandbox.doPost({
+    parameter: { action: 'webhook', k: opts.k === undefined ? WA_VERIFY : opts.k },
+    postData: { contents: JSON.stringify(payload) }
+  }).getContent());
+}
+
+check('an unauthenticated webhook call is refused',
+  webhook('delivered', { k: 'not-the-token' }).ok === false);
+
+check('a delivered event is recorded', webhook('delivered').updated === 1);
+check('the row now says DELIVERED', String(notifFor('WA Consent')[0][10]) === 'DELIVERED',
+  String(notifFor('WA Consent')[0][10]));
+
+check('a read event is recorded', webhook('read').updated === 1);
+check('the row now says READ', String(notifFor('WA Consent')[0][10]) === 'READ');
+
+check('a late delivered event does not undo read', webhook('delivered').updated === 0);
+check('the row stays READ', String(notifFor('WA Consent')[0][10]) === 'READ');
+
+check('an unknown message id is ignored',
+  webhook('read', { id: 'wamid.NOT-OURS' }).updated === 0);
+
+check('a failed event carries the provider reason',
+  (function () {
+    // This row was retried successfully, so it has a provider id to match.
+    const target = notifFor('WA Provider Says No')[0];
+    const body = {
+      entry: [{
+        changes: [{
+          value: { statuses: [{ id: String(target[9]), status: 'failed', errors: [{ title: 'Recipient blocked', detail: 'not on WhatsApp' }] }] }
+        }]
+      }]
+    };
+    const res = JSON.parse(sandbox.doPost({
+      parameter: { action: 'webhook', k: WA_VERIFY },
+      postData: { contents: JSON.stringify(body) }
+    }).getContent());
+    const after = notifFor('WA Provider Says No')[0];
+    return res.updated === 1 && String(after[10]) === 'FAILED' && /blocked/i.test(String(after[13]));
+  })());
+
+/* --- announcements ---------------------------------------------------- */
+
+registerTeam('WA Rejected Team', true);
+resetFetch();
+setStatus('WA Rejected Team', 'REJECTED');
+resetFetch();
+
+const preview = adminCall({
+  action: 'announce-preview', key: adminKey,
+  audience: 'APPROVED', message: 'Room details will be shared here at 6 PM.'
+});
+check('the preview reports how many teams would receive it',
+  preview.ok === true && preview.count >= 2, JSON.stringify(preview));
+check('the preview reports teams blocked by consent',
+  typeof preview.blocked.noConsent === 'number', JSON.stringify(preview.blocked));
+check('preparing an announcement sends nothing', fetchCalls.length === 0);
+
+const rejectedPreview = adminCall({
+  action: 'announce-preview', key: adminKey,
+  audience: 'SELECTED', ids: [recordFor('WA Rejected Team').id],
+  message: 'This must never reach a rejected team.'
+});
+check('a rejected team cannot be announced to',
+  rejectedPreview.ok === true && rejectedPreview.count === 0, JSON.stringify(rejectedPreview));
+
+const sentAnnouncement = adminCall({ action: 'announce-send', key: adminKey, token: preview.token });
+check('the announcement reaches each eligible recipient',
+  sentAnnouncement.ok === true && sentAnnouncement.sent === preview.count,
+  JSON.stringify(sentAnnouncement));
+check('each announcement message is one notification row',
+  notifRows().filter(r => String(r[5]) === 'ANNOUNCEMENT').length === preview.count,
+  String(notifRows().filter(r => String(r[5]) === 'ANNOUNCEMENT').length));
+
+resetFetch();
+const repeatAnnouncement = adminCall({ action: 'announce-send', key: adminKey, token: preview.token });
+check('sending the same preview twice creates no duplicates',
+  repeatAnnouncement.ok === true && repeatAnnouncement.sent === 0 &&
+  repeatAnnouncement.duplicate === preview.count && fetchCalls.length === 0,
+  JSON.stringify(repeatAnnouncement));
+
+// A hasty preview -> send -> preview -> send must not message anyone twice:
+// inside the window the same announcement resolves to the same ids.
+const secondPreview = adminCall({
+  action: 'announce-preview', key: adminKey,
+  audience: 'APPROVED', message: 'Room details will be shared here at 6 PM.'
+});
+const secondSend = adminCall({ action: 'announce-send', key: adminKey, token: secondPreview.token });
+check('composing the same announcement again does not resend it',
+  secondSend.ok === true && secondSend.sent === 0 && secondSend.duplicate === secondPreview.count,
+  JSON.stringify(secondSend));
+
+const otherPreview = adminCall({
+  action: 'announce-preview', key: adminKey,
+  audience: 'APPROVED', message: 'Reporting time has moved to 5 PM.'
+});
+resetFetch();
+const otherSend = adminCall({ action: 'announce-send', key: adminKey, token: otherPreview.token });
+check('a genuinely new announcement is still delivered',
+  otherSend.sent === otherPreview.count && fetchCalls.length === otherPreview.count,
+  JSON.stringify(otherSend));
+
+const unknownToken = adminCall({ action: 'announce-send', key: adminKey, token: 'z'.repeat(22) });
+check('an unknown preview token cannot send anything',
+  unknownToken.ok === false && unknownToken.code === 'EXPIRED', JSON.stringify(unknownToken));
+
+const emptyMessage = adminCall({ action: 'announce-preview', key: adminKey, audience: 'APPROVED', message: '   ' });
+check('an empty announcement is refused', emptyMessage.ok === false && emptyMessage.code === 'MESSAGE');
+
+/* --- log -------------------------------------------------------------- */
+
+const notifLog = adminCall({ action: 'notif-list', key: adminKey, state: 'ALL' });
+check('the notification log lists rows with their states',
+  notifLog.ok === true && notifLog.total > 0 && typeof notifLog.counts.SENT === 'number',
+  JSON.stringify(notifLog.counts));
+check('the log never carries the access token',
+  JSON.stringify(notifLog).indexOf(WA_KEY) === -1);
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail === 0 ? 0 : 1);

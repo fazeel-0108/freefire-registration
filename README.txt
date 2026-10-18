@@ -6,10 +6,17 @@ FILES
 index.html            Main registration page
 style.css             Premium UI
 script.js             Form validation + submission + live counter
-apps-script.js        Google Sheets backend
+rules.html            Tournament rules (+ rules.css, rules.js)
+admin.html            Organiser dashboard (+ admin.css, admin.js)
+apps-script.js        Google Sheets backend + admin API + WhatsApp API
 logo.png              College emblem (transparent background)
 favicon.png           Browser tab icon
 verify-apps-script.js Test harness for apps-script.js (node only)
+
+DOCS
+----
+ADMIN.md              Dashboard deployment, authentication, security checklist
+WHATSAPP.md           WhatsApp Cloud API setup, templates, webhook, limits
 
 HOW TO CONNECT IT
 -----------------
@@ -59,10 +66,25 @@ header row and first two columns, column widths, a department dropdown,
 green/white row stripes and light row separators. A player whose WhatsApp
 number appears in two different teams is highlighted in red.
 
+ORGANISER DASHBOARD
+-------------------
+admin.html reads and changes the same sheet through POST ?action=admin. It is
+protected by a dashboard key that lives in Script Properties: run setupAdminKey()
+once in the editor and paste the value it prints into the page. See ADMIN.md.
+
+WHATSAPP
+--------
+Optional. Approving, rejecting or waitlisting a team can send the leader an
+official WhatsApp Cloud API message, and the dashboard can send announcements.
+It is off until the Script Properties in WHATSAPP.md are filled in; nothing is
+ever sent without the team's consent. Accepted by the provider is NOT the same
+as delivered - delivery and read states only appear once the webhook is set up.
+
 IMPORTANT
 ---------
 Do not put Google account passwords, API keys, or private credentials in
-HTML/CSS/JavaScript. The Google Apps Script Web App is the backend.
+HTML/CSS/JavaScript. The Google Apps Script Web App is the backend; WhatsApp
+tokens live in Script Properties, never in the repository.
 
 WHAT YOU RECEIVE
 ----------------

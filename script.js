@@ -26,6 +26,10 @@ const statTeams = document.getElementById("statTeams");
 const statPlayers = document.getElementById("statPlayers");
 const statTeamsNote = document.getElementById("statTeamsNote");
 
+const regStatusBox = document.getElementById("regStatusBox");
+const regStatus = document.getElementById("regStatus");
+const regStatusNote = document.getElementById("regStatusNote");
+
 
 /* ------------------------------------------------------------------
    LIVE REGISTRATION COUNTER
@@ -97,6 +101,38 @@ function renderStats(data) {
       ? data.slotsLeft + " slot" + (data.slotsLeft === 1 ? "" : "s") + " left of " + data.capacity
       : STAT_TEAMS_NOTE;
   }
+
+  renderRegStatus(data);
+}
+
+/*
+  Open / closed is read from the backend, never invented: the stats endpoint
+  reports capacity and slotsLeft, and a capacity of 0 means the organisers have
+  not set a limit at all (the form still accepts entries). If the numbers are
+  missing the strip stays silent rather than promising a status.
+*/
+function renderRegStatus(data) {
+  if (!regStatusBox || !regStatus) return;
+
+  const capacity = typeof data.capacity === "number" ? data.capacity : null;
+  const slotsLeft = typeof data.slotsLeft === "number" ? data.slotsLeft : null;
+  if (capacity === null) return;
+
+  const open = capacity === 0 || (slotsLeft !== null && slotsLeft > 0);
+
+  regStatus.classList.toggle("is-open", open);
+  regStatus.classList.toggle("is-closed", !open);
+  regStatus.innerHTML = "<i aria-hidden=\"true\"></i>" +
+    (open ? "Registration open" : "Registration closed");
+
+  if (regStatusNote) {
+    if (!open) regStatusNote.textContent = "All slots are taken";
+    else if (capacity > 0 && slotsLeft !== null) {
+      regStatusNote.textContent = slotsLeft + " of " + capacity + " slots left";
+    } else regStatusNote.textContent = "No team limit set";
+  }
+
+  regStatusBox.hidden = false;
 }
 
 function markStatsOffline() {
@@ -106,6 +142,8 @@ function markStatsOffline() {
     el.dataset.value = "0";
   });
   if (statTeamsNote) statTeamsNote.textContent = "Updates automatically";
+  // No answer from the server means no open/closed claim on the hero either.
+  if (regStatusBox) regStatusBox.hidden = true;
 }
 
 /* Apps Script pays a cold-start cost on the first request after a deploy, and a
@@ -375,6 +413,11 @@ form.addEventListener("submit", async (event) => {
     return;
   }
 
+  // Optional WhatsApp opt-in. Only a ticked box counts, and the server stores
+  // the value with a timestamp so an organiser can prove when it was given.
+  const consentBox = document.getElementById("whatsappConsent");
+  const whatsappConsent = !!(consentBox && consentBox.checked);
+
   const data = {
     submittedAt: new Date().toISOString(),
     teamName,
@@ -382,6 +425,8 @@ form.addEventListener("submit", async (event) => {
     confirmed: true,
     leaderName: members[0].name,
     leaderWhatsApp: members[0].whatsapp,
+    whatsappConsent,
+    consentAt: whatsappConsent ? new Date().toISOString() : "",
     members
   };
 
