@@ -8,7 +8,12 @@
   ---------------------
   • Receives team registrations from the website (doPost).
   • Stores every team as one clean row in the "Registrations" sheet.
-  • Serves live counters to the website (doGet ?action=stats).
+  • Runs the verified online payment: YouPI PG sessions, server-side status
+    reads with the merchant key, and a review queue for payments the gateway
+    could not confirm strongly enough.
+  • Keeps the entry fee in the "Settings" tab and snapshots it per team.
+  • Serves live counters and the public fee (doGet ?action=stats / config).
+  • Serves the organiser dashboard: accounts, audit, notifications, matches.
   • Formats the sheet automatically so it looks organised, not messy.
 
   SETUP (do this once)
@@ -23,6 +28,10 @@
      (Use "New version" on the SAME deployment so the website URL
       stays the same and you do not have to edit script.js.)
   7. Open the sheet and reload it. The "Tournament" menu appears.
+
+  Online payment stays OFF until the YouPI Script Properties exist, and cash
+  registrations keep working meanwhile. See PAYMENTS.md for the properties,
+  the verification model and the honest limits of a self-hosted gateway.
 
   IMPORTANT
   ---------
@@ -77,19 +86,10 @@ var CONFIG = {
   // copied onto that row, so a later change never rewrites an older team's fee.
   TEAM_FEE: 100,
   // --- Online payments ---------------------------------------------
-  // Which gateway is used is a deployment decision, held in Script Properties
-  // like every other credential. YouPI PG is the default; 'razorpay' opts into
-  // the fallback adapter.
-  PAYMENT_PROVIDER_PROPERTY: 'payment_provider',
-
-  // Razorpay credentials live in Script Properties, never in this file, the
-  // repository or the published site. See PAYMENTS.md for the exact setup.
-  RAZORPAY_KEY_ID_PROPERTY: 'razorpay_key_id',
-  RAZORPAY_KEY_SECRET_PROPERTY: 'razorpay_key_secret',
-  RAZORPAY_WEBHOOK_SECRET_PROPERTY: 'razorpay_webhook_secret',
-  RAZORPAY_API_BASE: 'https://api.razorpay.com/v1',
-
-  // YouPI PG (self-hosted) credentials. Same rules: Script Properties only.
+  // YouPI PG is the only online gateway. Its credentials live in Script
+  // Properties, never in this file, the repository or the published site.
+  // See PAYMENTS.md for the exact setup and the honest limits of its
+  // verification.
   // The merchant key is the merchant's webhook secret, which YouPI also accepts
   // as X-Merchant-Key on the merchant API. It never reaches the browser.
   YOUPI_BASE_URL_PROPERTY: 'youpi_base_url',
@@ -311,9 +311,9 @@ function doPost(e) {
     }
   }
 
-  // Verified online payment. The browser can open an order, ask about it and
+  // Verified online payment. The browser can open a session, ask about it and
   // cancel it; it can never tell the server that money arrived. Only the
-  // provider's own API answer can do that (see verifyRazorpayPayment_).
+  // gateway's own API answer can do that (see verifyYoupiPayment_).
   if (route === 'payorder') {
     try {
       return jsonResponse_(publicPaymentOrder_(e));
@@ -338,9 +338,9 @@ function doPost(e) {
     }
   }
 
-  // The provider's callback is a doorbell, not evidence. Its body is read for
-  // ids only, then thrown away: the payment is re-fetched from Razorpay with
-  // our secret key before a single cell is written.
+  // The gateway's callback is a doorbell, not evidence. Its body is read for
+  // ids only, then thrown away: the session is re-fetched from YouPI with our
+  // merchant key before a single cell is written.
   if (route === 'paywebhook') {
     try {
       return jsonResponse_(publicPaymentWebhook_(e));
@@ -2543,7 +2543,7 @@ function findRowById_(sheet, id) {
  * a second state, and a PAID row can never be dragged back to pending by the
  * team that already paid.
  *//* ================================================================
-   VERIFIED ONLINE PAYMENTS (RAZORPAY or YOUPI PG)
+   VERIFIED ONLINE PAYMENTS (YOUPI PG)
    ----------------------------------------------------------------
    The old online flow was a claim dressed up as automation: the team typed
    a reference, the row said PAID, and nothing had checked the money. This
@@ -2574,12 +2574,10 @@ function findRowById_(sheet, id) {
        arrived by observing bank SMS / Gmail alerts and reports a
        verificationLevel; anything below the configured level is held for an
        organiser instead of registering a team.
-     * RAZORPAY (opt-in) - order + single-use UPI QR, shown on the page.
-
-   Neither provider's signature header can be read by Apps Script, so both
-   callbacks are treated as doorbells: the proof is always a fresh API answer,
-   fetched over TLS with the merchant secret. A proxy is only needed if
-   signature-level checking is required as well.
+   YouPI's signature header cannot be read by Apps Script, so its callback is
+   treated as a doorbell: the proof is always a fresh API answer, fetched over
+   TLS with the merchant secret. A proxy is only needed if signature-level
+   checking is required as well.
    ================================================================ */
 
 var SETTINGS_HEADERS = ['Key', 'Value', 'Updated At', 'Updated By'];
@@ -2685,20 +2683,19 @@ function saveEntryFee_(fee, actor) {
 }
 
 function publicConfig_() {
-  var provider = paymentProvider_();
   return {
     ok: true,
     fee: entryFee_(),
     currency: CONFIG.PAYMENT_CURRENCY,
-    provider: provider,
-    // The page must not offer a payment it cannot verify. When the provider is
-    // not configured the online button is replaced by a plain explanation and
-    // cash still works.
-    online: paymentOnline_(),
+    provider: 'YOUPI',
+    // The page must not offer a payment it cannot verify. Until the merchant
+    // instance is configured the online button is replaced by a plain
+    // explanation and cash still works.
+    online: youpiConfigured_(),
     // What the page may honestly say about the online path.
-    hosted: provider === 'YOUPI',
-    label: provider === 'YOUPI' ? 'YouPI PG' : 'Razorpay',
-    minVerification: provider === 'YOUPI' ? youpiMinVerification_() : 0,
+    hosted: true,
+    label: 'YouPI PG',
+    minVerification: youpiMinVerification_(),
     generatedAt: new Date().toISOString()
   };
 }
@@ -2715,30 +2712,6 @@ function propertyOr_(name) {
 
 function trimSlash_(value) {
   return cleanText_(value).replace(/\/+$/, '');
-}
-
-/**
- * Which gateway this deployment uses. The Script Property wins; anything
- * unrecognised stays on Razorpay instead of silently disabling payments.
- */
-/**
- * Which gateway this deployment uses. YouPI PG is the intended gateway for
- * this event; Razorpay remains available as an explicitly configured fallback
- * (`payment_provider=razorpay`) because YouPI needs a host and an observer
- * phone that GitHub Pages and Apps Script cannot provide.
- */
-function paymentProvider_() {
-  var raw = cleanText_(propertyOr_(CONFIG.PAYMENT_PROVIDER_PROPERTY)).toLowerCase();
-  return raw === 'razorpay' ? 'RAZORPAY' : 'YOUPI';
-}
-
-function paymentOnline_() {
-  return paymentProvider_() === 'YOUPI' ? youpiConfigured_() : razorpayConfigured_();
-}
-
-function razorpayConfigured_() {
-  return !!(propertyOr_(CONFIG.RAZORPAY_KEY_ID_PROPERTY) &&
-           propertyOr_(CONFIG.RAZORPAY_KEY_SECRET_PROPERTY));
 }
 
 /* ------------------------------ YouPI PG ------------------------------ */
@@ -2861,57 +2834,6 @@ function youpiCreatePayment_(token, teamName, fee, expires) {
   };
 }
 
-/**
- * One call to Razorpay. The key secret is used here and nowhere else; it is
- * never written to a sheet, a log line or a response.
- */
-function razorpayCall_(method, path, payload) {
-  var keyId = propertyOr_(CONFIG.RAZORPAY_KEY_ID_PROPERTY);
-  var keySecret = propertyOr_(CONFIG.RAZORPAY_KEY_SECRET_PROPERTY);
-  if (!keyId || !keySecret) {
-    return { ok: false, code: 'NOT_CONFIGURED', error: 'Online payment is not configured yet.' };
-  }
-
-  var options = {
-    method: method,
-    contentType: 'application/json',
-    muteHttpExceptions: true,
-    headers: {
-      Authorization: 'Basic ' + Utilities.base64Encode(keyId + ':' + keySecret)
-    }
-  };
-  if (payload) options.payload = JSON.stringify(payload);
-
-  var response;
-  try {
-    response = UrlFetchApp.fetch(CONFIG.RAZORPAY_API_BASE + path, options);
-  } catch (error) {
-    return { ok: false, code: 'NETWORK', error: 'The payment provider could not be reached.' };
-  }
-
-  var code = 0;
-  var text = '';
-  try {
-    code = response.getResponseCode();
-    text = response.getContentText();
-  } catch (ignored) {}
-
-  var body = null;
-  try { body = text ? JSON.parse(text) : null; } catch (ignored) {}
-
-  if (code < 200 || code >= 300) {
-    return {
-      ok: false,
-      code: 'PROVIDER',
-      status: code,
-      error: (body && body.error && (body.error.description || body.error.reason)) ||
-        ('The payment provider returned ' + code + '.')
-    };
-  }
-
-  return { ok: true, status: code, body: body || {} };
-}
-
 /* ------------------------------ drafts ------------------------------ */
 
 function draftSheet_() {
@@ -2967,7 +2889,7 @@ function draftFromValues_(row) {
     paidAmount: Number(row[DCOL.PAID_AMOUNT - 1]) || 0,
     registrationId: cleanText_(row[DCOL.REG - 1]),
     checkedAt: row[DCOL.CHECKED - 1],
-    provider: cleanText_(row[DCOL.PROVIDER - 1]) || 'RAZORPAY',
+    provider: cleanText_(row[DCOL.PROVIDER - 1]) || 'YOUPI',
     checkoutUrl: cleanText_(row[DCOL.CHECKOUT - 1]),
     verification: cleanText_(row[DCOL.VERIFICATION - 1])
   };
@@ -2997,7 +2919,7 @@ function findDraft_(sheet, token) {
 
 /** Finds a draft by one of the server-generated ids. Never by anything the
  *  browser or a callback body can invent on its own: these ids only exist
- *  because we created them at Razorpay. */
+ *  because YouPI created them for a session we opened. */
 function findDraftByProviderId_(sheet, field, value) {
   if (!value) return null;
   var drafts = allDrafts_(sheet);
@@ -3012,8 +2934,8 @@ function saveDraft_(draft) {
   var row = [
     draft.token, new Date(), draft.expiresAt, draft.teamName, draft.department,
     JSON.stringify(draft.members), draft.consent ? 'YES' : 'NO', draft.fee,
-    draft.currency, draft.orderId, draft.qrId, draft.qrImageUrl, DRAFT.OPEN,
-    '', '', '', '', draft.provider || paymentProvider_(), draft.checkoutUrl || '', ''
+    draft.currency, draft.orderId, '', '', DRAFT.OPEN,
+    '', '', '', '', 'YOUPI', draft.checkoutUrl || '', ''
   ];
   var target = sheet.getLastRow() + 1;
   sheet.getRange(target, DCOL.CREATED).setNumberFormat('dd mmm yyyy, hh:mm AM/PM');
@@ -3070,7 +2992,7 @@ function openDraftForTeam_(sheet, teamName) {
  * of a single-use UPI QR for exactly that amount.
  */
 function publicPaymentOrder_(e) {
-  if (!paymentOnline_()) {
+  if (!youpiConfigured_()) {
     return {
       ok: false,
       code: 'PAYMENT_OFFLINE',
@@ -3124,9 +3046,8 @@ function publicPaymentOrder_(e) {
       token: open.token,
       amount: open.fee,
       currency: open.currency || CONFIG.PAYMENT_CURRENCY,
-      provider: open.provider || paymentProvider_(),
-      hosted: (open.provider || paymentProvider_()) === 'YOUPI',
-      qrImageUrl: open.qrImageUrl,
+      provider: open.provider || 'YOUPI',
+      hosted: true,
       checkoutUrl: open.checkoutUrl,
       expiresAt: open.expiresAt instanceof Date ? open.expiresAt.toISOString() : ''
     };
@@ -3151,55 +3072,16 @@ function publicPaymentOrder_(e) {
 
   var token = newPaymentToken_();
   var expires = new Date(new Date().getTime() + CONFIG.PAYMENT_DRAFT_TTL_MINUTES * 60 * 1000);
-  var amountPaise = Math.round(fee * 100);
-  var provider = paymentProvider_();
 
-  var orderId = '';
-  var qrId = '';
-  var qrImageUrl = '';
-  var checkoutUrl = '';
-  var paymentId = '';
-
-  if (provider === 'YOUPI') {
-    var created = youpiCreatePayment_(token, team.teamName, fee, expires);
-    if (!created.ok) {
-      orgAudit_(PAY_ACTOR, 'payment-open-failed', token,
-        'youpi create failed: ' + cleanText_(created.error), 'failed');
-      return { ok: false, code: 'PROVIDER', error: 'The payment could not be started. Please try again.' };
-    }
-    orderId = created.orderId;
-    paymentId = created.paymentId;
-    checkoutUrl = created.checkoutUrl;
-  } else {
-    var order = razorpayCall_('POST', '/orders', {
-      amount: amountPaise,
-      currency: CONFIG.PAYMENT_CURRENCY,
-      receipt: token.slice(0, 40),
-      notes: { token: token, team: cleanText_(team.teamName).slice(0, 200), purpose: 'QQSGP entry fee' }
-    });
-    if (!order.ok) {
-      return { ok: false, code: 'PROVIDER', error: 'The payment could not be started. Please try again.' };
-    }
-    orderId = cleanText_(order.body && order.body.id);
-
-    var qr = razorpayCall_('POST', '/payments/qr_codes', {
-      type: 'upi_qr',
-      usage: 'single_use',
-      fixed_amount: true,
-      payment_amount: amountPaise,
-      description: 'QQSGP entry fee - ' + cleanText_(team.teamName).slice(0, 60),
-      close_by: Math.floor(expires.getTime() / 1000),
-      notes: { order_id: orderId, token: token }
-    });
-
-    if (!qr.ok) {
-      orgAudit_(PAY_ACTOR, 'payment-open-failed', orderId, 'qr create failed: ' + cleanText_(qr.error), 'failed');
-      return { ok: false, code: 'PROVIDER', error: 'The payment QR could not be created. Please try again.' };
-    }
-
-    qrId = cleanText_(qr.body && qr.body.id);
-    qrImageUrl = cleanText_(qr.body && qr.body.image_url);
+  var created = youpiCreatePayment_(token, team.teamName, fee, expires);
+  if (!created.ok) {
+    orgAudit_(PAY_ACTOR, 'payment-open-failed', token,
+      'youpi create failed: ' + cleanText_(created.error), 'failed');
+    return { ok: false, code: 'PROVIDER', error: 'The payment could not be started. Please try again.' };
   }
+  var orderId = created.orderId;
+  var paymentId = created.paymentId;
+  var checkoutUrl = created.checkoutUrl;
 
   var draft = {
     token: token,
@@ -3211,10 +3093,8 @@ function publicPaymentOrder_(e) {
     fee: fee,
     currency: CONFIG.PAYMENT_CURRENCY,
     orderId: orderId,
-    qrId: qrId,
-    qrImageUrl: qrImageUrl,
     checkoutUrl: checkoutUrl,
-    provider: provider
+    provider: 'YOUPI'
   };
   var draftRow = saveDraft_(draft);
 
@@ -3225,18 +3105,17 @@ function publicPaymentOrder_(e) {
     setDraftRow_(draftSheet, draftRow, { paymentId: paymentId });
   }
 
-  orgAudit_(PAY_ACTOR, 'payment-opened', orderId || qrId || paymentId,
-    team.teamName + ' · ₹' + fee + ' ' + CONFIG.PAYMENT_CURRENCY + ' · ' + provider +
-    (qrId ? ' · qr ' + qrId : '') + (paymentId ? ' · session ' + paymentId : ''), 'ok');
+  orgAudit_(PAY_ACTOR, 'payment-opened', orderId || paymentId,
+    team.teamName + ' · ₹' + fee + ' ' + CONFIG.PAYMENT_CURRENCY + ' · YOUPI' +
+    (paymentId ? ' · session ' + paymentId : ''), 'ok');
 
   return {
     ok: true,
     token: token,
     amount: fee,
     currency: CONFIG.PAYMENT_CURRENCY,
-    provider: provider,
-    hosted: provider === 'YOUPI',
-    qrImageUrl: qrImageUrl,
+    provider: 'YOUPI',
+    hosted: true,
     checkoutUrl: checkoutUrl,
     expiresAt: expires.toISOString()
   };
@@ -3244,51 +3123,6 @@ function publicPaymentOrder_(e) {
 
 /* ------------------------ checking a payment ------------------------ */
 
-/**
- * The only place that decides whether money really arrived.
- *
- * The browser, the webhook body and the sheet are all ignored for this: the
- * payment is fetched from Razorpay by id, and the answer must be captured, in
- * INR, for the fee snapshotted on the draft, against an order we created.
- */
-function verifyRazorpayPayment_(paymentId, draft) {
-  if (!paymentId) return { state: 'PENDING' };
-
-  var res = razorpayCall_('GET', '/payments/' + encodeURIComponent(paymentId));
-  if (!res.ok) return { state: 'PENDING', error: res.error };
-
-  var payment = res.body || {};
-  var status = cleanText_(payment.status).toLowerCase();
-  var captured = status === 'captured' || payment.captured === true;
-  if (!captured) return { state: 'PENDING', paymentStatus: status };
-
-  var amount = Number(payment.amount);
-  var currency = cleanText_(payment.currency).toUpperCase();
-
-  if (currency !== CONFIG.PAYMENT_CURRENCY) {
-    return { state: 'MISMATCH', reason: 'currency', paymentId: cleanText_(payment.id), amount: amount, currency: currency };
-  }
-  if (amount !== Math.round(Number(draft.fee) * 100)) {
-    return { state: 'MISMATCH', reason: 'amount', paymentId: cleanText_(payment.id), amount: amount, currency: currency };
-  }
-  if (payment.order_id && draft.orderId && cleanText_(payment.order_id) !== draft.orderId) {
-    return { state: 'MISMATCH', reason: 'order', paymentId: cleanText_(payment.id), amount: amount, currency: currency };
-  }
-
-  return {
-    state: 'PAID',
-    paymentId: cleanText_(payment.id) || paymentId,
-    amount: amount,
-    currency: currency,
-    orderId: cleanText_(payment.order_id) || draft.orderId,
-    method: cleanText_(payment.method) || 'upi'
-  };
-}
-
-/**
- * Looks at the QR's own payment list at Razorpay. A payment id is never taken
- * from a request body; this is the only source of one.
- */
 /**
  * YouPI's own answer about the session we opened, read with the merchant key.
  *
@@ -3358,26 +3192,7 @@ function verifyYoupiPayment_(draft) {
 }
 
 function latestDraftPayment_(draft) {
-  if ((draft.provider || paymentProvider_()) === 'YOUPI') return verifyYoupiPayment_(draft);
-  if (!draft.qrId) return { state: 'PENDING' };
-
-  var qr = razorpayCall_('GET', '/payments/qr_codes/' + encodeURIComponent(draft.qrId));
-  if (!qr.ok) return { state: 'PENDING', error: qr.error };
-
-  var payments = (qr.body && qr.body.payments) || [];
-  if (!payments.length) return { state: 'PENDING' };
-
-  var checked = 0;
-  for (var i = payments.length - 1; i >= 0 && checked < 3; i--) {
-    var entry = payments[i] || {};
-    var paymentId = cleanText_(entry.payment_id || entry.id);
-    if (!paymentId) continue;
-    checked++;
-    var result = verifyRazorpayPayment_(paymentId, draft);
-    if (result.state === 'PAID' || result.state === 'MISMATCH') return result;
-  }
-
-  return { state: 'PENDING' };
+  return verifyYoupiPayment_(draft);
 }
 
 /**
@@ -3465,16 +3280,13 @@ function finaliseVerifiedPayment_(draft, evidence) {
     }
 
     var verifiedAt = new Date();
-    var provider = cleanText_(evidence.provider) || fresh.provider || paymentProvider_();
+    var provider = cleanText_(evidence.provider) || fresh.provider || 'YOUPI';
     var level = evidence.verificationLevel === undefined || evidence.verificationLevel === ''
       ? ''
       : Number(evidence.verificationLevel);
-    var note = provider === 'YOUPI'
-      ? 'Verified by YouPI PG: session ' + evidence.paymentId + ', ₹' +
-        (paidAmount / 100) + ' ' + evidence.currency +
-        (level === '' ? '' : ', verification level ' + level + '/' + youpiMinVerification_())
-      : 'Verified by Razorpay: captured payment ' + evidence.paymentId +
-        ', ₹' + (paidAmount / 100) + ' ' + evidence.currency;
+    var note = 'Verified by YouPI PG: session ' + evidence.paymentId + ', ₹' +
+      (paidAmount / 100) + ' ' + evidence.currency +
+      (level === '' ? '' : ', verification level ' + level + '/' + youpiMinVerification_());
     if (manual) {
       note += ' Accepted by organiser ' + cleanText_(evidence.acceptedBy) +
         ' after manual check: ' + cleanText_(evidence.acceptedNote);
@@ -3546,7 +3358,7 @@ function finaliseVerifiedPayment_(draft, evidence) {
 
 /**
  * POST ?action=paystatus  { token }
- * The page polls this. Every answer is derived from Razorpay, not from the
+ * The page polls this. Every answer is derived from YouPI, not from the
  * timestamp of the last poll, so a refresh cannot invent a paid team.
  */
 function publicPaymentStatus_(e) {
@@ -3572,14 +3384,8 @@ function publicPaymentStatus_(e) {
   if (draft.status === DRAFT.UNPLACED) {
     return { ok: true, state: 'REVIEW', error: 'Your payment was received, but the team was not added automatically. An organiser will contact you.' };
   }
-  // A Razorpay QR is single-use and is closed at expiry, so there is nothing
-  // left to ask about. A YouPI session has its own window and a payment can
-  // land a few seconds after ours, so it is always asked before giving up.
-  var provider = draft.provider || paymentProvider_();
-  if (provider !== 'YOUPI' && draftExpired_(draft)) {
-    setDraftRow_(sheet, draft.row, { status: DRAFT.EXPIRED });
-    return { ok: true, state: 'EXPIRED' };
-  }
+  // A YouPI session has its own window and a payment can land a few seconds
+  // after ours, so it is always asked before giving up.
 
   var evidence = latestDraftPayment_(draft);
 
@@ -3655,12 +3461,10 @@ function publicPaymentCancel_(e) {
   if (draft.status !== DRAFT.OPEN) return { ok: true, state: draft.status };
 
   setDraftRow_(sheet, draft.row, { status: DRAFT.CANCELLED });
-  if ((draft.provider || paymentProvider_()) === 'YOUPI' && draft.paymentId) {
+  if (draft.paymentId) {
     youpiCall_('POST', '/api/v1/checkout/' + encodeURIComponent(draft.paymentId) + '/cancel', {});
-  } else if (draft.qrId) {
-    razorpayCall_('POST', '/payments/qr_codes/' + encodeURIComponent(draft.qrId) + '/close', {});
   }
-  orgAudit_(PAY_ACTOR, 'payment-cancelled', draft.orderId || draft.paymentId || draft.qrId, draft.teamName, 'cancelled');
+  orgAudit_(PAY_ACTOR, 'payment-cancelled', draft.orderId || draft.paymentId, draft.teamName, 'cancelled');
 
   return { ok: true, state: 'CANCELLED' };
 }
@@ -3706,27 +3510,7 @@ function publicPaymentWebhook_(e) {
     return { ok: true, state: yResult.ok ? 'PAID' : 'PENDING', duplicate: yResult.already === true };
   }
 
-  var qrEntity = payload.payload && payload.payload.qr_code && payload.payload.qr_code.entity;
-  var qrId = qrEntity ? cleanText_(qrEntity.id) : '';
-  var orderEntity = payload.payload && payload.payload.order && payload.payload.order.entity;
-  var orderId = orderEntity ? cleanText_(orderEntity.id) : '';
-  var paymentEntity = payload.payload && payload.payload.payment && payload.payload.payment.entity;
-  if (!orderId && paymentEntity && paymentEntity.order_id) orderId = cleanText_(paymentEntity.order_id);
-
-  if (!qrId && !orderId) return { ok: true, ignored: true };
-
-  var sheet = draftSheet_();
-  var draft = qrId ? findDraftByProviderId_(sheet, 'qrId', qrId) : null;
-  if (!draft && orderId) draft = findDraftByProviderId_(sheet, 'orderId', orderId);
-  if (!draft) return { ok: true, ignored: true };
-
-  if (draft.status === DRAFT.FINALISED) return { ok: true, duplicate: true };
-
-  var evidence = latestDraftPayment_(draft);
-  if (evidence.state !== 'PAID') return { ok: true, state: evidence.state || 'PENDING' };
-
-  var result = finaliseVerifiedPayment_(draft, evidence);
-  return { ok: true, state: result.ok ? 'PAID' : 'PENDING', duplicate: result.already === true };
+  return { ok: true, ignored: true };
 }
 
 /* ================================================================
@@ -4086,18 +3870,17 @@ function adminHandle_(e) {
  * about what a team owes.
  */
 function adminSettingsGet_() {
-  var provider = paymentProvider_();
   return {
     ok: true,
     fee: entryFee_(),
     currency: CONFIG.PAYMENT_CURRENCY,
-    provider: provider,
-    online: paymentOnline_(),
-    minVerification: provider === 'YOUPI' ? youpiMinVerification_() : 0,
+    provider: 'YOUPI',
+    online: youpiConfigured_(),
+    minVerification: youpiMinVerification_(),
     // Read-only facts the organiser needs to trust the dashboard: which
     // gateway is wired in, and whether it is actually reachable/configured.
-    hosted: provider === 'YOUPI',
-    gatewayHost: provider === 'YOUPI' ? youpiBaseUrl_() : 'api.razorpay.com'
+    hosted: true,
+    gatewayHost: youpiBaseUrl_()
   };
 }
 
@@ -4136,7 +3919,7 @@ function adminDraftsList_() {
       department: draft.department,
       fee: draft.fee,
       currency: draft.currency || CONFIG.PAYMENT_CURRENCY,
-      provider: draft.provider || 'RAZORPAY',
+      provider: draft.provider || 'YOUPI',
       orderId: draft.orderId,
       paymentId: draft.paymentId,
       paidAmount: draft.paidAmount,
@@ -4155,7 +3938,7 @@ function adminDraftsList_() {
     drafts: held.slice(0, 50),
     total: held.length,
     minVerification: youpiMinVerification_(),
-    provider: paymentProvider_()
+    provider: 'YOUPI'
   };
 }
 
@@ -4203,7 +3986,7 @@ function adminDraftResolve_(payload, actor) {
   }
 
   var amountPaise = Math.round((Number(draft.paidAmount) || Number(draft.fee)) * 100);
-  var provider = draft.provider || paymentProvider_();
+  var provider = draft.provider || 'YOUPI';
   var registered = finaliseVerifiedPayment_(draft, {
     state: 'PAID',
     manual: true,

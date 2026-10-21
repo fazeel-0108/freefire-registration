@@ -24,7 +24,6 @@ const payOnlineBtn = document.getElementById("payOnlineBtn");
 const payCashBtn = document.getElementById("payCashBtn");
 const payOnlinePanel = document.getElementById("payOnlinePanel");
 const payCashPanel = document.getElementById("payCashPanel");
-const payQr = document.getElementById("payQr");
 const payGateway = document.getElementById("payGateway");
 const payFrame = document.getElementById("payFrame");
 const payGatewayLink = document.getElementById("payGatewayLink");
@@ -309,15 +308,11 @@ let siteConfig = {
 };
 
 /**
- * Nothing about a previous attempt may survive on the payment panel: no stale
- * QR, and no gateway checkout page still loading behind a new one. The iframe
- * is emptied rather than hidden, so a cancelled attempt really stops.
+ * Nothing about a previous attempt may survive on the payment panel: no
+ * gateway checkout page still loading behind a new one. The iframe is emptied
+ * rather than hidden, so a cancelled attempt really stops.
  */
 function resetOnlineVisuals() {
-  if (payQr) {
-    payQr.hidden = true;
-    payQr.removeAttribute("src");
-  }
   if (payGateway) payGateway.hidden = true;
   if (payFrame) payFrame.removeAttribute("src");
   if (payGatewayLink) payGatewayLink.hidden = true;
@@ -547,13 +542,6 @@ async function startOnlinePayment() {
       showHostedCheckout(result.checkoutUrl);
       setPayStatus(
         "Pay on the secure payment page above. Your team is registered automatically once the gateway confirms the payment.",
-        "waiting"
-      );
-    } else if (result.qrImageUrl) {
-      payQr.src = result.qrImageUrl;
-      payQr.hidden = false;
-      setPayStatus(
-        "Scan the QR with any UPI app. Your team is registered automatically once the payment is confirmed.",
         "waiting"
       );
     } else {

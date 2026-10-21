@@ -273,7 +273,7 @@ WHATSAPP.md for the templates, the webhook and the consent rules.
 ## 9. Tests performed automatically
 
 `node verify-apps-script.js` runs the real `apps-script.js` against a mocked
-Apps Script runtime: **606 checks, all passing**. They cover the registration
+Apps Script runtime: **556 checks, all passing**. They cover the registration
 contract (2–4 players, duplicate team, shared phone, department list, counters,
 cache invalidation, error containment), the dashboard API (deny by default,
 key setup, wrong key, lockout and its expiry, listing, counts, opaque ids,
@@ -281,10 +281,10 @@ status change persistence, stale updates, unknown statuses, malformed ids,
 notes, markup rejection, note length, rejected teams leaving the public
 counters while keeping their row, CSV shape, filters, search, pagination,
 unknown/missing admin actions), the fee in Settings, the whole verified online
-payment path for **both gateways** (Razorpay QR and YouPI hosted checkout:
-forged callbacks, wrong amount, wrong order, duplicate callbacks, cancel,
-expiry, weak verification held for review, organiser accept/reject), and the
-review queue itself.
+payment path (YouPI hosted checkout: forged callbacks, wrong amount, wrong
+order, duplicate callbacks, cancel, expiry, weak verification held for review,
+organiser accept/reject), the removal of every Razorpay path, and the review
+queue itself.
 
 `node verify-approve.js` extracts the approval and WhatsApp helpers from the real
 `admin.js` and runs **54 checks** without a browser: Indian number
@@ -361,11 +361,10 @@ team of 2, 3 or 4 players all pay the same fee.
 | **Online** (gateway) | `ONLINE` / **`PAID`** — written by the backend the moment the gateway reports a confirmed payment for that session, in INR, for the exact fee snapshot | Nobody. The gateway's API answer is the proof; the row carries the order id, payment id, paid amount, currency, verification time and provider. With **YouPI**, only a payment at the required verification level (default 2 = bank SMS + Gmail) counts. |
 | **Cash** | `CASH` / **`PENDING`** | You, once the notes are in your hand — in the sheet on your phone, or from the dashboard. |
 
-The gateway is chosen by the `payment_provider` Script Property: `youpi`
-(default) or `razorpay` as a fallback. The **Tournament settings** panel shows
-which one is live, whether it is configured, and — for YouPI — the verification
-level it requires. Until it is configured, Online is offered as unavailable and
-Cash still works.
+YouPI PG is the only online gateway. The **Tournament settings** panel shows
+whether it is configured and the verification level it requires. Until it is
+configured, Online is offered as unavailable and Cash still works. Historical
+rows keep whatever provider they recorded; nothing rewrites them.
 
 A registration that simply claims `ONLINE` is refused by the backend. There is
 no "I have paid" button anywhere on the site, and a typed UTR proves nothing.

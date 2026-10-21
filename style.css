@@ -833,18 +833,6 @@ footer {
 
 .pay-btn-primary span { color: rgba(245,245,245,.78); }
 
-.pay-qr { display: grid; place-items: center; margin-bottom: 4px; }
-
-.pay-qr img {
-  display: block;
-  width: 240px;
-  max-width: 100%;
-  height: auto;
-  padding: 10px;
-  border-radius: 12px;
-  background: #fff;
-}
-
 /* The online panel is the QR and one line of state. No account details, no
    instructions, no "I have paid" button. */
 .pay-online { text-align: center; }
@@ -908,8 +896,6 @@ footer {
 
 /* The QR is the only image on the panel; a failed load must not leave a
    broken frame pretending to be a payment. */
-.pay-qr img[hidden] { display: none; }
-
 .pay-submit {
   width: 100%;
   padding: 13px;
@@ -976,7 +962,6 @@ footer {
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
   }
-  .pay-qr img { width: 220px; }
 }
 
 /* ------------------------------------------------------------------
@@ -1005,10 +990,6 @@ footer {
     letter-spacing: .1em;
   }
 }
-
-/* `hidden` must win over the display rule above: a missing QR image used to
-   leave a large white placeholder box in the dialog. */
-.pay-qr img[hidden] { display: none; }
 
 /* The fee step is a gate, not a receipt: say so before the buttons. */
 .pay-choice-note {

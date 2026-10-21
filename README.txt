@@ -22,7 +22,7 @@ DOCS
 ADMIN.md              Dashboard deployment, security checklist
 ORGANISERS.md         Organiser accounts, PIN sign-in, roles, sessions, limits
 WHATSAPP.md           WhatsApp Cloud API setup, templates, webhook, limits
-PAYMENTS.md           Verified online payment, Razorpay setup, YouPI evaluation
+PAYMENTS.md           Verified online payment, YouPI setup and limits
 
 HOW TO CONNECT IT
 -----------------
@@ -102,27 +102,28 @@ moment onto its row, so changing the price later never rewrites an old team.
 Nothing in the site or the backend hardcodes the amount.
 
   ONLINE  The page opens a payment session for exactly the live fee and shows
-          the gateway's own interface: a single-use UPI QR (Razorpay) or the
-          YouPI checkout page (self-hosted). The backend asks the gateway, with
-          the merchant secret, whether that session was paid; only a confirmed
-          payment in INR for the exact fee snapshot writes the row. It is
-          stored as ONLINE / PAID with the order id, payment id, amount,
-          currency, verification time and provider.
+          YouPI PG's own checkout page (self-hosted). The backend asks YouPI,
+          with the merchant key, whether that session was paid; only a
+          confirmed payment in INR for the exact fee snapshot, against that
+          session, writes the row. It is stored as ONLINE / PAID with the
+          order id, payment id, amount, currency, verification time and
+          provider.
           There is no "I have paid" button and a typed UTR is not accepted.
   CASH    The row is saved as CASH / PENDING and the team pays at the ground.
           You change it to PAID once the money is in your hand.
 
-Which gateway is used is one Script Property (payment_provider: youpi, the
-default, or razorpay as a fallback). Online payment is off until that provider's
-credentials exist; the page then says so and Cash still works.
+YouPI PG is the only online gateway in the code. Online payment is off until
+its Script Properties exist (youpi_base_url, youpi_merchant_id,
+youpi_merchant_key); the page then says so and Cash still works. Leftover
+Razorpay properties are ignored, and no Razorpay order can be created.
 
-With YouPI, a payment the gateway reports at a verification level below the
+A YouPI payment the gateway reports at a verification level below the
 configured minimum (default 2: bank SMS + Gmail) is NOT registered. It waits in
 the dashboard's "Payments to review" section, where an organiser accepts it
-with a note or rejects it. Razorpay's captured UPI payments need no such step.
+with a note or rejects it.
 
-Setup for both, the security model, the exact tests and a straight assessment
-of YouPI PG are in PAYMENTS.md.
+Setup, the security model, the exact tests and a straight assessment of
+YouPI PG are in PAYMENTS.md.
 
 upi-qr.png is the owner's original FamApp image, copied byte for byte. It is
 kept as the payment record, not shown on the page: FamApp draws it light-on-dark

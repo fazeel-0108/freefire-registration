@@ -396,16 +396,11 @@
               </div>
             </div>
 
-            <!-- Online payment. The only thing on this panel is the QR itself.
-                 There is deliberately no submit button: the team is registered
-                 by the server, from the provider's verified confirmation, never
-                 by a click here. -->
+            <!-- Online payment. The only thing on this panel is the gateway's
+                 own checkout. There is deliberately no submit button: the team
+                 is registered by the server, from the gateway's verified
+                 confirmation, never by a click here. -->
             <div class="pay-panel pay-online" id="payOnlinePanel" hidden>
-              <div class="pay-qr">
-                <img id="payQr"
-                     alt="UPI QR for the team entry fee — scan it with any UPI app"
-                     width="240" height="240" hidden>
-              </div>
               <!-- YouPI PG runs its own checkout page on the merchant's server.
                    It is shown as-is: this site does not draw, guess or imitate
                    the gateway's payment screen. -->

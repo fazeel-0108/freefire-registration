@@ -2140,222 +2140,27 @@ check('changing the fee is a guarded action',
   sandbox.ORG_ACTION_PERMISSION['settings-set'] === 'pay.update');
 adminCall({ action: 'settings-set', session: superSession, fee: 150 });
 
-/* --- configure the provider in Script Properties only --- */
+/* --- a Razorpay setting must not switch anything on any more --- */
 scriptProps.set('payment_provider', 'razorpay');
 scriptProps.set('razorpay_key_id', 'rzp_test_KEY');
 scriptProps.set('razorpay_key_secret', 'test_secret_value');
-check('online switches on once the provider is chosen and its keys exist',
-  publicConfig().online === true, JSON.stringify(publicConfig()));
 
-/* --- opening an order --- */
-resetFetch();
-queueJson({ id: 'order_ONLINE1', amount: 15000, currency: 'INR', status: 'created' });
-queueJson({ id: 'qr_ONLINE1', image_url: 'https://rzp.io/i/ONLINE1', status: 'active' });
+check('a Razorpay setting cannot switch online payment on',
+  publicConfig().online === false && publicConfig().provider === 'YOUPI', JSON.stringify(publicConfig()));
 
-const opened = postRoute('payorder', validPayload('Online Squad'));
-check('opening a payment returns a token, the live fee and the QR image',
-  opened.ok === true && typeof opened.token === 'string' && opened.token.length >= 16 &&
-  opened.amount === 150 && opened.qrImageUrl === 'https://rzp.io/i/ONLINE1',
-  JSON.stringify(opened));
-check('the provider was called twice: an order, then a QR', fetchCalls.length === 2 &&
-  /\/orders$/.test(fetchCalls[0].url) && /\/payments\/qr_codes$/.test(fetchCalls[1].url),
-  fetchCalls.map(c => c.url).join(', '));
-
-const orderBody = JSON.parse(fetchCalls[0].options.payload);
-check('the order is for the snapshot of the live fee',
-  orderBody.amount === 15000 && orderBody.currency === 'INR', JSON.stringify(orderBody));
-check('the order is authenticated with Basic auth',
-  /^Basic /.test(fetchCalls[0].options.headers.Authorization) &&
-  Buffer.from(fetchCalls[0].options.headers.Authorization.slice(6), 'base64').toString() === 'rzp_test_KEY:test_secret_value',
-  fetchCalls[0].options.headers.Authorization);
-
-const qrBody = JSON.parse(fetchCalls[1].options.payload);
-check('the QR is a single-use, fixed-amount UPI QR for exactly the fee',
-  qrBody.type === 'upi_qr' && qrBody.usage === 'single_use' &&
-  qrBody.fixed_amount === true && qrBody.payment_amount === 15000,
-  JSON.stringify(qrBody));
-check('the QR carries our order and draft token, not a name or VPA',
-  qrBody.notes && qrBody.notes.order_id === 'order_ONLINE1' &&
-  qrBody.notes.token === opened.token && !/vpa|upi_id/i.test(JSON.stringify(qrBody)));
-check('the key secret is never echoed to the browser',
-  JSON.stringify(opened).indexOf('test_secret_value') === -1);
-check('no registration row exists while the QR is open', countRows('Online Squad') === 0);
-
-/* --- opening a second QR for the same team --- */
-resetFetch();
-const reopened = postRoute('payorder', validPayload('Online Squad'));
-check('a team already paying resumes that QR instead of opening another',
-  reopened.ok === true && reopened.resumed === true && reopened.token === opened.token,
-  JSON.stringify(reopened));
-check('resuming costs no provider call', fetchCalls.length === 0);
-
-/* --- waiting --- */
-resetFetch();
-queueJson({ id: 'qr_ONLINE1', payments: [] });
-const waiting = postRoute('paystatus', { token: opened.token });
-check('an untouched QR stays PENDING', waiting.ok === true && waiting.state === 'PENDING', JSON.stringify(waiting));
-check('PENDING writes nothing to the sheet', countRows('Online Squad') === 0);
-
-/* --- forged callbacks --- */
-resetFetch();
-queueJson({ id: 'qr_UNKNOWN', payments: [] });
-const forgedCallback = postRoute('paywebhook', {
-  event: 'payment.captured',
-  payload: { payment: { entity: { id: 'pay_FAKE', order_id: 'order_FAKE', amount: 15000, currency: 'INR', status: 'captured' } } }
-});
-check('a callback naming an order we never created is ignored',
-  forgedCallback.ok === true && forgedCallback.ignored === true, JSON.stringify(forgedCallback));
-check('a forged callback creates no team', countRows('Online Squad') === 0);
-
-resetFetch();
-queueJson({ id: 'qr_ONLINE1', payments: [] });
-const forgedReal = postRoute('paywebhook', {
-  event: 'payment.captured',
-  payload: {
-    qr_code: { entity: { id: 'qr_ONLINE1' } },
-    payment: { entity: { id: 'pay_FAKE', amount: 15000, currency: 'INR', status: 'captured' } }
-  }
-});
-check('a callback with our QR id but no payment at the provider is refused',
-  forgedReal.ok === true && forgedReal.state !== 'PAID', JSON.stringify(forgedReal));
-check('our QR id alone cannot mark a team paid', countRows('Online Squad') === 0);
-
-/* --- a real payment for the wrong amount --- */
-resetFetch();
-queueJson({ id: 'order_ONLINE2', amount: 15000, currency: 'INR', status: 'created' });
-queueJson({ id: 'qr_ONLINE2', image_url: 'https://rzp.io/i/ONLINE2', status: 'active' });
-const shortOrder = postRoute('payorder', validPayload('Online Wrong Amount'));
-check('a second team can open its own QR', shortOrder.ok === true && shortOrder.token !== opened.token);
-
-resetFetch();
-queueJson({ id: 'qr_ONLINE2', payments: [{ payment_id: 'pay_SHORT' }] });
-queueJson({ id: 'pay_SHORT', status: 'captured', captured: true, amount: 100, currency: 'INR', order_id: 'order_ONLINE2' });
-const shortPaid = postRoute('paystatus', { token: shortOrder.token });
-check('a captured payment for the wrong amount is not accepted',
-  shortPaid.state === 'REVIEW', JSON.stringify(shortPaid));
-check('the wrong amount registers no team', countRows('Online Wrong Amount') === 0);
-check('the draft is kept for an organiser instead of being deleted',
-  draftRowFor(shortOrder.token).values[12] === 'MISMATCH', draftRowFor(shortOrder.token).values[12]);
-
-/* --- the real thing --- */
-resetFetch();
-queueJson({ id: 'qr_ONLINE1', payments: [{ payment_id: 'pay_OK1' }] });
-queueJson({
-  id: 'pay_OK1', status: 'captured', captured: true, amount: 15000,
-  currency: 'INR', order_id: 'order_ONLINE1', method: 'upi'
-});
-const paid = postRoute('paystatus', { token: opened.token });
-check('a verified captured payment registers the team',
-  paid.ok === true && paid.state === 'PAID' && paid.team === 'Online Squad', JSON.stringify(paid));
-check('exactly one row was written', countRows('Online Squad') === 1);
-
-const paidRow = sheetRowFor('Online Squad');
-check('the row is ONLINE / PAID',
-  String(paidRow[14]) === 'ONLINE' && String(paidRow[15]) === 'PAID', JSON.stringify(paidRow.slice(13, 20)));
-check('the fee came from the snapshot taken when the QR was opened',
-  Number(paidRow[13]) === 150, String(paidRow[13]));
-check('the order id is stored', String(paidRow[20]) === 'order_ONLINE1', String(paidRow[20]));
-check('the payment id is stored', String(paidRow[21]) === 'pay_OK1', String(paidRow[21]));
-check('the verified amount and currency are stored',
-  Number(paidRow[22]) === 150 && String(paidRow[23]) === 'INR',
-  JSON.stringify(paidRow.slice(22, 24)));
-check('the verification time is a real timestamp',
-  Object.prototype.toString.call(paidRow[24]) === '[object Date]');
-check('the provider is named', String(paidRow[25]) === 'RAZORPAY', String(paidRow[25]));
-check('the registration id is handed back',
-  typeof paid.registrationId === 'string' && paid.registrationId.length >= 10, paid.registrationId);
-check('the draft is marked FINALISED with its registration id',
-  draftRowFor(opened.token).values[12] === 'FINALISED' &&
-  String(draftRowFor(opened.token).values[15]) === paid.registrationId,
-  JSON.stringify(draftRowFor(opened.token).values.slice(12, 16)));
-
-const payAudit = adminCall({ action: 'audit-list', session: superSession, pageSize: 100 });
-const payActions = (payAudit.entries || []).map(e => e.action);
-check('the verified payment is in the audit trail', payActions.indexOf('payment-verified') !== -1, JSON.stringify(payActions.slice(0, 8)));
-check('the registration it created is too', payActions.indexOf('registration-created') !== -1);
-check('the audit names the payment id',
-  JSON.stringify(payAudit.entries).indexOf('pay_OK1') !== -1);
-check('the audit never contains the key secret',
-  JSON.stringify(payAudit.entries).indexOf('test_secret_value') === -1);
-
-/* --- the provider repeats itself --- */
-resetFetch();
-queueJson({ id: 'qr_ONLINE1', payments: [{ payment_id: 'pay_OK1' }] });
-queueJson({ id: 'pay_OK1', status: 'captured', captured: true, amount: 15000, currency: 'INR', order_id: 'order_ONLINE1' });
-const duplicateCallback = postRoute('paywebhook', {
-  event: 'qr_code.credited',
-  payload: { qr_code: { entity: { id: 'qr_ONLINE1' } }, payment: { entity: { id: 'pay_OK1' } } }
-});
-check('a repeated callback is answered without error', duplicateCallback.ok === true, JSON.stringify(duplicateCallback));
-check('a repeated callback does not add a second team', countRows('Online Squad') === 1);
-
-const paidAgain = postRoute('paystatus', { token: opened.token });
-check('polling after success keeps returning the same registration',
-  paidAgain.state === 'PAID' && paidAgain.registrationId === paid.registrationId, JSON.stringify(paidAgain));
-check('and still one row', countRows('Online Squad') === 1);
-
-/* --- the fee moves; old money must not follow it --- */
-adminCall({ action: 'settings-set', session: superSession, fee: 200 });
-check('raising the fee leaves an existing row alone',
-  Number(sheetRowFor('Online Squad')[13]) === 150, String(sheetRowFor('Online Squad')[13]));
-check('the page now quotes the new fee', publicConfig().fee === 200);
-
-const cashAtNewFee = post(Object.assign(validPayload('Fee Cash At 200'), { payment: { method: 'CASH' } }));
-check('a cash registration snapshots the new fee',
-  cashAtNewFee.ok === true && Number(sheetRowFor('Fee Cash At 200')[13]) === 200,
-  String(sheetRowFor('Fee Cash At 200')[13]));
-check('cash is still PENDING, never PAID',
-  String(sheetRowFor('Fee Cash At 200')[15]) === 'PENDING', String(sheetRowFor('Fee Cash At 200')[15]));
-
-/* --- cancelling and expiring --- */
-resetFetch();
-queueJson({ id: 'order_ONLINE3', amount: 20000, currency: 'INR', status: 'created' });
-queueJson({ id: 'qr_ONLINE3', image_url: 'https://rzp.io/i/ONLINE3', status: 'active' });
-const cancelledOrder = postRoute('payorder', validPayload('Online Cancel Me'));
-check('a third team opens a QR at the new fee', cancelledOrder.ok === true && cancelledOrder.amount === 200, JSON.stringify(cancelledOrder));
-
-resetFetch();
-queueJson({ id: 'qr_ONLINE3', status: 'closed' });
-const cancelled = postRoute('paycancel', { token: cancelledOrder.token });
-check('cancelling answers CANCELLED', cancelled.ok === true && cancelled.state === 'CANCELLED', JSON.stringify(cancelled));
-check('cancelling closes the QR at the provider',
-  fetchCalls.length === 1 && /\/close$/.test(fetchCalls[0].url), fetchCalls.map(c => c.url).join(', '));
-check('a cancelled draft registers nobody', countRows('Online Cancel Me') === 0);
-check('the draft is marked CANCELLED', draftRowFor(cancelledOrder.token).values[12] === 'CANCELLED');
-
-resetFetch();
-queueJson({ id: 'order_ONLINE4', amount: 20000, currency: 'INR', status: 'created' });
-queueJson({ id: 'qr_ONLINE4', image_url: 'https://rzp.io/i/ONLINE4', status: 'active' });
-const expiring = postRoute('payorder', validPayload('Online Expired'));
-{
-  const found = draftRowFor(expiring.token);
-  found.sheet.getRange(found.row, 3).setValue(new Date(Date.now() - 60000));
-}
-resetFetch();
-const expired = postRoute('paystatus', { token: expiring.token });
-check('an expired QR is reported as EXPIRED', expired.ok === true && expired.state === 'EXPIRED', JSON.stringify(expired));
-check('an expired QR registers nobody', countRows('Online Expired') === 0);
-check('an expired QR spends no provider call', fetchCalls.length === 0);
-
-/* --- a failed provider call is not a paid team --- */
-resetFetch();
-queueJson({ error: { description: 'Authentication failed' } }, 401);
-const providerDown = postRoute('payorder', validPayload('Online Provider Down'));
-check('a rejected order is reported, not faked',
-  providerDown.ok === false && providerDown.code === 'PROVIDER', JSON.stringify(providerDown));
-check('no draft survives a rejected order',
-  !spreadsheet.getSheetByName('PaymentDrafts') ||
-  spreadsheet.getSheetByName('PaymentDrafts').getLastRow() === 0 ||
-  (function () {
-    const drafts = spreadsheet.getSheetByName('PaymentDrafts');
-    const values = drafts.getRange(2, 1, drafts.getLastRow() - 1, 4).getValues();
-    return values.filter(v => String(v[3]) === 'Online Provider Down').length === 0;
-  })());
-check('nobody is registered when the provider refuses', countRows('Online Provider Down') === 0);
+const namedOnly = postRoute('payorder', validPayload('Online Razorpay Named'));
+check('a Razorpay-shaped configuration opens no payment',
+  namedOnly.ok === false && namedOnly.code === 'PAYMENT_OFFLINE', JSON.stringify(namedOnly));
+check('no gateway was called for it', fetchCalls.length === 0);
+check('no Razorpay order or QR call exists in the backend', typeof sandbox.razorpayCall_ === 'undefined');
+check('no draft and no row were created',
+  countRows('Online Razorpay Named') === 0);
 
 /* Leave the sheet on its original fee for anything that follows. */
 adminCall({ action: 'settings-set', session: superSession, fee: 100 });
 scriptProps.delete('payment_provider');
+scriptProps.delete('razorpay_key_id');
+scriptProps.delete('razorpay_key_secret');
 resetFetch();
 }
 
