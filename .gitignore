@@ -4,7 +4,34 @@
 # Local-only sheet layout preview (not part of the website, not deployed)
 sheet-preview.html
 
+# Dev-only preview harness used by the coding environment
+.preview-server.js
+
+# Screenshots taken while testing (not part of the website)
+screenshots/
+
 # OS and OneDrive clutter
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# clasp push staging (contains the private sheet id)
+.clasp-push/
+
+# Local backups made before payment changes: never published.
+backup/
+
+# Dependencies and local logs (the site ships no build step)
+node_modules/
+*.log
+
+# Never commit credentials. Script Properties hold the real ones.
+.env
+.env.*
+!.env.example
+
+# Personal UPI QR images: print assets for a poster or a cash desk. They encode
+# a real UPI ID, the site never displays them, and publishing them would only
+# invite payment-request spam. Keep them local.
+upi-qr.png
+upi-pay-qr.png

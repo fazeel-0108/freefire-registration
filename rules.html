@@ -30,6 +30,7 @@
     </a>
     <nav class="topnav" aria-label="Sections">
       <a href="rules.html" aria-current="page">Rules</a>
+      <a href="admin.html">Dashboard</a>
       <a href="index.html#register">Register</a>
     </nav>
   </header>
@@ -47,6 +48,23 @@
       <div class="rules-actions">
         <a class="cta-primary" href="index.html#register">Register your squad <span aria-hidden="true">↗</span></a>
         <button class="cta-ghost" type="button" id="printRules">Print / Save as PDF</button>
+      </div>
+
+      <!-- The fee shown here is the opening fee. The amount actually charged is
+           the one in the sheet's Settings tab, and it is displayed again on the
+           payment step before anybody pays; keep this copy in step with it. -->
+      <div class="fee-callout" id="entryFee">
+        <p class="fee-label">TEAM ENTRY FEE</p>
+        <p class="fee-amount">₹100 <span>per team</span></p>
+        <p class="fee-copy">
+          <strong>Team Entry Fee: ₹100 per team</strong>, regardless of whether the
+          team registers 2, 3 or 4 players. The payment step always shows the
+          current fee before you pay. Teams may pay online by UPI QR or in cash.
+          An online payment is marked Paid only after the payment provider confirms
+          the exact amount to our server; cash stays Pending until an organizer has
+          the money in hand. Opening a QR, or submitting the form, never marks a
+          team as paid.
+        </p>
       </div>
 
       <!-- Anything the organizers have not confirmed yet is highlighted like this
@@ -98,7 +116,7 @@
         <li>Squads register under the college department they represent. The department list on the registration form is the only accepted list: CSE, EEE, Mechanical Engineering, Printing Technology, Electronics &amp; Communication Engineering, Civil Engineering.</li>
         <li>Every player must be an enrolled student of QQSGP unless the organizers announce otherwise: <span class="todo">[Organizer: confirm whether students from other colleges may take part]</span>.</li>
         <li>Age limits and ID checks: <span class="todo">[Organizer: enter age limit and ID policy]</span>.</li>
-        <li>Registration fee, if any: <span class="todo">[Organizer: enter entry fee or state that it is free]</span>. No fee is collected anywhere on this website.</li>
+        <li>Entry fee: <strong>₹100 per team</strong> at the opening price, the same for a squad of 2, 3 or 4, payable online by UPI or in cash. The payment step shows the current fee before you pay. A team becomes <strong>Paid</strong> only after the payment provider confirms an online payment, or an organizer receives the cash — choosing a payment method is not proof of payment.</li>
         <li>An organizer may ask for college ID proof at any point. False information may lead to disqualification under rule 14.</li>
       </ul>
     </section>

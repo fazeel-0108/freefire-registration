@@ -11,6 +11,12 @@ against a mocked provider (see §9). **No message has been sent from your accoun
 — the credentials below do not exist yet, so the module is switched off and
 every attempt is refused rather than faked.
 
+**Approving a team does not depend on any of this.** The dashboard's *Approve*
+button saves the status and then opens WhatsApp click-to-chat with the approval
+message already typed, addressed to the team leader's number — you just press
+Send. That is manual messaging, needs no Meta account, and is what runs today.
+The Cloud API described below is the optional fully-automated upgrade.
+
 ---
 
 ## 1. What happens when
@@ -18,7 +24,8 @@ every attempt is refused rather than faked.
 | Moment | What the server does |
 | --- | --- |
 | A team submits the form | Saves the row with `PENDING`, plus the WhatsApp consent answer and its timestamp. Sends nothing (unless you switch on the optional receipt). |
-| You approve / reject / waitlist | Saves the status **first**. Only then creates one notification row and submits one template message. A notification failure never changes the status. |
+| You approve | Saves the status **first**, then opens WhatsApp with the message pre-filled (`wa.me`, click-to-chat). You press Send. Nothing is sent by the server. |
+| You reject / waitlist | Saves the status **first**. With the Cloud API on, that also creates one notification row and submits one template message; a notification failure never changes the status. |
 | Meta accepts the message | State `SENT` — "accepted by the provider". Not "delivered". |
 | Meta reports delivery | Webhook moves the row to `DELIVERED`, then `READ`. Late or repeated events never move it backwards. |
 | Meta rejects it | `FAILED` with the provider's reason, and a **Retry** button. |
@@ -187,6 +194,11 @@ real delivery receipt, and your approved templates. Run `sendTestWhatsApp()`
 first, then approve one team and check your own phone.
 
 ## 10. Limitations to know
+
+- **Two channels, one team.** The manual approve → WhatsApp step and the Cloud
+  API are independent. If you switch the API on later, either skip the manual
+  send or turn the approval template off, otherwise a team can receive the same
+  message twice.
 
 - No automatic "registration received" message unless `whatsapp_send_receipt` is
   `yes` (and that template is approved).

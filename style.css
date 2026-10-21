@@ -97,6 +97,19 @@ body::before {
 }
 .topnav a.nav-register:hover { color: #0B0C0E; filter: brightness(1.08); }
 .topnav a[aria-current="page"] { color: var(--accent-2); border-color: rgba(var(--accent-rgb),.4); }
+/* The organiser dashboard is a working tool, not a marketing link, so it reads
+   as a distinct control instead of blending into the site navigation. */
+.topnav a.nav-dashboard {
+  color: var(--accent-2);
+  border-color: rgba(var(--accent-rgb),.45);
+  background: rgba(var(--accent-rgb),.08);
+  font-weight: 600;
+}
+.topnav a.nav-dashboard:hover, .topnav a.nav-dashboard:focus-visible {
+  color: var(--accent-2);
+  border-color: rgba(var(--accent-rgb),.75);
+  background: rgba(var(--accent-rgb),.16);
+}
 
 /* ------------------------------- buttons ------------------------------- */
 /* One button pair used by the hero, the about block and the rules page. */
@@ -673,7 +686,6 @@ html.modal-open, body.modal-open { overflow: hidden; }
 .success-panel h2 { font: 700 38px "Space Grotesk"; margin-bottom: 12px; }
 .success-panel > p:not(.eyebrow) { max-width: 520px; margin: 0 auto 25px; color: var(--muted); line-height: 1.7; font-size: 13px; }
 .success-panel button { margin: 0 auto; }
-.hidden-frame { display: none; }
 footer {
   padding: 35px 0 50px; display: flex; flex-direction: column; align-items: center;
   gap: 14px; text-align: center;
@@ -745,3 +757,267 @@ footer {
   .hero-meta b { font-size: 20px; }
   .hero-meta span { font-size: 8px; }
 }
+
+/* ------------------------------------------------------------------
+   ENTRY FEE STEP
+   Lives inside the success dialog, after the row has been saved.
+   ₹100 per team — the same for a squad of 2, 3 or 4.
+------------------------------------------------------------------ */
+.pay-block {
+  margin: 0 0 20px;
+  padding: 16px 14px;
+  text-align: left;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 14px;
+  background: rgba(255,255,255,.02);
+}
+
+.pay-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin-bottom: 14px;
+}
+
+.pay-label {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .14em;
+}
+
+.pay-amount {
+  color: var(--accent);
+  font: 700 26px "Space Grotesk", sans-serif;
+  letter-spacing: -.03em;
+}
+
+.pay-per { color: #8E96A3; font-size: 10px; }
+
+.pay-lead { margin: 0 0 10px; color: var(--muted); font-size: 11px; }
+
+.pay-choice-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.pay-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 12px 13px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 11px;
+  background: rgba(255,255,255,.04);
+  color: var(--text);
+  font: 700 12px "Space Grotesk", sans-serif;
+  cursor: pointer;
+}
+
+.pay-btn span {
+  color: #8E96A3;
+  font: 500 9px Inter, sans-serif;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.pay-btn:hover { border-color: rgba(255,255,255,.24); background: rgba(255,255,255,.07); }
+
+.pay-btn-primary {
+  border-color: rgba(var(--accent-rgb),.45);
+  background: rgba(var(--accent-rgb),.10);
+}
+
+.pay-btn-primary span { color: rgba(245,245,245,.78); }
+
+.pay-qr { display: grid; place-items: center; margin-bottom: 4px; }
+
+.pay-qr img {
+  display: block;
+  width: 240px;
+  max-width: 100%;
+  height: auto;
+  padding: 10px;
+  border-radius: 12px;
+  background: #fff;
+}
+
+/* The online panel is the QR and one line of state. No account details, no
+   instructions, no "I have paid" button. */
+.pay-online { text-align: center; }
+
+/* YouPI PG's own checkout page, shown as the gateway serves it. The frame is
+   tall enough for its QR and app buttons on a phone, and the link is the
+   fallback when a browser refuses to frame a third-party page. */
+.pay-gateway { margin: 0 0 4px; }
+
+.pay-gateway iframe {
+  display: block;
+  width: 100%;
+  max-width: 420px;
+  height: 560px;
+  margin: 0 auto;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 12px;
+  background: #0d0f13;
+}
+
+.pay-gateway-link {
+  display: inline-block;
+  margin-top: 8px;
+  color: #C9CDD4;
+  font-size: 10.5px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.pay-gateway[hidden],
+.pay-gateway-link[hidden],
+.pay-gateway-open[hidden] { display: none !important; }
+
+/* Wide screens get the checkout inline; narrow ones get a full-width button.
+   A 225 px-wide checkout is not usable, so it is not offered. */
+.pay-gateway-open { display: none; }
+
+@media (max-width: 640px) {
+  .pay-gateway iframe { display: none; }
+  .pay-gateway-link { display: none; }
+  .pay-gateway-open { display: flex; }
+}
+
+.pay-status {
+  margin: 12px 0 0;
+  min-height: 2.8em;
+  color: #A7ADB6;
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.pay-status.is-waiting { color: #C9CDD4; }
+.pay-status.is-error { color: #FFD9DB; }
+.pay-status.is-ok { color: var(--accent); }
+
+.pay-retry { margin-top: 10px; }
+
+/* A generic rule in this file sets buttons to display:flex, which beats the
+   UA [hidden] rule - so a hidden "Try again" was still painted under the QR. */
+.pay-online [hidden] { display: none !important; }
+
+/* The QR is the only image on the panel; a failed load must not leave a
+   broken frame pretending to be a payment. */
+.pay-qr img[hidden] { display: none; }
+
+.pay-submit {
+  width: 100%;
+  padding: 13px;
+  border: 0;
+  border-radius: 11px;
+  background: linear-gradient(135deg, var(--accent-2), var(--accent));
+  color: #14161A;
+  font: 800 11px Inter, sans-serif;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.pay-submit:disabled { opacity: .6; cursor: progress; }
+
+.pay-back {
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font: 600 10px Inter, sans-serif;
+  cursor: pointer;
+}
+
+.pay-result {
+  margin: 0;
+  padding: 11px 12px;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.pay-result.is-ok {
+  border: 1px solid rgba(120,220,150,.35);
+  background: rgba(120,220,150,.08);
+  color: #CFF5D9;
+}
+
+.pay-result.is-error {
+  border: 1px solid rgba(248,113,113,.4);
+  background: rgba(248,113,113,.08);
+  color: #FFD9DB;
+}
+
+.pay-cash-copy {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.75;
+}
+
+/* A failed submission must never leave the payment step on screen. */
+.success-overlay.is-error .pay-block { display: none; }
+
+/* The dialog now holds the roster and the fee step, so on a phone it has to
+   scroll rather than run off the top and bottom of the screen. */
+@media (max-width: 640px) {
+  .success-modal {
+    max-height: calc(100dvh - 24px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  .pay-qr img { width: 220px; }
+}
+
+/* ------------------------------------------------------------------
+   Narrow header
+   The nav grew to three pills (Rules, Dashboard, Register) and no longer
+   fits beside the crest on a phone. Wrapping it under the brand keeps the
+   page from scrolling sideways, which the rules page did at 390px.
+------------------------------------------------------------------ */
+@media (max-width: 560px) {
+  .topbar {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 10px 0 12px;
+    row-gap: 10px;
+  }
+  .topnav {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .topnav a {
+    min-height: 36px;
+    padding: 0 11px;
+    font-size: 9px;
+    letter-spacing: .1em;
+  }
+}
+
+/* `hidden` must win over the display rule above: a missing QR image used to
+   leave a large white placeholder box in the dialog. */
+.pay-qr img[hidden] { display: none; }
+
+/* The fee step is a gate, not a receipt: say so before the buttons. */
+.pay-choice-note {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-left: 2px solid rgba(var(--accent-rgb), .55);
+  color: #E6C98A;
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.pay-choice-note b { color: #FFE7A8; }

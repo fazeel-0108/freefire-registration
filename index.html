@@ -40,6 +40,7 @@
     <nav class="topnav" aria-label="Sections">
       <div class="event-pill"><span class="live-dot"></span> TOURNAMENT REGISTRATION</div>
       <a href="rules.html">Rules</a>
+      <a class="nav-dashboard" href="admin.html">Dashboard</a>
       <a class="nav-register" href="#register">Register</a>
     </nav>
   </header>
@@ -198,7 +199,7 @@
             <div class="grid two">
               <label class="field">
                 <span>Player name <em>*</em></span>
-                <input class="member-name" type="text" maxlength="50" placeholder="e.g. PHANTOM">
+                <input class="member-name" type="text" maxlength="50" placeholder="e.g. INGAME NAME or UID">
               </label>
               <label class="field">
                 <span>WhatsApp number <em>*</em></span>
@@ -218,7 +219,7 @@
             <div class="grid two">
               <label class="field">
                 <span>Player name <em>*</em></span>
-                <input class="member-name" type="text" maxlength="50" placeholder="e.g. PHANTOM">
+                <input class="member-name" type="text" maxlength="50" placeholder="e.g. INGAME NAME or UID">
               </label>
               <label class="field">
                 <span>WhatsApp number <em>*</em></span>
@@ -238,7 +239,7 @@
             <div class="grid two">
               <div class="field" style="grid-column: span 2;">
                 <span>Player name</span>
-                <input class="member-name" type="text" maxlength="50" placeholder="e.g. PHANTOM">
+                <input class="member-name" type="text" maxlength="50" placeholder="e.g. INGAME NAME or UID">
               </div>
             </div>
           </article>
@@ -254,7 +255,7 @@
             <div class="grid two">
               <div class="field" style="grid-column: span 2;">
                 <span>Player name</span>
-                <input class="member-name" type="text" maxlength="50" placeholder="e.g. PHANTOM">
+              <input class="member-name" type="text" maxlength="50" placeholder="e.g. INGAME NAME or UID">
               </div>
             </div>
           </article>
@@ -325,6 +326,8 @@
         <a class="footer-link" href="#register">Register a team</a>
         <span class="dot" aria-hidden="true">•</span>
         <a class="footer-link" href="rules.html">Tournament rules</a>
+        <span class="dot" aria-hidden="true">•</span>
+        <a class="footer-link" href="admin.html">Organiser dashboard</a>
       </p>
 
       <p class="footer-contact">
@@ -363,8 +366,80 @@
           </p>
 
           <div class="registered-team">
-            <span>TEAM REGISTERED</span>
+            <span id="regLabel">TEAM REGISTERED</span>
             <strong id="successTeamName">Your Team</strong>
+          </div>
+
+          <!-- Entry fee. ₹100 per team, never per player, and collected only
+               after the row has actually been saved. Hidden until the server
+               confirms the registration and hands back that row's token. -->
+          <div class="pay-block" id="payBlock" hidden>
+            <div class="pay-head">
+              <span class="pay-label">ENTRY FEE</span>
+              <span class="pay-amount" id="payAmount">₹100</span>
+              <span class="pay-per">per team · 2, 3 or 4 players</span>
+            </div>
+
+            <div class="pay-choice" id="payChoice">
+              <p class="pay-lead">How will your team pay?</p>
+              <p class="pay-choice-note" id="payChoiceNote">
+                Your team is <b>not registered yet</b>. Cash is saved immediately as
+                pending; online is saved only once the gateway confirms your payment.
+              </p>
+              <div class="pay-choice-row">
+                <button type="button" class="pay-btn pay-btn-primary" id="payOnlineBtn">
+                  Pay online<span id="payOnlineHint">UPI QR</span>
+                </button>
+                <button type="button" class="pay-btn" id="payCashBtn">
+                  Pay cash<span>to an organiser</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Online payment. The only thing on this panel is the QR itself.
+                 There is deliberately no submit button: the team is registered
+                 by the server, from the provider's verified confirmation, never
+                 by a click here. -->
+            <div class="pay-panel pay-online" id="payOnlinePanel" hidden>
+              <div class="pay-qr">
+                <img id="payQr"
+                     alt="UPI QR for the team entry fee — scan it with any UPI app"
+                     width="240" height="240" hidden>
+              </div>
+              <!-- YouPI PG runs its own checkout page on the merchant's server.
+                   It is shown as-is: this site does not draw, guess or imitate
+                   the gateway's payment screen. -->
+              <div class="pay-gateway" id="payGateway" hidden>
+                <iframe id="payFrame" title="Secure payment page"
+                        loading="lazy" referrerpolicy="strict-origin-when-cross-origin"></iframe>
+                <a class="pay-submit pay-gateway-open" id="payGatewayOpen" href="#"
+                   target="_blank" rel="noopener noreferrer">
+                  Open the secure payment page ↗
+                </a>
+                <a class="pay-gateway-link" id="payGatewayLink" href="#"
+                   target="_blank" rel="noopener noreferrer">
+                  Payment page not loading? Open it in a new tab ↗
+                </a>
+              </div>
+              <p class="pay-status" id="payStatus" role="status" aria-live="polite"></p>
+              <button type="button" class="pay-submit pay-retry" id="payRetry" hidden>Try again</button>
+              <button type="button" class="pay-back" id="payOnlineBack">Back</button>
+            </div>
+
+            <div class="pay-panel" id="payCashPanel" hidden>
+              <p class="pay-cash-copy">
+                Your team is registered when you press the button below, and the
+                <span id="payCashAmount">entry fee</span> is marked <b>Pending</b>.
+                Hand the cash to any tournament organiser — they will mark it
+                <b>Paid</b> once they receive it.
+              </p>
+              <button type="button" class="pay-submit" id="payCashSubmit">
+                Submit — I'll pay cash
+              </button>
+              <button type="button" class="pay-back" id="payCashBack">Back</button>
+            </div>
+
+            <p class="pay-result" id="payResult" role="status" hidden></p>
           </div>
 
           <p class="success-note">

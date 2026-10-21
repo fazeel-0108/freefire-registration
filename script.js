@@ -12,8 +12,31 @@ const newRegistration = document.getElementById("newRegistration");
 
 const successModal = document.getElementById("successModal");
 const successTeamName = document.getElementById("successTeamName");
+const regLabel = document.getElementById("regLabel");
 const doneSuccess = document.getElementById("doneSuccess");
 const closeSuccess = document.getElementById("closeSuccess");
+
+// Entry-fee step inside the same dialog.
+const payBlock = document.getElementById("payBlock");
+const payAmount = document.getElementById("payAmount");
+const payChoice = document.getElementById("payChoice");
+const payOnlineBtn = document.getElementById("payOnlineBtn");
+const payCashBtn = document.getElementById("payCashBtn");
+const payOnlinePanel = document.getElementById("payOnlinePanel");
+const payCashPanel = document.getElementById("payCashPanel");
+const payQr = document.getElementById("payQr");
+const payGateway = document.getElementById("payGateway");
+const payFrame = document.getElementById("payFrame");
+const payGatewayLink = document.getElementById("payGatewayLink");
+const payGatewayOpen = document.getElementById("payGatewayOpen");
+const payOnlineHint = document.getElementById("payOnlineHint");
+const payStatus = document.getElementById("payStatus");
+const payRetryBtn = document.getElementById("payRetry");
+const payOnlineBack = document.getElementById("payOnlineBack");
+const payCashSubmit = document.getElementById("payCashSubmit");
+const payCashAmount = document.getElementById("payCashAmount");
+const payCashBack = document.getElementById("payCashBack");
+const payResult = document.getElementById("payResult");
 
 const departmentDropdown = document.getElementById("departmentDropdown");
 const departmentTrigger = document.getElementById("departmentTrigger");
@@ -231,12 +254,6 @@ const SUCCESS_ICON = modalIcon.innerHTML;
 const SUCCESS_TITLE = modalTitle.textContent;
 const SUCCESS_DESCRIPTION = modalDescription.textContent;
 
-const ERROR_ICON =
-  '<svg viewBox="0 0 52 52" aria-hidden="true">' +
-  '<circle cx="26" cy="26" r="20" fill="none" stroke-width="4"></circle>' +
-  '<line x1="19" y1="26" x2="33" y2="26" stroke-width="4" stroke-linecap="round"></line>' +
-  '</svg>';
-
 /**
  * The backend states its rules (a duplicate team, closed registration) in plain
  * language meant for the player, so those pass through untouched. An internal
@@ -263,32 +280,417 @@ function openResultPopup() {
   if (doneSuccess && doneSuccess.focus) doneSuccess.focus({ preventScroll: true });
 }
 
-function showSuccessPopup(teamName) {
+/* ------------------------------------------------------------------
+   ENTRY FEE — one live fee, two honest outcomes
+
+   Cash    -> the row is saved as PENDING; an organiser confirms receipt.
+   Online  -> the page opens a provider order and shows its UPI QR. Nothing
+              is registered until the provider confirms, server to server,
+              that the exact fee was captured. There is no "I have paid"
+              button, and a typed reference proves nothing.
+
+   The fee itself comes from the sheet (action=config), never from a constant
+   in this file, so the page and the backend cannot disagree about it.
+------------------------------------------------------------------ */
+const pending = { data: null, busy: false, done: false };
+
+const PAY_POLL_MS = 3000;
+const PAY_MAX_POLLS = 400;
+let payPoller = null;
+let paySession = null;      // { token, expiresAt } of the payment being watched
+let payPollCount = 0;
+let siteConfig = {
+  fee: null,
+  online: false,
+  provider: "",
+  hosted: false,
+  label: "",
+  minVerification: 0
+};
+
+/**
+ * Nothing about a previous attempt may survive on the payment panel: no stale
+ * QR, and no gateway checkout page still loading behind a new one. The iframe
+ * is emptied rather than hidden, so a cancelled attempt really stops.
+ */
+function resetOnlineVisuals() {
+  if (payQr) {
+    payQr.hidden = true;
+    payQr.removeAttribute("src");
+  }
+  if (payGateway) payGateway.hidden = true;
+  if (payFrame) payFrame.removeAttribute("src");
+  if (payGatewayLink) payGatewayLink.hidden = true;
+  if (payGatewayOpen) payGatewayOpen.hidden = true;
+}
+
+/**
+ * The gateway's checkout page is shown as the gateway serves it. On a narrow
+ * screen the modal would squeeze it into a column a few characters wide, so
+ * the stylesheet swaps the frame for a full-width button and the page keeps
+ * polling; the payment still happens entirely on the gateway's own page.
+ */
+function showHostedCheckout(url) {
+  if (!payGateway) return false;
+  payGateway.hidden = false;
+  if (payGatewayLink) {
+    payGatewayLink.hidden = false;
+    payGatewayLink.href = url;
+  }
+  if (payGatewayOpen) {
+    payGatewayOpen.hidden = false;
+    payGatewayOpen.href = url;
+  }
+  if (payFrame) payFrame.src = url;
+  return true;
+}
+
+function payPanel(name) {
+  payChoice.hidden = name !== "choice";
+  payOnlinePanel.hidden = name !== "online";
+  payCashPanel.hidden = name !== "cash";
+}
+
+function paySay(message, kind) {
+  if (!payResult) return;
+  payResult.hidden = !message;
+  payResult.textContent = message || "";
+  payResult.classList.remove("is-ok", "is-error");
+  if (kind) payResult.classList.add("is-" + kind);
+}
+
+/** The line under the QR. It is the only text that may appear there. */
+function setPayStatus(message, kind) {
+  if (!payStatus) return;
+  payStatus.hidden = !message;
+  payStatus.textContent = message || "";
+  payStatus.classList.remove("is-waiting", "is-error", "is-ok");
+  if (kind) payStatus.classList.add("is-" + kind);
+}
+
+function applyFee(fee) {
+  const value = Number(fee);
+  if (!value || value < 1) return;
+  siteConfig.fee = value;
+  if (payAmount) payAmount.textContent = "₹" + value;
+  if (payCashAmount) payCashAmount.textContent = "₹" + value;
+}
+
+function stopPolling() {
+  if (payPoller) {
+    clearInterval(payPoller);
+    payPoller = null;
+  }
+}
+
+function resetPaymentStep() {
+  stopPolling();
+  paySession = null;
+  payPollCount = 0;
+  pending.data = null;
+  pending.busy = false;
+  pending.done = false;
+  if (!payBlock) return;
+  payBlock.hidden = true;
+  payPanel("choice");
+  paySay("", "");
+  setPayStatus("", "");
+  resetOnlineVisuals();
+  if (payRetryBtn) payRetryBtn.hidden = true;
+}
+
+/**
+ * Opens the fee step for a team whose details have passed validation but
+ * have NOT been sent anywhere yet. Nothing is registered until the team
+ * picks Cash or confirms the UPI payment.
+ */
+function openPaymentStep(data) {
+  if (!payBlock) return;
+
+  pending.data = data;
+  pending.busy = false;
+  pending.done = false;
+  paySession = null;
+  payPollCount = 0;
+  stopPolling();
+
+  applyFee(siteConfig.fee);
+  if (payCashSubmit) {
+    payCashSubmit.disabled = false;
+    payCashSubmit.textContent = "Submit — I'll pay cash";
+  }
+
   successModal.classList.remove("is-error");
-  modalTitle.textContent = SUCCESS_TITLE;
-  modalDescription.textContent = SUCCESS_DESCRIPTION;
+  modalTitle.textContent = "Choose your payment";
+  modalDescription.textContent =
+    "Your team details are checked. Pay the entry fee to submit the registration.";
   modalIcon.innerHTML = SUCCESS_ICON;
-  successTeamName.textContent = teamName;
+  successTeamName.textContent = data.teamName;
+
+  // Nothing has been saved at this point, so the dialog must not say the team
+  // is registered yet, and the close button is a cancel.
+  if (regLabel) regLabel.textContent = "YOUR TEAM";
+  if (doneSuccess) doneSuccess.innerHTML = 'CANCEL <span aria-hidden="true">×</span>';
+
+  payPanel("choice");
+  paySay("", "");
+  setPayStatus("", "");
+  resetOnlineVisuals();
+  if (payRetryBtn) payRetryBtn.hidden = true;
+  payBlock.hidden = false;
   openResultPopup();
 }
 
-function showErrorPopup(message) {
-  successModal.classList.add("is-error");
-  modalTitle.textContent = "Submission Failed";
-  modalDescription.textContent = playerFacingError(message);
-  modalIcon.innerHTML = ERROR_ICON;
-  // Keep the raw server wording for debugging without showing it to a player.
-  console.error("Submission failed:", message);
-  openResultPopup();
+/**
+ * CASH ONLY. The online path never posts a registration: the server writes
+ * that row itself, after the provider confirms the money. A cash row is saved
+ * as PENDING and stays that way until an organiser receives the notes.
+ */
+async function completeCashRegistration() {
+  if (pending.busy || pending.done || !pending.data) return;
+
+  pending.busy = true;
+  const button = payCashSubmit;
+  const label = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Submitting…";
+  }
+  paySay("", "");
+
+  try {
+    const result = await submitToAppsScript(Object.assign({}, pending.data, {
+      payment: { method: "CASH" }
+    }));
+
+    if (!result || !result.ok) {
+      throw new Error(result && result.error
+        ? result.error
+        : "The server could not save your registration.");
+    }
+
+    pending.done = true;
+    payPanel("none");
+
+    if (regLabel) regLabel.textContent = "TEAM REGISTERED";
+    if (doneSuccess) doneSuccess.innerHTML = 'DONE <span aria-hidden="true">↗</span>';
+
+    modalTitle.textContent = "Registration Submitted!";
+    modalDescription.textContent =
+      "Your team is registered. The entry fee stays Pending until an organiser receives your cash.";
+
+    const fee = result.payment && result.payment.entryFee
+      ? result.payment.entryFee
+      : siteConfig.fee;
+
+    paySay(
+      "Pay ₹" + (fee || "the entry fee") + " in cash to any tournament organiser. " +
+        "Your payment changes to Paid only when they confirm they received it.",
+      "ok"
+    );
+
+    loadStats();
+  } catch (error) {
+    // The registration was not saved. Keep the team's details and let them
+    // choose again; no success is shown on a failed save.
+    paySay("We could not save that just now. " + error.message + " Nothing was lost — try again.", "error");
+    if (button) {
+      button.disabled = false;
+      button.textContent = label;
+    }
+  } finally {
+    pending.busy = false;
+  }
 }
+
+/* ------------------------------------------------------------------
+   ONLINE PAYMENT
+   The page opens an order, shows the QR and then waits. It cannot say
+   "paid": only the backend, asking the provider with a secret the browser
+   never sees, can turn a QR into a registered team.
+------------------------------------------------------------------ */
+
+async function startOnlinePayment() {
+  if (!pending.data || pending.done) return;
+
+  payPanel("online");
+  paySay("", "");
+  stopPolling();
+  paySession = null;
+  payPollCount = 0;
+
+  resetOnlineVisuals();
+  if (payRetryBtn) payRetryBtn.hidden = true;
+
+  if (!siteConfig.online) {
+    setPayStatus(
+      "Online payment is not switched on yet. Choose Cash — an organiser will collect the fee at the venue.",
+      "error"
+    );
+    return;
+  }
+
+  pending.busy = true;
+  setPayStatus("Opening your payment…", "waiting");
+
+  try {
+    const result = await postAction("payorder", pending.data);
+    if (!result || !result.ok) {
+      throw new Error(result && result.error ? result.error : "The payment could not be started.");
+    }
+    paySession = { token: result.token, expiresAt: result.expiresAt || "" };
+    if (result.amount) applyFee(result.amount);
+
+    if (result.hosted && result.checkoutUrl) {
+      // YouPI PG: the gateway's own checkout page IS the payment interface.
+      // Nothing is drawn here, and the team is still not registered.
+      showHostedCheckout(result.checkoutUrl);
+      setPayStatus(
+        "Pay on the secure payment page above. Your team is registered automatically once the gateway confirms the payment.",
+        "waiting"
+      );
+    } else if (result.qrImageUrl) {
+      payQr.src = result.qrImageUrl;
+      payQr.hidden = false;
+      setPayStatus(
+        "Scan the QR with any UPI app. Your team is registered automatically once the payment is confirmed.",
+        "waiting"
+      );
+    } else {
+      throw new Error("The payment page did not arrive. Please try again.");
+    }
+
+    startPaymentPolling();
+  } catch (error) {
+    paySession = null;
+    resetOnlineVisuals();
+    setPayStatus(playerFacingError(error.message), "error");
+    if (payRetryBtn) payRetryBtn.hidden = false;
+  } finally {
+    pending.busy = false;
+  }
+}
+
+function startPaymentPolling() {
+  stopPolling();
+  payPollCount = 0;
+  payPoller = setInterval(checkPayment, PAY_POLL_MS);
+  checkPayment();
+}
+
+async function checkPayment() {
+  if (!paySession || pending.done) {
+    stopPolling();
+    return;
+  }
+
+  payPollCount += 1;
+  if (payPollCount > PAY_MAX_POLLS) {
+    stopPolling();
+    setPayStatus("This payment window has closed. Start again for a fresh QR.", "error");
+    if (payRetryBtn) payRetryBtn.hidden = false;
+    return;
+  }
+
+  try {
+    const result = await postAction("paystatus", { token: paySession.token });
+    if (!result || !result.ok) return; // a blip: keep waiting, assume nothing
+
+    if (result.state === "PAID") {
+      stopPolling();
+      finishVerifiedRegistration(result);
+      return;
+    }
+
+    if (result.state === "EXPIRED") {
+      stopPolling();
+      setPayStatus("This payment window has closed. Start again for a fresh one.", "error");
+      if (payRetryBtn) payRetryBtn.hidden = false;
+      return;
+    }
+
+    if (result.state === "REVIEW") {
+      stopPolling();
+      setPayStatus(result.error || "An organiser needs to check this payment.", "error");
+      return;
+    }
+
+    if (result.state === "CANCELLED") {
+      stopPolling();
+      paySession = null;
+      payPanel("choice");
+    }
+  } catch (ignored) {
+    // Offline for a moment. The next tick asks again; nothing is assumed.
+  }
+}
+
+function finishVerifiedRegistration(result) {
+  paySession = null;
+  pending.done = true;
+  payPanel("none");
+
+  if (regLabel) regLabel.textContent = "TEAM REGISTERED";
+  if (doneSuccess) doneSuccess.innerHTML = 'DONE <span aria-hidden="true">↗</span>';
+
+  successModal.classList.remove("is-error");
+  modalIcon.innerHTML = SUCCESS_ICON;
+  modalTitle.textContent = "Registered & Paid";
+  modalDescription.textContent =
+    "The payment was verified by the provider, and your team was saved automatically.";
+  if (successTeamName && result.team) successTeamName.textContent = result.team;
+
+  const amount = result.amount ? "₹" + result.amount : "The entry fee";
+  paySay(
+    amount + " received and verified." +
+      (result.registrationId ? " Registration ID: " + result.registrationId + "." : ""),
+    "ok"
+  );
+
+  loadStats();
+}
+
+async function cancelOnlinePayment() {
+  const token = paySession && paySession.token;
+
+  stopPolling();
+  paySession = null;
+  payPollCount = 0;
+  resetOnlineVisuals();
+  if (payRetryBtn) payRetryBtn.hidden = true;
+  setPayStatus("", "");
+  payPanel("choice");
+
+  if (token) {
+    try {
+      await postAction("paycancel", { token: token });
+    } catch (ignored) {
+      // The QR simply expires on its own; the team is not registered either way.
+    }
+  }
+}
+
+if (payOnlineBtn) payOnlineBtn.addEventListener("click", startOnlinePayment);
+if (payCashBtn) payCashBtn.addEventListener("click", () => { payPanel("cash"); paySay("", ""); });
+if (payOnlineBack) payOnlineBack.addEventListener("click", cancelOnlinePayment);
+if (payCashBack) payCashBack.addEventListener("click", () => payPanel("choice"));
+if (payCashSubmit) payCashSubmit.addEventListener("click", completeCashRegistration);
+if (payRetryBtn) payRetryBtn.addEventListener("click", startOnlinePayment);
 
 function closeSuccessPopup() {
+  // A team that closes before choosing has NOT been registered, so their
+  // typing must survive: only a completed registration clears the form.
+  const registered = pending.done;
+
   successModal.classList.remove("show");
   successModal.setAttribute("aria-hidden", "true");
   document.documentElement.classList.remove("modal-open");
   document.body.classList.remove("modal-open");
-  form.reset();
-  success.classList.remove("show");
+  resetPaymentStep();
+  if (registered) {
+    form.reset();
+    success.classList.remove("show");
+  }
   window.scrollTo({ top: document.querySelector(".form-shell").offsetTop - 20, behavior: "smooth" });
 }
 
@@ -301,6 +703,71 @@ successModal.addEventListener("click", (event) => {
   }
 });
 
+
+/**
+ * One POST to an action on the same Web App URL. text/plain keeps the request
+ * a "simple" CORS request, which Apps Script answers without a preflight.
+ */
+async function postAction(action, payload) {
+  const url = APPS_SCRIPT_URL + (APPS_SCRIPT_URL.includes("?") ? "&" : "?") +
+    "action=" + encodeURIComponent(action);
+
+  const response = await fetch(url, {
+    method: "POST",
+    mode: "cors",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify(payload || {})
+  });
+
+  if (!response.ok) {
+    throw new Error("Server returned status " + response.status);
+  }
+
+  return JSON.parse(await response.text());
+}
+
+async function getAction(action) {
+  const url = APPS_SCRIPT_URL + (APPS_SCRIPT_URL.includes("?") ? "&" : "?") +
+    "action=" + encodeURIComponent(action);
+  const response = await fetch(url, { method: "GET", cache: "no-store" });
+  if (!response.ok) throw new Error("Server returned status " + response.status);
+  return JSON.parse(await response.text());
+}
+
+/*
+  The fee is whatever the sheet says, and online payment is only offered when
+  the provider is actually configured on the server. Until then the page says
+  so and Cash still works - it never pretends a payment can be verified.
+*/
+async function loadConfig() {
+  if (APPS_SCRIPT_URL.includes("PASTE_YOUR")) return;
+
+  try {
+    const data = await getAction("config");
+    if (!data || data.ok !== true) return;
+    siteConfig = {
+      fee: typeof data.fee === "number" ? data.fee : null,
+      online: data.online === true,
+      provider: data.provider || "",
+      hosted: data.hosted === true,
+      label: data.label || "",
+      minVerification: Number(data.minVerification) || 0
+    };
+    applyFee(data.fee);
+
+    // The button says what will actually happen: a QR on this page, or the
+    // gateway's own secure checkout page.
+    if (payOnlineHint) {
+      payOnlineHint.textContent = siteConfig.hosted
+        ? (siteConfig.label || "Secure checkout")
+        : "UPI QR";
+    }
+  } catch (error) {
+    console.warn("Fee/online configuration unavailable:", error.message);
+  }
+}
+
+loadConfig();
 
 // Submit via fetch() with text/plain to avoid CORS preflight.
 // Google Apps Script accepts this and returns CORS-friendly response.
@@ -430,24 +897,9 @@ form.addEventListener("submit", async (event) => {
     members
   };
 
-  submitBtn.disabled = true;
-  submitBtn.querySelector("span").textContent = "SUBMITTING...";
-
-  try {
-    const result = await submitToAppsScript(data);
-    if (result && result.ok) {
-      showSuccessPopup(teamName);
-      loadStats();
-    } else {
-      showErrorPopup(result && result.error ? result.error : "Server rejected the submission. Check the Apps Script Executions tab for details.");
-    }
-  } catch (e) {
-    showErrorPopup("Network error: " + e.message + ". Check the console and Apps Script Executions tab.");
-    console.error("Submit error:", e);
-  } finally {
-    submitBtn.disabled = false;
-    submitBtn.querySelector("span").textContent = "SUBMIT TEAM";
-  }
+  // The fee step comes first. The registration is only sent to the server
+  // once the team confirms online payment or chooses cash.
+  openPaymentStep(data);
 });
 
 function cleanPhone(value) {

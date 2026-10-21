@@ -225,6 +225,30 @@ textarea { resize: vertical; min-height: 84px; }
 .panel-head h2 { margin: 0 0 4px; font-size: 20px; }
 .panel-head p { margin: 0; color: var(--muted); font-size: 12px; }
 .panel-tools { display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* The live entry fee. One number, saved to the sheet, used by every new
+   registration and by the payment page. */
+.settings-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.settings-row .field { flex: 0 1 220px; margin-bottom: 0; }
+.settings-row input {
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(0,0,0,.28);
+  color: var(--text);
+  font: 600 16px Inter, sans-serif;
+}
+.settings-row input:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb),.55);
+  outline-offset: 1px;
+}
 .search input, .select select { min-width: 210px; }
 
 .status-filters { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 20px 16px; }
@@ -258,7 +282,9 @@ textarea { resize: vertical; min-height: 84px; }
 .reg-table tbody tr:focus-visible { outline: 2px solid var(--accent-2); outline-offset: -2px; }
 
 .cell-team { font-weight: 600; }
-.cell-team small { display: block; margin-top: 3px; color: #767E8C; font-weight: 400; font-size: 11px; }
+.reg-table small { display: block; margin-top: 3px; color: #767E8C; font-weight: 400; font-size: 11px; }
+.cell-actions { white-space: nowrap; }
+.reg-table .mono { font-variant-numeric: tabular-nums; font-size: 12px; }
 .cell-dept { color: var(--muted); font-size: 12px; }
 .cell-players { color: var(--muted); font-variant-numeric: tabular-nums; }
 .cell-date { color: #8E96A3; font-size: 12px; white-space: nowrap; }
@@ -344,7 +370,8 @@ textarea { resize: vertical; min-height: 84px; }
 
 .note-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
 .hint { color: #767E8C; font-size: 11px; margin: 0; }
-.contact-actions { margin-top: 10px; }
+.contact-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.contact-actions .btn { flex: 1 1 auto; }
 
 /* ------------------------------ confirm ------------------------------- */
 
@@ -363,7 +390,20 @@ textarea { resize: vertical; min-height: 84px; }
 }
 .confirm h2 { margin: 0 0 8px; font-size: 19px; }
 .confirm p { margin: 0 0 20px; color: var(--muted); font-size: 13px; line-height: 1.6; }
-.confirm-actions { display: flex; justify-content: flex-end; gap: 9px; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 9px; flex-wrap: wrap; }
+
+/* Recipient picker: shown only when the leader has no usable number. */
+.wa-pick-list { display: grid; gap: 8px; margin: 0 0 20px; }
+.wa-pick {
+  display: flex; align-items: center; gap: 11px; cursor: pointer;
+  padding: 11px 13px; border: 1px solid var(--line); border-radius: 12px;
+  background: rgba(255,255,255,.02);
+}
+.wa-pick:hover { border-color: rgba(var(--accent-rgb), .35); }
+.wa-pick input { width: auto; flex: 0 0 auto; accent-color: var(--accent); }
+.wa-pick b { display: block; font-size: 13px; }
+.wa-pick em { display: block; margin-top: 2px; color: #767E8C; font-size: 11px; font-style: normal; }
+.wa-pick input:checked + span b { color: var(--text); }
 
 /* ------------------------------- toasts ------------------------------- */
 
@@ -469,6 +509,44 @@ textarea.wa-input { resize: vertical; }
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
 }
 
+/* ------------------- organiser identity and accounts ------------------- */
+
+.whoami { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.whoami b { color: var(--text); font-weight: 600; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.role-chip {
+  display: inline-block; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.05);
+  font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted);
+}
+.role-chip.is-super { color: #E3B341; border-color: rgba(210,153,34,.4); background: rgba(210,153,34,.1); }
+
+.gate-recovery { margin-top: 18px; border-top: 1px solid rgba(255,255,255,.08); padding-top: 14px; }
+.gate-recovery summary { cursor: pointer; color: var(--accent-2); font-size: 12px; }
+.gate-recovery summary:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 3px; }
+.gate-recovery p { margin: 10px 0 12px; color: #7C8492; font-size: 11px; line-height: 1.7; }
+.gate-recovery code { background: rgba(255,255,255,.06); padding: 2px 6px; border-radius: 5px; }
+
+.org-panel .org-sub {
+  margin: 26px 0 12px; font-size: 12px; font-weight: 700;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+}
+
+.org-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px 14px; align-items: end; }
+.org-form .field { margin-bottom: 0; }
+.org-form .hint { grid-column: 1 / -1; margin: 0; }
+.org-form .btn { justify-self: start; }
+
+.btn-mini { padding: 6px 10px; font-size: 11px; border-radius: 7px; margin: 2px 0; }
+.row-sub { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+
+@media (max-width: 720px) {
+  .whoami b { max-width: 90px; }
+  .org-form { grid-template-columns: 1fr; }
+  .org-form .btn { width: 100%; justify-self: stretch; }
+}
+
 /* Printing a squad sheet keeps the numbers, drops the chrome. */
 @media print {
   body { background: #fff; color: #111; }
@@ -476,4 +554,92 @@ textarea.wa-input { resize: vertical; }
   .panel { border: 0; background: #fff; }
   .reg-table th, .reg-table td { border-color: #ddd; color: #111; }
   .badge { border-color: #999; color: #111; background: none; }
+}
+
+/* ---------------------------- payments ------------------------------ */
+/* ₹100 per team. The chip answers "where is this payment" at a glance and
+   the meta line under it answers "how much, by which method". */
+.pay-chip {
+  display: inline-block;
+  padding: 2px 9px;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 999px;
+  color: #8E96A3;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.pay-chip[data-pay="PAID"] {
+  color: #7EE2A0; background: rgba(63,185,80,.1); border-color: rgba(63,185,80,.34);
+}
+.pay-chip[data-pay="PENDING"] {
+  color: #E3B341; background: rgba(210,153,34,.1); border-color: rgba(210,153,34,.32);
+}
+.pay-chip[data-pay="PENDING VERIFICATION"] {
+  color: #8AB4F8; background: rgba(66,133,244,.12); border-color: rgba(66,133,244,.34);
+}
+.pay-chip[data-pay="NEEDS REVIEW"] {
+  color: #F08A8E; background: rgba(229,72,77,.1); border-color: rgba(229,72,77,.34);
+}
+.pay-chip[data-pay="REJECTED"] {
+  color: #9AA0AA; background: rgba(255,255,255,.04); border-color: rgba(255,255,255,.12);
+}
+
+.pay-meta {
+  display: block;
+  margin-top: 4px;
+  color: #767E8C;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pay-summary {
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 12px;
+  background: rgba(255,255,255,.02);
+}
+
+.pay-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 7px;
+  font-size: 12px;
+}
+
+.pay-line:last-child { margin-bottom: 0; }
+.pay-line > span { color: #8E96A3; }
+.pay-line > b { color: var(--text); font-weight: 600; overflow-wrap: anywhere; text-align: right; }
+
+.badge[data-pay="PAID"] {
+  color: #7EE2A0; background: rgba(63,185,80,.1); border-color: rgba(63,185,80,.34);
+}
+.badge[data-pay="PENDING"] {
+  color: #E3B341; background: rgba(210,153,34,.1); border-color: rgba(210,153,34,.32);
+}
+.badge[data-pay="PENDING VERIFICATION"] {
+  color: #8AB4F8; background: rgba(66,133,244,.12); border-color: rgba(66,133,244,.34);
+}
+.badge[data-pay="NEEDS REVIEW"] {
+  color: #F08A8E; background: rgba(229,72,77,.1); border-color: rgba(229,72,77,.34);
+}
+
+/* The fee is a fact, not a field: it is set by the server on registration. */
+#drawerFee { font-variant-numeric: tabular-nums; }
+#payNoteInput { margin-bottom: 4px; }
+
+@media print {
+  .pay-chip, .pay-meta { color: #111; border-color: #bbb; }
+}
+
+/* 16px keeps iOS Safari from zooming the whole dashboard when an organiser
+   taps a filter or a note field on a phone. Below 16px it zooms on focus. */
+@media (max-width: 820px) {
+  input, select, textarea { font-size: 16px; }
 }

@@ -26,31 +26,54 @@
         </div>
       </div>
 
-      <h1 id="gateTitle">Organiser dashboard</h1>
+      <h1 id="gateTitle">Organiser sign in</h1>
       <p class="gate-copy">
-        This page reads and changes live registration records. Enter the dashboard
-        key that was created in the Apps Script project. The key is checked on the
-        server for every action and is kept only in this tab.
+        Sign in with your own organiser ID and personal PIN. The PIN is verified
+        on the server, nothing is stored in this page, and the same account works
+        from your phone, a tablet or a laptop.
       </p>
 
       <form id="gateForm" autocomplete="off">
         <label class="field">
-          <span>Dashboard key</span>
-          <input id="gateKey" type="password" name="key" required minlength="20"
-                 autocomplete="off" spellcheck="false"
-                 placeholder="Paste the key from setupAdminKey()">
+          <span>Organiser ID</span>
+          <input id="gateId" type="text" name="organiserId" required
+                 autocomplete="username" spellcheck="false"
+                 autocapitalize="none" placeholder="your organiser ID">
+        </label>
+        <label class="field">
+          <span>Personal PIN</span>
+          <input id="gatePin" type="password" name="pin" required minlength="6"
+                 autocomplete="current-password"
+                 placeholder="your PIN">
         </label>
         <label class="checkbox">
           <input id="gateRemember" type="checkbox">
-          <span>Keep me signed in while this tab stays open</span>
+          <span>Keep me signed in on this device</span>
         </label>
-        <button class="btn btn-primary" id="gateSubmit" type="submit">Open dashboard</button>
+        <button class="btn btn-primary" id="gateSubmit" type="submit">Sign in</button>
         <p class="gate-error" id="gateError" role="alert" hidden></p>
       </form>
 
+      <details class="gate-recovery">
+        <summary>Use the recovery key instead</summary>
+        <p>
+          A break-glass Super Admin credential for when no PIN works. Anyone with
+          it gets full access, so retire it once every organiser has an account:
+          delete the <code>admin_key</code> Script Property.
+        </p>
+        <label class="field">
+          <span>Dashboard key</span>
+          <input id="gateKey" type="password" name="key" autocomplete="off" spellcheck="false"
+                 placeholder="Paste the key from setupAdminKey()">
+        </label>
+        <button class="btn btn-ghost" id="gateKeySubmit" type="button">Sign in with the key</button>
+      </details>
+
       <p class="gate-note">
-        No key yet? In the Apps Script editor run <code>setupAdminKey()</code> once and
-        copy the value it prints. Anyone without the key gets nothing from the API.
+        No account yet? In the Apps Script editor run <code>setupSuperAdmin()</code> once.
+        It prints an organiser ID and a strong PIN for the first Super Admin, and that PIN
+        is never stored or shown again. There is no default PIN, and no administrator
+        credential in this page or the repository.
       </p>
       <a class="gate-back" href="index.html">← Back to the registration site</a>
     </div>
@@ -68,7 +91,12 @@
       </div>
 
       <div class="topbar-actions">
+        <span class="whoami" id="whoAmI">
+          <b id="whoName">—</b>
+          <span class="role-chip" id="whoRole">—</span>
+        </span>
         <span class="live-pill" id="refreshState"><i></i> Live</span>
+        <button class="btn btn-ghost" id="sessionBtn" type="button">This device</button>
         <button class="btn btn-ghost" id="refreshBtn" type="button">Refresh</button>
         <button class="btn btn-ghost" id="exportBtn" type="button">Export CSV</button>
         <button class="btn btn-ghost" id="signOutBtn" type="button">Sign out</button>
@@ -107,6 +135,21 @@
           <strong id="statRejected">—</strong>
           <span>Kept as a record</span>
         </article>
+        <article class="stat-card">
+          <p>Online to check</p>
+          <strong id="statOnlineAwaiting">—</strong>
+          <span>Awaiting verification</span>
+        </article>
+        <article class="stat-card">
+          <p>Cash pending</p>
+          <strong id="statCashPending">—</strong>
+          <span>Not received yet</span>
+        </article>
+        <article class="stat-card">
+          <p>Paid</p>
+          <strong id="statPaid">—</strong>
+          <span id="statPaidNote">₹0 collected</span>
+        </article>
       </section>
 
       <section class="panel" id="registrations" aria-labelledby="regTitle">
@@ -124,6 +167,26 @@
               <span class="sr-only">Filter by department</span>
               <select id="departmentFilter">
                 <option value="">All departments</option>
+              </select>
+            </label>
+            <label class="select">
+              <span class="sr-only">Filter by payment status</span>
+              <select id="paymentFilter">
+                <option value="">All payments</option>
+                <option value="AWAITING">Awaiting money</option>
+                <option value="PENDING VERIFICATION">Online — to verify</option>
+                <option value="PENDING">Cash — pending</option>
+                <option value="PAID">Paid</option>
+                <option value="NEEDS REVIEW">Needs review</option>
+                <option value="NOT SELECTED">Not chosen yet</option>
+              </select>
+            </label>
+            <label class="select">
+              <span class="sr-only">Filter by payment method</span>
+              <select id="methodFilter">
+                <option value="">Any method</option>
+                <option value="ONLINE">Online</option>
+                <option value="CASH">Cash</option>
               </select>
             </label>
           </div>
@@ -145,6 +208,7 @@
                 <th scope="col">Department</th>
                 <th scope="col">Players</th>
                 <th scope="col">Registered</th>
+                <th scope="col">Payment</th>
                 <th scope="col">Status</th>
                 <th scope="col"><span class="sr-only">Open</span></th>
               </tr>
@@ -165,6 +229,70 @@
             <button class="btn btn-ghost" id="nextBtn" type="button">Next</button>
           </div>
         </div>
+      </section>
+
+      <!-- ====================== PAYMENTS TO REVIEW ====================== -->
+      <section class="panel" id="review" aria-labelledby="reviewTitle">
+        <div class="panel-head">
+          <div>
+            <h2 id="reviewTitle">Payments to review</h2>
+            <p id="reviewState">Gateway payments that could not be confirmed automatically.</p>
+          </div>
+          <div class="panel-tools">
+            <button class="btn btn-ghost" id="reviewRefresh" type="button">Refresh</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="reg-table">
+            <thead>
+              <tr>
+                <th scope="col">Team</th>
+                <th scope="col">Amount</th>
+                <th scope="col">Gateway</th>
+                <th scope="col">Reference</th>
+                <th scope="col">Reason</th>
+                <th scope="col"><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody id="reviewRows"></tbody>
+          </table>
+          <div class="state" id="reviewEmpty" hidden>
+            <p class="state-title">Nothing waiting</p>
+            <p class="state-copy">Payments the gateway could not confirm on its own will appear here.</p>
+          </div>
+        </div>
+
+        <p class="hint">
+          Only accept after you have seen the money — in your UPI app, on the
+          bank statement, or on the gateway's own payment page. Accepting saves
+          the team as <b>Paid</b> and writes your name and note onto the row.
+          Rejecting saves nobody and closes the attempt.
+        </p>
+      </section>
+
+      <!-- ====================== TOURNAMENT SETTINGS ====================== -->
+      <section class="panel" id="settings" aria-labelledby="settingsTitle">
+        <div class="panel-head">
+          <div>
+            <h2 id="settingsTitle">Tournament settings</h2>
+            <p id="settingsState">The live entry fee, stored in the sheet.</p>
+          </div>
+        </div>
+
+        <div class="settings-row">
+          <label class="field">
+            <span>Entry fee per team (₹)</span>
+            <input id="feeInput" type="number" min="1" max="10000" step="1" inputmode="numeric">
+          </label>
+          <button class="btn btn-primary" id="feeSave" type="button">Save fee</button>
+        </div>
+
+        <p class="hint" id="feeHint">
+          New registrations are charged this fee. A team that has already
+          registered keeps the fee copied onto its row, so changing this later
+          never rewrites what an older team paid.
+        </p>
       </section>
 
       <!-- ====================== WHATSAPP ====================== -->
@@ -262,6 +390,109 @@
           </div>
         </div>
       </section>
+
+      <!-- ================= ORGANISER ACCOUNTS (SUPER ADMIN) ================= -->
+      <section class="panel org-panel" id="organisers" aria-labelledby="orgTitle" hidden>
+        <div class="panel-head">
+          <div>
+            <h2 id="orgTitle">Organiser accounts</h2>
+            <p id="orgSummary">Only a Super Admin sees this panel.</p>
+          </div>
+          <div class="panel-tools">
+            <button class="btn btn-ghost" id="orgRefresh" type="button">Refresh</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="reg-table">
+            <thead>
+              <tr>
+                <th scope="col">Organiser</th>
+                <th scope="col">Role</th>
+                <th scope="col">State</th>
+                <th scope="col">Last sign-in</th>
+                <th scope="col"><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody id="orgRows"></tbody>
+          </table>
+        </div>
+
+        <h3 class="org-sub">Add an organiser</h3>
+        <form class="org-form" id="orgCreateForm" autocomplete="off">
+          <label class="field">
+            <span>Organiser ID</span>
+            <input id="orgNewId" type="text" required autocomplete="off" spellcheck="false"
+                   autocapitalize="none" placeholder="e.g. ravi.k">
+          </label>
+          <label class="field">
+            <span>Name</span>
+            <input id="orgNewName" type="text" autocomplete="off" placeholder="e.g. Ravi Kumar">
+          </label>
+          <label class="field">
+            <span>Role</span>
+            <select id="orgNewRole">
+              <option value="ORGANIZER">Organizer</option>
+              <option value="SUPER">Super Admin</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Personal PIN</span>
+            <input id="orgNewPin" type="password" required minlength="6" autocomplete="new-password"
+                   placeholder="6+ characters">
+          </label>
+          <button class="btn btn-primary" id="orgCreateBtn" type="submit">Create account</button>
+          <p class="hint" id="orgCreateHint">
+            The PIN is hashed by the server and cannot be read back. Digits alone are weak on a
+            phone keyboard, so mix letters and numbers where you can.
+          </p>
+        </form>
+
+        <h3 class="org-sub">Change your own PIN</h3>
+        <form class="org-form" id="orgSelfForm" autocomplete="off">
+          <label class="field">
+            <span>Current PIN</span>
+            <input id="orgCurrentPin" type="password" required autocomplete="current-password">
+          </label>
+          <label class="field">
+            <span>New PIN</span>
+            <input id="orgNewSelfPin" type="password" required minlength="6" autocomplete="new-password">
+          </label>
+          <button class="btn btn-ghost" id="orgSelfBtn" type="submit">Change my PIN</button>
+          <p class="hint">Changing your PIN signs your other devices out.</p>
+        </form>
+
+        <h3 class="org-sub">Signed-in devices</h3>
+        <div class="table-wrap">
+          <table class="reg-table">
+            <thead>
+              <tr>
+                <th scope="col">Organiser</th>
+                <th scope="col">Device</th>
+                <th scope="col">Last seen</th>
+                <th scope="col"><span class="sr-only">Action</span></th>
+              </tr>
+            </thead>
+            <tbody id="orgSessions"></tbody>
+          </table>
+        </div>
+
+        <h3 class="org-sub">Audit trail</h3>
+        <div class="table-wrap">
+          <table class="reg-table">
+            <thead>
+              <tr>
+                <th scope="col">When</th>
+                <th scope="col">Actor</th>
+                <th scope="col">Action</th>
+                <th scope="col">Target</th>
+                <th scope="col">Result</th>
+              </tr>
+            </thead>
+            <tbody id="orgAudit"></tbody>
+          </table>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -286,7 +517,48 @@
       <h3>Roster</h3>
       <ul class="roster" id="drawerRoster"></ul>
 
+      <h3>Payment</h3>
+      <div class="pay-summary">
+        <p class="pay-line"><span>Entry fee</span><b id="drawerFee">₹100</b></p>
+        <p class="pay-line"><span>Method</span><b id="drawerMethod">—</b></p>
+        <p class="pay-line">
+          <span>Status</span>
+          <b class="badge" id="drawerPayStatus">NOT SELECTED</b>
+        </p>
+        <p class="pay-line" id="drawerUtrLine" hidden>
+          <span>UTR / reference</span><b id="drawerUtr">—</b>
+        </p>
+        <p class="pay-line" id="drawerVerifiedLine" hidden>
+          <span>Verified by provider</span><b id="drawerVerified">—</b>
+        </p>
+        <p class="pay-line" id="drawerPaymentIdLine" hidden>
+          <span>Payment ID</span><b id="drawerPaymentId">—</b>
+        </p>
+        <p class="pay-line" id="drawerPayUpdatedLine" hidden>
+          <span>Last update</span><b id="drawerPayUpdated">—</b>
+        </p>
+      </div>
+
+      <p class="hint" id="drawerPayHint">
+        Online payments are marked paid by the provider, server to server. Cash is
+        confirmed by you, and only after you have the notes in hand.
+      </p>
+
+      <div class="status-actions">
+        <button class="btn btn-approve" data-pay-status="PAID" type="button">Mark paid</button>
+        <button class="btn btn-ghost" data-pay-status="NEEDS REVIEW" type="button">Needs review</button>
+        <button class="btn btn-wait" data-pay-status="PENDING" type="button">Cash pending</button>
+        <button class="btn btn-ghost" data-pay-status="PENDING VERIFICATION" type="button">Online pending</button>
+      </div>
+
+      <label class="field">
+        <span class="sr-only">Payment note</span>
+        <input id="payNoteInput" type="text" maxlength="200"
+               placeholder="e.g. UPI ref checked in FamApp">
+      </label>
+
       <h3>Change status</h3>
+      <p class="hint">Approve saves the status first, then opens WhatsApp with the message already typed — you only press Send.</p>
       <div class="status-actions">
         <button class="btn btn-approve" data-set-status="APPROVED" type="button">Approve</button>
         <button class="btn btn-wait" data-set-status="WAITLISTED" type="button">Waitlist</button>
@@ -307,6 +579,7 @@
       <h3>Contact</h3>
       <p class="hint" id="drawerContactHint">Copy a message and send it from your own WhatsApp.</p>
       <div class="contact-actions">
+        <a class="btn btn-ghost" id="openWaLink" href="#" target="_blank" rel="noopener" hidden>Open WhatsApp</a>
         <button class="btn btn-ghost" id="copyMessageBtn" type="button">Copy WhatsApp message</button>
       </div>
     </div>
@@ -320,6 +593,19 @@
       <div class="confirm-actions">
         <button class="btn btn-ghost" id="confirmCancel" type="button">Cancel</button>
         <button class="btn btn-reject" id="confirmOk" type="button">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====================== WHO GETS THE MESSAGE ====================== -->
+  <div class="confirm-backdrop" id="waPickBackdrop" hidden>
+    <div class="confirm" role="alertdialog" aria-modal="true" aria-labelledby="waPickTitle">
+      <h2 id="waPickTitle">Who gets the approval message?</h2>
+      <p id="waPickCopy">Choose a recipient.</p>
+      <div class="wa-pick-list" id="waPickList"></div>
+      <div class="confirm-actions">
+        <button class="btn btn-ghost" id="waPickCancel" type="button">Cancel</button>
+        <button class="btn btn-approve" id="waPickOk" type="button">Approve &amp; open WhatsApp</button>
       </div>
     </div>
   </div>

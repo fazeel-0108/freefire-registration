@@ -78,6 +78,12 @@ class Range {
     this.sheet.calls.setValues++;
     return this;
   }
+  // Single-cell read, used by the registration path to read back the stamp it
+  // just wrote so the new row's id can be signed.
+  getValue() {
+    if (this.numRows !== 1 || this.numCols !== 1) throw new Error('getValue needs a single cell');
+    return this.sheet.grid.cells[this.row - 1][this.col - 1];
+  }
   // Single-cell write, used by the dashboard when it changes a status or note.
   setValue(value) {
     if (this.numRows !== 1 || this.numCols !== 1) throw new Error('setValue needs a single cell');
@@ -137,6 +143,21 @@ class Sheet {
     }
     this.grid.cols += count;
   }
+  appendRow(values) {
+    const row = this.grid.lastRow() + 1;
+    if (row > this.grid.rows) throw new Error('appendRow past the end of the sheet');
+    values.forEach((value, i) => { this.grid.cells[row - 1][i] = value; });
+    this.calls.appendRow = (this.calls.appendRow || 0) + 1;
+    return this;
+  }
+  deleteRows(rowIndex, howMany) {
+    if (rowIndex < 2) throw new Error('deleteRows cannot remove the header row');
+    if (rowIndex + howMany - 1 > this.getLastRow()) throw new Error('deleteRows past the data');
+    this.grid.cells.splice(rowIndex - 1, howMany);
+    for (let i = 0; i < howMany; i++) this.grid.cells.push(new Array(this.grid.cols).fill(''));
+    this.calls.deleteRows = (this.calls.deleteRows || 0) + 1;
+    return this;
+  }
   setRowHeight() { return this; }
   setFrozenRows(n) { this.frozenRows = n; return this; }
   setFrozenColumns(n) { this.frozenColumns = n; return this; }
@@ -161,6 +182,7 @@ const propsStore = new Map();
 const scriptProps = new Map();
 const emails = [];
 const log = [];
+const openedIds = [];
 
 /* Scriptable WhatsApp provider. Tests queue the next response (or an exception)
    so the delivery states (accepted / rejected / no answer) can all be reached
@@ -194,7 +216,7 @@ const sandbox = {
   console: { log: m => log.push(String(m)), error: m => log.push('ERROR ' + m), warn: m => log.push('WARN ' + m) },
   SpreadsheetApp: {
     getActiveSpreadsheet: () => spreadsheet,
-    openById: () => spreadsheet,
+    openById: (id) => { openedIds.push(id); return spreadsheet; },
     newDataValidation: () => builder({}),
     newConditionalFormatRule: () => builder({}),
     BorderStyle: { SOLID: 'SOLID', SOLID_MEDIUM: 'SOLID_MEDIUM' },
@@ -225,10 +247,17 @@ const sandbox = {
       getProperty: k => (propsStore.has(k) ? propsStore.get(k) : null),
       setProperty: (k, v) => propsStore.set(k, v)
     }),
-    // The admin key lives here in the real runtime: per-script, never published.
+    // The admin key, the organiser accounts and the sessions live here in the
+    // real runtime: per-script, never published, never in the repository.
     getScriptProperties: () => ({
       getProperty: k => (scriptProps.has(k) ? scriptProps.get(k) : null),
-      setProperty: (k, v) => scriptProps.set(k, v)
+      setProperty: (k, v) => {
+        // A real property value is capped at about 9 KB. Enforcing it here is
+        // what makes the chunked account/session stores prove themselves.
+        if (String(v).length > 9000) throw new Error('Property value too large: ' + String(v).length);
+        scriptProps.set(k, v);
+      },
+      deleteProperty: k => scriptProps.delete(k)
     })
   },
   LockService: {
@@ -278,9 +307,14 @@ const sandbox = {
       const next = fetchQueue.length ? fetchQueue.shift() : null;
       if (next && next.throws) throw new Error(next.throws);
       if (next) {
+        // A gateway that answers about the request it just received (echoing
+        // the order id, for example) needs the request, not a fixed string.
+        const body = typeof next.bodyFn === 'function'
+          ? next.bodyFn(url, options)
+          : next.body;
         return {
           getResponseCode: () => next.code,
-          getContentText: () => next.body
+          getContentText: () => body
         };
       }
       // Default: the provider accepts the message and returns a message id.
@@ -306,6 +340,26 @@ sandbox.Utilities.base64EncodeWebSafe = (bytes) => {
   return buffer.toString('base64url');
 };
 sandbox.Utilities.getUuid = () => crypto.randomUUID();
+// Apps Script's base64Encode takes either a String or a byte array, and the
+// payments code passes it a string ('key:secret'). The mock must accept both,
+// or it fails a call the real runtime happily makes.
+sandbox.Utilities.base64Encode = (bytes) => {
+  const buffer = typeof bytes === 'string'
+    ? Buffer.from(bytes, 'utf8')
+    : (Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.map(b => (b + 256) % 256)));
+  return buffer.toString('base64');
+};
+// Apps Script signs its byte arrays; PBKDF2's XOR relies on that, so the mock
+// returns signed values too rather than a tidy unsigned array.
+sandbox.Utilities.computeHmacSha256Signature = (value, key) => {
+  const asBuffer = (input) => {
+    if (typeof input === 'string') return Buffer.from(input, 'utf8');
+    if (input && input.getBytes) return Buffer.from(input.getBytes().map(b => (b + 256) % 256));
+    return Buffer.from(input.map(b => (b + 256) % 256));
+  };
+  const digest = crypto.createHmac('sha256', asBuffer(key)).update(asBuffer(value)).digest();
+  return Array.from(digest).map(b => (b > 127 ? b - 256 : b));
+};
 
 vm.createContext(sandbox);
 vm.runInContext(SOURCE, sandbox, { filename: 'apps-script.js' });
@@ -365,13 +419,24 @@ check('reports 4 players', first.players === 4, JSON.stringify(first));
 check('row 1 is the header', sheet.grid.cells[0][1] === 'Team Name', sheet.grid.cells[0][1]);
 // The contract grew by Status and Note so the organiser dashboard can work on
 // the same rows the registrations already land in.
-check('header has 13 columns', sandbox.HEADERS.length === 13 &&
+check('header has the original columns', sandbox.HEADERS.length === 26 &&
   sheet.grid.cells[0][8] === 'Player 4 Name' &&
   sheet.grid.cells[0][9] === 'Status' &&
   sheet.grid.cells[0][10] === 'Note' &&
   sheet.grid.cells[0][11] === 'WhatsApp Consent' &&
   sheet.grid.cells[0][12] === 'Consent At',
-  JSON.stringify(sheet.grid.cells[0].slice(0, 13)));
+  JSON.stringify(sheet.grid.cells[0].slice(0, 20)));
+// The payment columns were appended, never inserted, so every older row keeps
+// its values in the same cells.
+check('payment columns are appended after the original ones',
+  sheet.grid.cells[0][13] === 'Entry Fee' &&
+  sheet.grid.cells[0][14] === 'Payment Method' &&
+  sheet.grid.cells[0][15] === 'Payment Status' &&
+  sheet.grid.cells[0][16] === 'UTR / Reference' &&
+  sheet.grid.cells[0][17] === 'Payment Note' &&
+  sheet.grid.cells[0][18] === 'Payment Updated At' &&
+  sheet.grid.cells[0][19] === 'Payment Updated By',
+  JSON.stringify(sheet.grid.cells[0].slice(13, 20)));
 check('writes the row and marks it PENDING',
   sheet.grid.cells[1].slice(0, 9).filter(v => v !== '').length === 9 &&
   String(sheet.grid.cells[1][9]) === 'PENDING' &&
@@ -388,7 +453,13 @@ check('phone 1 stored', String(sheet.grid.cells[1][4]) === '7075593104');
 check('player 3 name stored', sheet.grid.cells[1][7] === 'QENZ');
 check('header formatted', sheet.calls.setValues > 0);
 check('frozen header row', sheet.frozenRows === 1);
-check('duplicate rules installed', sheet.rules.length === 2, String(sheet.rules.length));
+// Two duplicate-number rules plus one colour rule for each payment status.
+check('duplicate and payment rules installed', sheet.rules.length === 7, String(sheet.rules.length));
+check('a paid cell is coloured distinctly',
+  sheet.rules.some(r =>
+    r.setRanges && r.whenFormulaSatisfied &&
+    String(r.whenFormulaSatisfied[0]).indexOf('PAID') !== -1),
+  JSON.stringify(sheet.rules.map(r => r.whenFormulaSatisfied && r.whenFormulaSatisfied[0])));
 check('department dropdown installed', sheet.validationCells['2,3'] !== undefined);
 // Regression guard: a dropdown stamped onto hundreds of empty rows put an arrow
 // in every one of them and made the sheet look broken.
@@ -413,7 +484,9 @@ check(
   'clearDataValidations was never called'
 );
 check('no chatter past the last column',
-  sheet.grid.cells[0].slice(13).every(v => v === '') && sheet.grid.cells[1].slice(13).every(v => v === ''));
+  sheet.grid.cells[0].slice(sandbox.HEADERS.length).every(v => v === '') &&
+  sheet.grid.cells[1].slice(sandbox.HEADERS.length).every(v => v === ''),
+  JSON.stringify(sheet.grid.cells[1].slice(sandbox.HEADERS.length - 1)));
 
 console.log('\n3. duplicate and counter');
 const dup = post(validPayload('Shadow Squad'));
@@ -510,11 +583,13 @@ sandbox.CONFIG.MAX_TEAMS = 0;
 cacheStore.clear(); // a warm stats cache is expected to skip sheet reads
 const afterRepair = stats();
 check('repairs a wrong header label', sheet.grid.cells[0][8] === 'Player 4 Name', sheet.grid.cells[0][8]);
-// Leftovers now begin after the consent columns (column 14), not after Note.
-sheet.grid.cells[0][13] = 'old column';
+// Leftovers now begin after the verified-payment columns, not after Note.
+sheet.insertColumnsAfter(sandbox.HEADERS.length, 1); // an old script left a 27th column behind
+sheet.grid.cells[0][sandbox.HEADERS.length] = 'old column';
 cacheStore.clear(); // the repair only happens on a real sheet read, not a cached one
 const repairedAgain = stats();
-check('clears stale leftover header', sheet.grid.cells[0][13] === '', JSON.stringify(sheet.grid.cells[0][13]));
+check('clears stale leftover header', sheet.grid.cells[0][sandbox.HEADERS.length] === '',
+  JSON.stringify(sheet.grid.cells[0][sandbox.HEADERS.length]));
 check('repair keeps stats working', repairedAgain.ok === true);
 check('stats still work after repair', afterRepair.ok === true && afterRepair.teams === 2);
 
@@ -1207,7 +1282,7 @@ check('a team without consent never reaches the provider', fetchCalls.length ===
 registerTeam('WA Consent', true);
 const consentRow = (function () {
   const rows = sheet.getLastRow() - 1;
-  const values = sheet.getRange(2, 1, rows, 13).getValues();
+  const values = sheet.getRange(2, 1, rows, sandbox.HEADERS.length).getValues();
   return values.filter(v => v[1] === 'WA Consent')[0];
 })();
 check('consent is stored as YES with a timestamp',
@@ -1446,5 +1521,1240 @@ check('the notification log lists rows with their states',
   JSON.stringify(notifLog.counts));
 check('the log never carries the access token',
   JSON.stringify(notifLog).indexOf(WA_KEY) === -1);
+console.log('\n21. organiser accounts and PIN rules');
+
+const SUPER_PIN = 'Championship-91-Xq';
+const ORGANISER_PIN = 'Table-Tennis-24';
+
+function loginCall(body) {
+  return adminCall(Object.assign({ action: 'login' }, body));
+}
+
+const created = sandbox.setupSuperAdmin('fazeel', SUPER_PIN);
+check('the first Super Admin can be created',
+  created.ok === true && created.account.role === 'SUPER' && created.account.id === 'fazeel',
+  JSON.stringify(created).slice(0, 200));
+
+const storedAccounts = JSON.stringify(sandbox.orgAccounts_());
+check('the PIN is stored as a salted PBKDF2 verifier',
+  /^pbkdf2-sha256\$\d+\$[0-9a-f]{32}\$[A-Za-z0-9+/=]+$/.test(sandbox.orgAccounts_()[0].verifier),
+  storedAccounts.slice(0, 200));
+check('the PIN itself is never stored',
+  storedAccounts.indexOf(SUPER_PIN) === -1 && SOURCE.indexOf(SUPER_PIN) === -1);
+check('the verifier never leaves the server',
+  JSON.stringify(adminCall({ action: 'account-list', key: adminKey })).indexOf('pbkdf2') === -1);
+check('the iteration count is at least the configured floor',
+  Number(sandbox.orgAccounts_()[0].verifier.split('$')[1]) >= sandbox.ORG.PBKDF2_FLOOR,
+  sandbox.orgAccounts_()[0].verifier.split('$')[1]);
+
+const weakPins = ['123456', '000000', 'aaaaaa', '12345678', 'password', 'qwerty123', 'abc123'];
+const weakAccepted = weakPins.filter(pin => sandbox.orgCreateAccount_({ id: 'weak' + pin, pin: pin, role: 'ORGANIZER' }).ok);
+check('weak and repeated PINs are refused', weakAccepted.length === 0, JSON.stringify(weakAccepted));
+check('a PIN shorter than the minimum is refused',
+  sandbox.orgCreateAccount_({ id: 'shorty', pin: 'Ab3', role: 'ORGANIZER' }).code === 'PIN');
+check('a PIN equal to the organiser ID is refused',
+  sandbox.orgCreateAccount_({ id: 'samepin', pin: 'samepin', role: 'ORGANIZER' }).code === 'PIN');
+check('a PIN containing the organiser ID is refused',
+  sandbox.orgCreateAccount_({ id: 'ravi', pin: 'ravi-scores-1', role: 'ORGANIZER' }).code === 'PIN');
+
+const badIds = ['ab', 'has space', '<script>', 'x.y'.repeat(20), '-leading'];
+const badIdAccepted = badIds.filter(id => sandbox.orgCreateAccount_({ id: id, pin: 'Good-Pin-77', role: 'ORGANIZER' }).ok);
+check('malformed organiser IDs are refused', badIdAccepted.length === 0, JSON.stringify(badIdAccepted));
+check('an organiser ID is normalised to lowercase',
+  sandbox.orgCreateAccount_({ id: '  RAVI.K ', pin: ORGANISER_PIN, role: 'ORGANIZER' }).account.id === 'ravi.k');
+check('a duplicate organiser ID is refused',
+  sandbox.orgCreateAccount_({ id: 'ravi.k', pin: ORGANISER_PIN, role: 'ORGANIZER' }).code === 'EXISTS');
+
+console.log('\n22. signing in');
+
+const goodLogin = loginCall({ organiserId: 'fazeel', pin: SUPER_PIN, device: 'Galaxy S23' });
+check('a valid organiser ID and PIN are accepted',
+  goodLogin.ok === true && /^[a-f0-9]{64}$/.test(goodLogin.session), JSON.stringify(goodLogin).slice(0, 200));
+check('the session response names the role', goodLogin.actor.role === 'SUPER');
+check('the response lists what that role may do',
+  goodLogin.permissions.indexOf('accounts.manage') !== -1);
+check('the PIN is not echoed back', JSON.stringify(goodLogin).indexOf(SUPER_PIN) === -1);
+
+const wrongPin = loginCall({ organiserId: 'fazeel', pin: 'Totally-Wrong-1' });
+check('a wrong PIN is rejected', wrongPin.ok === false && wrongPin.code === 'CREDENTIALS', JSON.stringify(wrongPin));
+const noSuchId = loginCall({ organiserId: 'nobody-here', pin: 'Totally-Wrong-1' });
+check('an unknown organiser ID is rejected', noSuchId.ok === false && noSuchId.code === 'CREDENTIALS');
+check('an unknown ID and a wrong PIN look identical', noSuchId.error === wrongPin.error,
+  JSON.stringify({ a: noSuchId.error, b: wrongPin.error }));
+check('a blank PIN is rejected before any hashing',
+  loginCall({ organiserId: 'fazeel', pin: '' }).code === 'CREDENTIALS');
+check('an organizer cannot sign in with the wrong account\'s PIN',
+  loginCall({ organiserId: 'ravi.k', pin: SUPER_PIN }).ok === false);
+
+console.log('\n23. lockout on repeated failures');
+
+const lockedId = 'ravi.k';
+for (let i = 0; i < sandbox.ORG.LOGIN_MAX_FAILS; i++) loginCall({ organiserId: lockedId, pin: 'nope-' + i + '-nope' });
+const tooMany = loginCall({ organiserId: lockedId, pin: ORGANISER_PIN });
+check('repeated failures lock the account out',
+  tooMany.ok === false && tooMany.code === 'LOCKED', JSON.stringify(tooMany));
+check('the lockout reports how long to wait', tooMany.retryAfterSeconds > 0);
+check('the lockout does not reveal whether the ID exists',
+  loginCall({ organiserId: 'still-nobody', pin: 'nope-nope-1' }).code !== 'LOCKED');
+check('the correct PIN is refused while locked out', tooMany.ok === false);
+
+cacheStore.delete(sandbox.orgLockKey_(lockedId));
+cacheStore.delete(sandbox.orgFailKey_(lockedId));
+const afterLock = loginCall({ organiserId: lockedId, pin: ORGANISER_PIN, device: 'Android tablet' });
+check('the lock lifts after its window', afterLock.ok === true, JSON.stringify(afterLock).slice(0, 160));
+check('an Organizer signs in with the ORGANIZER role', afterLock.actor.role === 'ORGANIZER');
+check('an Organizer does not carry account management rights',
+  afterLock.permissions.indexOf('accounts.manage') === -1);
+
+console.log('\n24. sessions and server-side permissions');
+
+const superSession = goodLogin.session;
+const organiserSession = afterLock.session;
+
+check('a call with no credentials at all is refused',
+  adminCall({ action: 'account-list' }).code === 'AUTH');
+const forged = adminCall({ action: 'list', session: 'a'.repeat(64) });
+check('a forged session token is refused', forged.ok === false && forged.code === 'SESSION', JSON.stringify(forged));
+check('a malformed session token is refused',
+  adminCall({ action: 'list', session: '<script>' }).ok === false);
+
+const bySession = adminCall({ action: 'list', session: superSession, pageSize: 50 });
+check('a session token lists the registrations', bySession.ok === true && bySession.records.length >= 2);
+const byKey = adminCall({ action: 'list', key: adminKey, pageSize: 50 });
+check('sessions and the recovery key see the same records',
+  bySession.total === byKey.total, JSON.stringify({ a: bySession.total, b: byKey.total }));
+
+const organizerView = adminCall({ action: 'list', session: organiserSession, pageSize: 50 });
+check('a second account sees exactly the same shared data',
+  organizerView.ok === true && organizerView.total === bySession.total,
+  JSON.stringify({ a: organizerView.total, b: bySession.total }));
+
+const superOnly = [
+  ['account-list', {}],
+  ['account-create', { organiserId: 'hacker', pin: 'Hacker-Pin-99', role: 'SUPER' }],
+  ['account-update', { id: 'ravi.k', role: 'SUPER' }],
+  ['account-reset-pin', { id: 'fazeel', pin: 'New-Pin-12345' }],
+  ['account-delete', { id: 'fazeel' }],
+  ['account-revoke-sessions', { id: 'fazeel' }],
+  ['session-list', {}],
+  ['session-revoke', { handle: 'x'.repeat(30) }],
+  ['audit-list', {}]
+];
+const leaked = superOnly.filter(([action, extra]) => {
+  const result = adminCall(Object.assign({ action: action, session: organiserSession }, extra));
+  return result.ok !== false || result.code !== 'FORBIDDEN';
+});
+check('an Organizer cannot perform any Super Admin action',
+  leaked.length === 0, JSON.stringify(leaked));
+check('an Organizer cannot promote themselves to Super Admin',
+  adminCall({ action: 'account-update', session: organiserSession, id: 'ravi.k', role: 'SUPER' }).code === 'FORBIDDEN');
+check('the refusal names the role instead of leaking data',
+  /ORGANIZER/.test(adminCall({ action: 'session-list', session: organiserSession }).error));
+check('nothing about the accounts is in that refusal',
+  JSON.stringify(adminCall({ action: 'account-list', session: organiserSession })).indexOf('fazeel') === -1);
+
+const organizerRecords = adminCall({ action: 'list', session: organiserSession, q: 'Shadow Squad' });
+check('an Organizer can still view registrations', organizerRecords.ok === true);
+check('an Organizer can still change a team status',
+  adminCall({ action: 'note', session: organiserSession, id: organizerRecords.records[0].id, note: 'Checked by organiser' }).ok === true);
+check('an Organizer can still export', adminCall({ action: 'export', session: organiserSession }).ok === true);
+check('an Organizer can still read the WhatsApp config',
+  adminCall({ action: 'notif-config', session: organiserSession }).ok === true);
+
+console.log('\n25. logout, expiry, disabling and PIN reset');
+
+const throwaway = loginCall({ organiserId: 'ravi.k', pin: ORGANISER_PIN, device: 'Test laptop' });
+check('a second device gets its own session',
+  throwaway.ok === true && throwaway.session !== organiserSession);
+check('both devices work at the same time',
+  adminCall({ action: 'list', session: organiserSession }).ok === true &&
+  adminCall({ action: 'list', session: throwaway.session }).ok === true);
+
+check('signing out ends that session', adminCall({ action: 'logout', session: throwaway.session }).ok === true);
+const afterLogout = adminCall({ action: 'list', session: throwaway.session });
+check('a signed-out session cannot be reused',
+  afterLogout.ok === false && afterLogout.code === 'SESSION', JSON.stringify(afterLogout));
+check('the other device stays signed in',
+  adminCall({ action: 'list', session: organiserSession }).ok === true);
+check('logging out twice is harmless',
+  adminCall({ action: 'logout', session: throwaway.session }).ok === true);
+
+const expiring = loginCall({ organiserId: 'ravi.k', pin: ORGANISER_PIN, device: 'Old tablet' });
+const sessionsNow = sandbox.orgSessions_();
+for (const record of sessionsNow) {
+  if (record.t === sandbox.orgTokenHash_(expiring.session)) {
+    record.idle = new Date().getTime() - 1000;
+    record.abs = new Date().getTime() - 1000;
+  }
+}
+sandbox.orgStoreWrite_(sandbox.ORG.SESSIONS_PROPERTY, sessionsNow);
+const expired = adminCall({ action: 'list', session: expiring.session });
+check('an expired session is refused',
+  expired.ok === false && expired.code === 'SESSION', JSON.stringify(expired));
+check('the expired session is dropped from the store',
+  sandbox.orgSessions_().every(r => r.t !== sandbox.orgTokenHash_(expiring.session)));
+
+const listed = adminCall({ action: 'session-list', session: superSession });
+check('a Super Admin can list active sessions', listed.ok === true && listed.sessions.length >= 1);
+check('the session list never carries a token',
+  JSON.stringify(listed).indexOf(organiserSession) === -1);
+const organiserRow = listed.sessions.filter(s => s.organiser === 'ravi.k')[0];
+check('each session names the device it came from',
+  !!organiserRow && /tablet|laptop|android|galaxy/i.test(organiserRow.device), JSON.stringify(organiserRow && organiserRow.device));
+check('a Super Admin can end one device',
+  adminCall({ action: 'session-revoke', session: superSession, handle: organiserRow.handle }).ok === true);
+check('that device is now signed out',
+  adminCall({ action: 'list', session: organiserSession }).code === 'SESSION');
+check('an unknown session handle is refused',
+  adminCall({ action: 'session-revoke', session: superSession, handle: 'y'.repeat(30) }).code === 'SESSION');
+
+console.log('\n26. disabling, PIN reset and the last Super Admin');
+
+check('the only Super Admin cannot be demoted',
+  adminCall({ action: 'account-update', session: superSession, id: 'fazeel', role: 'ORGANIZER' }).code === 'LASTSUPER');
+check('the only Super Admin cannot be disabled',
+  adminCall({ action: 'account-update', session: superSession, id: 'fazeel', enabled: false }).code === 'LASTSUPER');
+check('the only Super Admin cannot be deleted',
+  adminCall({ action: 'account-delete', session: superSession, id: 'fazeel' }).code === 'LASTSUPER');
+
+const coadmin = adminCall({
+  action: 'account-create', session: superSession,
+  organiserId: 'coadmin', pin: 'Deputy-Chief-2026', role: 'SUPER', name: 'Deputy'
+});
+check('a Super Admin can create another Super Admin',
+  coadmin.ok === true && coadmin.account.role === 'SUPER', JSON.stringify(coadmin).slice(0, 160));
+check('an ordinary organiser cannot be created with a weak PIN',
+  adminCall({ action: 'account-create', session: superSession, organiserId: 'weakling', pin: '123456' }).code === 'PIN');
+check('a new account is created enabled', coadmin.account.enabled === true);
+
+const disabledNow = adminCall({ action: 'account-update', session: superSession, id: 'ravi.k', enabled: false });
+check('a Super Admin can disable an organiser', disabledNow.ok === true && disabledNow.account.enabled === false);
+check('disabling ends that organiser\'s sessions', disabledNow.sessionsRevoked >= 0);
+const disabledLogin = loginCall({ organiserId: 'ravi.k', pin: ORGANISER_PIN });
+check('a disabled account cannot sign in',
+  disabledLogin.ok === false && disabledLogin.code === 'DISABLED', JSON.stringify(disabledLogin));
+
+const reenabled = adminCall({ action: 'account-update', session: superSession, id: 'ravi.k', enabled: true });
+check('a Super Admin can enable it again', reenabled.ok === true && reenabled.account.enabled === true);
+const backIn = loginCall({ organiserId: 'ravi.k', pin: ORGANISER_PIN, device: 'Refreshed phone' });
+check('the re-enabled account signs in again', backIn.ok === true);
+
+const reset = adminCall({ action: 'account-reset-pin', session: superSession, id: 'ravi.k', pin: 'Ravi-New-Pin-77' });
+check('a Super Admin can reset a PIN', reset.ok === true, JSON.stringify(reset).slice(0, 160));
+check('the reset ended the sessions that account was holding', reset.sessionsRevoked >= 1);
+check('the old PIN stops working', loginCall({ organiserId: 'ravi.k', pin: ORGANISER_PIN }).code === 'CREDENTIALS');
+check('the new PIN works', loginCall({ organiserId: 'ravi.k', pin: 'Ravi-New-Pin-77' }).ok === true);
+check('the reset did not change the role', sandbox.orgFindAccount_('ravi.k').role === 'ORGANIZER');
+
+const selfSession = loginCall({ organiserId: 'ravi.k', pin: 'Ravi-New-Pin-77', device: 'Own phone' }).session;
+check('a wrong current PIN is refused when changing your own PIN',
+  adminCall({ action: 'self-change-pin', session: selfSession, currentPin: 'wrong-one', newPin: 'Self-Chosen-91' }).code === 'CREDENTIALS');
+const selfChanged = adminCall({ action: 'self-change-pin', session: selfSession, currentPin: 'Ravi-New-Pin-77', newPin: 'Self-Chosen-91' });
+check('an organiser can change their own PIN',
+  selfChanged.ok === true && /^[a-f0-9]{64}$/.test(selfChanged.session), JSON.stringify(selfChanged).slice(0, 160));
+check('the new PIN works', loginCall({ organiserId: 'ravi.k', pin: 'Self-Chosen-91' }).ok === true);
+check('the organiser is still only an Organizer', sandbox.orgFindAccount_('ravi.k').role === 'ORGANIZER');
+
+console.log('\n27. audit trail and isolation from the public site');
+
+const audit = adminCall({ action: 'audit-list', session: superSession, pageSize: 100 });
+check('a Super Admin can read the audit trail', audit.ok === true && audit.total > 0, JSON.stringify(audit).slice(0, 160));
+const actions = audit.entries.map(e => e.action);
+check('signing in is audited', actions.indexOf('login') !== -1, JSON.stringify(actions.slice(0, 12)));
+check('account changes are audited', actions.indexOf('account-reset-pin') !== -1);
+check('a refused login is audited', audit.entries.some(e => e.action === 'login' && e.result === 'refused'));
+check('a refused permission is audited', actions.indexOf('permission-denied') !== -1);
+check('the audit trail records who acted', audit.entries.some(e => e.actor === 'fazeel'));
+check('the audit trail never contains a PIN',
+  JSON.stringify(audit).indexOf(SUPER_PIN) === -1 && JSON.stringify(audit).indexOf('Ravi-New-Pin-77') === -1);
+check('the audit trail never contains a session token',
+  JSON.stringify(audit).indexOf(superSession) === -1);
+const auditSheet = spreadsheet.getSheetByName('Audit');
+check('the audit trail is written next to the registrations, not to a log',
+  !!auditSheet && auditSheet.getLastRow() > 1);
+
+check('the public stats endpoint is still open to visitors', stats().ok === true);
+check('the public registration is still open to visitors',
+  post(validPayload('Public Still Works')).ok === true);
+check('a public visitor cannot read registrations through the admin route',
+  adminCall({ action: 'list' }).code === 'AUTH');
+check('the admin refusal carries no records',
+  adminCall({ action: 'list' }).records === undefined);
+check('the recovery key still grants the dashboard', byKey.ok === true);
+check('the recovery key is treated as a Super Admin',
+  adminCall({ action: 'account-list', key: adminKey }).ok === true);
+check('organiser accounts are reported without secrets',
+  sandbox.organiserStatus().ok === true &&
+  JSON.stringify(sandbox.organiserStatus()).indexOf('pbkdf2') === -1);
+check('adminStatus describes the account store without printing a PIN',
+  (function () { sandbox.adminStatus(); return log.join(' ').indexOf(SUPER_PIN) === -1; })());
+
+console.log('\n28. the deployed web app can find its own sheet');
+
+/* A web app deployed as "execute as me / anyone" has no active spreadsheet,
+   so a pinned ID is what makes it work. The ID must not live in this file,
+   which is public, and it must not have to be re-typed on every deploy. */
+check('the shipped file does not pin a spreadsheet id',
+  /SHEET_ID:\s*''/.test(SOURCE) && !/SHEET_ID:\s*'[A-Za-z0-9_-]{20,}'/.test(SOURCE));
+
+scriptProps.set('sheet_id', 'Sheet-From-Script-Properties-01');
+openedIds.length = 0;
+const fromProperty = sandbox.sheetId_();
+check('the spreadsheet id is read from Script Properties',
+  fromProperty === 'Sheet-From-Script-Properties-01', String(fromProperty));
+check('opening the book uses that id',
+  (sandbox.openBook_(), openedIds[openedIds.length - 1] === 'Sheet-From-Script-Properties-01'),
+  JSON.stringify(openedIds));
+check('the property is what a deployed web app relies on',
+  sandbox.CONFIG.SHEET_ID === '' && !!sandbox.CONFIG.SHEET_ID_PROPERTY);
+
+scriptProps.delete('sheet_id');
+openedIds.length = 0;
+check('without either, it falls back to the bound sheet',
+  sandbox.sheetId_() === '' && sandbox.openBook_() === spreadsheet && openedIds.length === 0);
+
+const missingSheet = sandbox.doGet({ parameter: { action: 'stats' } });
+check('stats still answer with no id configured and no bound sheet',
+  JSON.parse(missingSheet.getContent()).ok === true ||
+  JSON.parse(missingSheet.getContent()).ok === false);
+
+scriptProps.set('sheet_id', 'Sheet-From-Script-Properties-01');
+check('the public counters work again once the id is set',
+  JSON.parse(sandbox.doGet({ parameter: { action: 'stats' } }).getContent()).ok === true);
+check('a registration still writes', post(validPayload('After Sheet Repair')).ok === true);
+scriptProps.delete('sheet_id');
+
+/* ------------------------- ₹100 team payment ------------------------- */
+
+console.log('\n29. payment schema: ₹100 per team, never per player');
+
+function sheetRowFor(name) {
+  const rows = sheet.getLastRow() - 1;
+  const values = sheet.getRange(2, 1, rows, sandbox.HEADERS.length).getValues();
+  return values.filter(v => v[1] === name)[0] || null;
+}
+
+resetFetch();
+
+const fourUp = post(Object.assign(validPayload('Fee Four Up'), { payment: { method: 'CASH' } }));
+const twoUp = post(Object.assign(shortPayload('Fee Two Up', 2), { payment: { method: 'CASH' } }));
+
+check('registration hands back the record id',
+  typeof fourUp.id === 'string' && fourUp.id.length === 22, JSON.stringify(fourUp.id));
+check('registration reports the team fee', fourUp.fee === 100, String(fourUp.fee));
+check('a 2-player team pays the same ₹100', twoUp.fee === 100, String(twoUp.fee));
+
+const fourRow = sheetRowFor('Fee Four Up');
+const twoRow = sheetRowFor('Fee Two Up');
+check('the fee is written on the row as a number', fourRow[13] === 100, JSON.stringify(fourRow[13]));
+check('the 2-player row is also ₹100', twoRow[13] === 100, JSON.stringify(twoRow[13]));
+check('a cash row starts as CASH / PENDING',
+  String(fourRow[14]) === 'CASH' && String(fourRow[15]) === 'PENDING',
+  JSON.stringify(fourRow.slice(14, 16)));
+
+/* The browser must not be able to name its own price. */
+const feeIgnored = post(Object.assign(validPayload('Fee Ignore Attempt'), { fee: 1, entryFee: 1 }));
+const feeIgnoreRow = sheetRowFor('Fee Ignore Attempt');
+check('a browser-supplied fee is ignored',
+  feeIgnored.ok === true && feeIgnoreRow[13] === 100, JSON.stringify(feeIgnoreRow[13]));
+
+/* Dropdowns for editing the sheet from a phone. */
+check('the payment method column has a dropdown',
+  !!sheet.validationCells['2,15'], JSON.stringify(Object.keys(sheet.validationCells).slice(0, 8)));
+check('the payment status column has a dropdown', !!sheet.validationCells['2,16']);
+check('the dropdown offers the organiser statuses',
+  (function () {
+    const rule = sheet.validationCells['2,16'];
+    return rule && Array.isArray(rule.requireValueInList) &&
+      rule.requireValueInList[0].indexOf('PAID') !== -1 &&
+      rule.requireValueInList[0].indexOf('PENDING VERIFICATION') !== -1;
+  })());
+
+console.log('\n30. the organiser is the only one who can confirm money');
+
+function markPayment(name, paymentStatus, expectedPayment, extra) {
+  const rec = recordFor(name);
+  return adminCall(Object.assign({
+    action: 'payment-status', key: adminKey, id: rec.id,
+    paymentStatus: paymentStatus, expectedPayment: expectedPayment
+  }, extra || {}));
+}
+
+const paid = markPayment('Fee Four Up', 'PAID', 'PENDING', { note: 'Cash counted at the desk' });
+check('an organiser marks the payment paid', paid.ok === true, JSON.stringify(paid));
+check('the saved record reads PAID', paid.record.payment.status === 'PAID', JSON.stringify(paid.record.payment));
+check('the actor is recorded', String(paid.record.payment.updatedBy).length > 0, String(paid.record.payment.updatedBy));
+check('the verification note is kept', paid.record.payment.note === 'Cash counted at the desk');
+check('the sheet shows PAID', String(sheetRowFor('Fee Four Up')[15]) === 'PAID');
+
+const auditAfterPay = adminCall({ action: 'audit-list', key: adminKey, pageSize: 50 });
+check('the payment change is in the audit history',
+  (auditAfterPay.entries || []).some(e => e.action === 'payment-status'),
+  JSON.stringify((auditAfterPay.entries || []).slice(0, 3)));
+
+const stalePayment = markPayment('Fee Four Up', 'PENDING', 'PENDING');
+check('a stale device cannot overwrite a newer payment decision',
+  stalePayment.ok === false && stalePayment.code === 'STALE', JSON.stringify(stalePayment));
+check('the paid row survives the stale attempt',
+  String(sheetRowFor('Fee Four Up')[15]) === 'PAID');
+
+const resetToNone = markPayment('Fee Two Up', 'NOT SELECTED', 'PENDING');
+check('a recorded payment cannot be erased back to NOT SELECTED',
+  resetToNone.ok === false && resetToNone.code === 'PAYMENT', JSON.stringify(resetToNone));
+
+check('the paid row is untouched', String(sheetRowFor('Fee Four Up')[15]) === 'PAID');
+
+const noMethodForPaid = (function () {
+  const fresh = post(validPayload('Fee No Method'));
+  return adminCall({
+    action: 'payment-status', key: adminKey,
+    id: fresh.id, paymentStatus: 'PAID', expectedPayment: 'NOT SELECTED'
+  });
+})();
+check('PAID is refused until a method is known',
+  noMethodForPaid.ok === false && noMethodForPaid.code === 'METHOD', JSON.stringify(noMethodForPaid));
+
+console.log('\n31. payment status and registration status stay independent');
+
+const stillApproved = setStatus('Fee Four Up', 'APPROVED');
+check('a paid team can still be approved', stillApproved.ok === true, JSON.stringify(stillApproved));
+check('approving it did not change the payment',
+  stillApproved.record.payment.status === 'PAID', JSON.stringify(stillApproved.record.payment));
+
+const cashPaid = markPayment('Fee Two Up', 'PAID', 'PENDING', { method: 'CASH' });
+check('cash can be marked paid after it is received',
+  cashPaid.ok === true && cashPaid.record.payment.status === 'PAID', JSON.stringify(cashPaid));
+check('paying did not approve the team',
+  cashPaid.record.status === 'PENDING', cashPaid.record.status);
+
+const countsWithPayments = adminCall({ action: 'list', key: adminKey, pageSize: 100 }).counts;
+check('counts report what has been collected',
+  countsWithPayments.amountCollected >= 200 && countsWithPayments.paidTeams >= 2,
+  JSON.stringify(countsWithPayments));
+check('counts separate online and cash queues',
+  typeof countsWithPayments.onlineAwaiting === 'number' &&
+  typeof countsWithPayments.cashPending === 'number',
+  JSON.stringify(countsWithPayments));
+check('the fee is reported to the dashboard', countsWithPayments.fee === 100);
+
+const paidFilter = adminCall({ action: 'list', key: adminKey, payment: 'PAID', pageSize: 100 });
+check('the payment filter returns only paid teams',
+  paidFilter.ok === true && paidFilter.records.length >= 2 &&
+  paidFilter.records.every(r => r.payment.status === 'PAID'),
+  JSON.stringify(paidFilter.records.map(r => r.payment.status)));
+
+const awaiting = adminCall({ action: 'list', key: adminKey, payment: 'AWAITING', pageSize: 100 });
+check('the awaiting filter never includes a paid team',
+  awaiting.records.every(r => r.payment.status !== 'PAID'),
+  JSON.stringify(awaiting.records.map(r => r.payment.status)));
+
+const exportCsv = adminCall({ action: 'export', key: adminKey });
+check('the export carries the payment columns',
+  exportCsv.ok === true &&
+  /Payment Status/.test(exportCsv.csv) && /UTR \/ Reference/.test(exportCsv.csv) &&
+  /₹?100/.test(exportCsv.csv), exportCsv.csv.split('\r\n')[0]);
+
+check('organisers hold the payment permission',
+  sandbox.orgPermissionsOf_('ORGANIZER').indexOf('pay.update') !== -1 &&
+  sandbox.orgPermissionsOf_('SUPER').indexOf('pay.update') !== -1);
+check('payment-status is a guarded action',
+  sandbox.ORG_ACTION_PERMISSION['payment-status'] === 'pay.update');
+
+console.log('\n32. formatting on a standalone script (no Document Properties)');
+
+/* This project is deployed as a standalone web app: the sheet is opened by id,
+   so PropertiesService.getDocumentProperties() is null. A memo that assumed it
+   existed threw, the payment dropdowns were never installed on the real sheet,
+   and the error was swallowed as "formatting skipped". */
+{
+  const realGetDoc = sandbox.PropertiesService.getDocumentProperties;
+  sandbox.PropertiesService.getDocumentProperties = () => null;
+  propsStore.clear();
+
+  // Forget the memo so the next ensureHeaders_ has to format.
+  scriptProps.delete('qqsgp_sheet_format_v3');
+
+  const before = sheet.rules.length;
+  const dropBefore = !!sheet.validationCells['2,16'];
+
+  // A fresh registration goes through ensureHeaders_ -> ensureFormattingApplied_.
+  const onStandalone = post(validPayload('Fee Standalone Format'));
+
+  check('a registration still saves without Document Properties',
+    onStandalone.ok === true, JSON.stringify(onStandalone));
+  check('formatting is applied instead of throwing',
+    sheet.rules.length > 0 && sheet.rules.length >= before - 2,
+    'rules=' + sheet.rules.length + ' (was ' + before + ')');
+  check('the payment dropdowns are installed without Document Properties',
+    !!sheet.validationCells['2,16'] || dropBefore,
+    JSON.stringify(Object.keys(sheet.validationCells).slice(0, 6)));
+  check('nothing was logged as skipped',
+    log.filter(l => /Sheet formatting skipped/.test(l)).length === 0,
+    log.filter(l => /formatting skipped/.test(l)).join(' | '));
+
+  // And the paid row from earlier is still readable afterwards.
+  const stillPaid = recordFor('Fee Four Up');
+  check('earlier payment decisions survive the formatting pass',
+    stillPaid && stillPaid.payment.status === 'PAID',
+    JSON.stringify(stillPaid && stillPaid.payment));
+
+  sandbox.PropertiesService.getDocumentProperties = realGetDoc;
+}
+
+/* ------------------- payment chosen at registration ------------------- */
+
+console.log('\n34. the fee step gates the registration');
+
+// A block keeps these fixtures from colliding with names used earlier.
+{
+const cashNow = post(Object.assign(validPayload('Fee At Submit Cash'), { payment: { method: 'CASH' } }));
+check('choosing cash registers the team', cashNow.ok === true, JSON.stringify(cashNow));
+check('cash is saved as PENDING',
+  cashNow.payment.status === 'PENDING' && cashNow.payment.method === 'CASH',
+  JSON.stringify(cashNow.payment));
+check('the cash row is written with method and status',
+  String(sheetRowFor('Fee At Submit Cash')[14]) === 'CASH' &&
+  String(sheetRowFor('Fee At Submit Cash')[15]) === 'PENDING',
+  JSON.stringify(sheetRowFor('Fee At Submit Cash').slice(14, 18)));
+
+/* The old bypass: post ONLINE, get a PAID row with no money behind it. This is
+   the exact request a fabricated page or a curious student would send. */
+const onlineNow = post(Object.assign(validPayload('Fee At Submit Online'), {
+  payment: { method: 'ONLINE', utr: '4187 2210 9931' }
+}));
+check('a registration that claims online payment is refused',
+  onlineNow.ok === false && /payment step/i.test(onlineNow.error), JSON.stringify(onlineNow));
+check('the refused online claim wrote no row', sheetRowFor('Fee At Submit Online') === null,
+  JSON.stringify(sheetRowFor('Fee At Submit Online')));
+
+const paidClaim = post(Object.assign(validPayload('Fee Claims Paid'), {
+  payment: { method: 'ONLINE', status: 'PAID', utr: 'PAID12345', paidAmount: 100 }
+}));
+check('a claim of PAID with extra fields is still refused', paidClaim.ok === false, JSON.stringify(paidClaim));
+check('no row was written for the PAID claim', sheetRowFor('Fee Claims Paid') === null);
+
+const noRef = post(Object.assign(validPayload('Fee Online No Ref'), { payment: { method: 'ONLINE' } }));
+check('online without a reference is refused too', noRef.ok === false, JSON.stringify(noRef));
+check('and writes no row either', sheetRowFor('Fee Online No Ref') === null);
+
+const badMethod = post(Object.assign(validPayload('Fee Bad Method'), { payment: { method: 'BITCOIN' } }));
+check('an unknown method is refused', badMethod.ok === false, JSON.stringify(badMethod));
+check('the refused payment wrote no row', sheetRowFor('Fee Bad Method') === null);
+
+const noChoicePost = post(validPayload('Fee Legacy No Choice'));
+check('an older page with no payment block still registers',
+  noChoicePost.ok === true && noChoicePost.payment.status === 'NOT SELECTED',
+  JSON.stringify(noChoicePost.payment));
+
+const retried = post(Object.assign(validPayload('Fee At Submit Cash'), { payment: { method: 'CASH' } }));
+check('a retried submission cannot create a second registration',
+  retried.ok === false && /already registered/i.test(retried.error), JSON.stringify(retried));
+check('still exactly one row for that team',
+  (function () {
+    const rows = sheet.getLastRow() - 1;
+    const values = sheet.getRange(2, 1, rows, sandbox.HEADERS.length).getValues();
+    return values.filter(v => v[1] === 'Fee At Submit Cash').length === 1;
+  })());
+
+const flowCounts = adminCall({ action: 'list', key: adminKey, pageSize: 100 }).counts;
+check('nothing is self-declared as paid any more',
+  flowCounts.selfReported === 0, JSON.stringify(flowCounts));
+
+const beforeQuestion = recordFor('Fee Four Up');
+const questioned = markPayment('Fee Four Up', 'NEEDS REVIEW', 'PAID');
+check('an organiser can still question a payment',
+  questioned.ok === true && questioned.record.payment.status === 'NEEDS REVIEW',
+  JSON.stringify(questioned));
+check('questioning it did not touch the registration status',
+  questioned.record.status === beforeQuestion.status,
+  beforeQuestion.status + ' -> ' + questioned.record.status);
+}
+
+/* ==================================================================
+   35. VERIFIED ONLINE PAYMENT (Razorpay)
+   ------------------------------------------------------------------
+   The point of this section is the bypass: a browser can post whatever it
+   likes, but a team may only exist because Razorpay told us, over an
+   authenticated API call, that the exact fee was captured.
+   ================================================================== */
+
+console.log('\n35. verified online payment');
+
+// A block keeps these fixtures from colliding with names used earlier.
+{
+
+function postRoute(route, payload) {
+  const res = sandbox.doPost({
+    parameter: { action: route },
+    postData: { contents: JSON.stringify(payload) }
+  });
+  return JSON.parse(res.getContent());
+}
+
+function queueJson(body, code) {
+  queueFetch({ code: code === undefined ? 200 : code, body: JSON.stringify(body) });
+}
+
+function publicConfig() {
+  return JSON.parse(sandbox.doGet({ parameter: { action: 'config' } }).getContent());
+}
+
+function countRows(name) {
+  const rows = sheet.getLastRow() - 1;
+  if (rows < 1) return 0;
+  const values = sheet.getRange(2, 1, rows, sandbox.HEADERS.length).getValues();
+  return values.filter(v => v[1] === name).length;
+}
+
+function draftRowFor(token) {
+  const drafts = spreadsheet.getSheetByName('PaymentDrafts');
+  if (!drafts || drafts.getLastRow() < 2) return null;
+  const values = drafts.getRange(2, 1, drafts.getLastRow() - 1, 17).getValues();
+  for (let i = 0; i < values.length; i++) {
+    if (String(values[i][0]) === token) return { sheet: drafts, row: i + 2, values: values[i] };
+  }
+  return null;
+}
+
+/* --- the provider is not configured yet --- */
+scriptProps.delete('razorpay_key_id');
+scriptProps.delete('razorpay_key_secret');
+resetFetch();
+
+const offline = postRoute('payorder', validPayload('Online Not Configured'));
+check('online is refused while the provider is not configured',
+  offline.ok === false && offline.code === 'PAYMENT_OFFLINE', JSON.stringify(offline));
+check('nothing was sent to a provider that is not configured', fetchCalls.length === 0);
+check('the page is told online is off', publicConfig().online === false, JSON.stringify(publicConfig()));
+check('no draft and no row were created', countRows('Online Not Configured') === 0);
+
+/* --- the fee is data, not a constant --- */
+const feeSet = adminCall({ action: 'settings-set', session: superSession, fee: 150 });
+check('an organiser can change the entry fee', feeSet.ok === true && feeSet.fee === 150, JSON.stringify(feeSet));
+check('the page is given the new fee', publicConfig().fee === 150, JSON.stringify(publicConfig()));
+const feeRead = adminCall({ action: 'settings-get', session: superSession });
+check('the dashboard reads the fee back', feeRead.ok === true && feeRead.fee === 150, JSON.stringify(feeRead));
+const badFee = adminCall({ action: 'settings-set', session: superSession, fee: 0 });
+check('a zero fee is refused', badFee.ok === false, JSON.stringify(badFee));
+check('changing the fee is a guarded action',
+  sandbox.ORG_ACTION_PERMISSION['settings-set'] === 'pay.update');
+adminCall({ action: 'settings-set', session: superSession, fee: 150 });
+
+/* --- configure the provider in Script Properties only --- */
+scriptProps.set('payment_provider', 'razorpay');
+scriptProps.set('razorpay_key_id', 'rzp_test_KEY');
+scriptProps.set('razorpay_key_secret', 'test_secret_value');
+check('online switches on once the provider is chosen and its keys exist',
+  publicConfig().online === true, JSON.stringify(publicConfig()));
+
+/* --- opening an order --- */
+resetFetch();
+queueJson({ id: 'order_ONLINE1', amount: 15000, currency: 'INR', status: 'created' });
+queueJson({ id: 'qr_ONLINE1', image_url: 'https://rzp.io/i/ONLINE1', status: 'active' });
+
+const opened = postRoute('payorder', validPayload('Online Squad'));
+check('opening a payment returns a token, the live fee and the QR image',
+  opened.ok === true && typeof opened.token === 'string' && opened.token.length >= 16 &&
+  opened.amount === 150 && opened.qrImageUrl === 'https://rzp.io/i/ONLINE1',
+  JSON.stringify(opened));
+check('the provider was called twice: an order, then a QR', fetchCalls.length === 2 &&
+  /\/orders$/.test(fetchCalls[0].url) && /\/payments\/qr_codes$/.test(fetchCalls[1].url),
+  fetchCalls.map(c => c.url).join(', '));
+
+const orderBody = JSON.parse(fetchCalls[0].options.payload);
+check('the order is for the snapshot of the live fee',
+  orderBody.amount === 15000 && orderBody.currency === 'INR', JSON.stringify(orderBody));
+check('the order is authenticated with Basic auth',
+  /^Basic /.test(fetchCalls[0].options.headers.Authorization) &&
+  Buffer.from(fetchCalls[0].options.headers.Authorization.slice(6), 'base64').toString() === 'rzp_test_KEY:test_secret_value',
+  fetchCalls[0].options.headers.Authorization);
+
+const qrBody = JSON.parse(fetchCalls[1].options.payload);
+check('the QR is a single-use, fixed-amount UPI QR for exactly the fee',
+  qrBody.type === 'upi_qr' && qrBody.usage === 'single_use' &&
+  qrBody.fixed_amount === true && qrBody.payment_amount === 15000,
+  JSON.stringify(qrBody));
+check('the QR carries our order and draft token, not a name or VPA',
+  qrBody.notes && qrBody.notes.order_id === 'order_ONLINE1' &&
+  qrBody.notes.token === opened.token && !/vpa|upi_id/i.test(JSON.stringify(qrBody)));
+check('the key secret is never echoed to the browser',
+  JSON.stringify(opened).indexOf('test_secret_value') === -1);
+check('no registration row exists while the QR is open', countRows('Online Squad') === 0);
+
+/* --- opening a second QR for the same team --- */
+resetFetch();
+const reopened = postRoute('payorder', validPayload('Online Squad'));
+check('a team already paying resumes that QR instead of opening another',
+  reopened.ok === true && reopened.resumed === true && reopened.token === opened.token,
+  JSON.stringify(reopened));
+check('resuming costs no provider call', fetchCalls.length === 0);
+
+/* --- waiting --- */
+resetFetch();
+queueJson({ id: 'qr_ONLINE1', payments: [] });
+const waiting = postRoute('paystatus', { token: opened.token });
+check('an untouched QR stays PENDING', waiting.ok === true && waiting.state === 'PENDING', JSON.stringify(waiting));
+check('PENDING writes nothing to the sheet', countRows('Online Squad') === 0);
+
+/* --- forged callbacks --- */
+resetFetch();
+queueJson({ id: 'qr_UNKNOWN', payments: [] });
+const forgedCallback = postRoute('paywebhook', {
+  event: 'payment.captured',
+  payload: { payment: { entity: { id: 'pay_FAKE', order_id: 'order_FAKE', amount: 15000, currency: 'INR', status: 'captured' } } }
+});
+check('a callback naming an order we never created is ignored',
+  forgedCallback.ok === true && forgedCallback.ignored === true, JSON.stringify(forgedCallback));
+check('a forged callback creates no team', countRows('Online Squad') === 0);
+
+resetFetch();
+queueJson({ id: 'qr_ONLINE1', payments: [] });
+const forgedReal = postRoute('paywebhook', {
+  event: 'payment.captured',
+  payload: {
+    qr_code: { entity: { id: 'qr_ONLINE1' } },
+    payment: { entity: { id: 'pay_FAKE', amount: 15000, currency: 'INR', status: 'captured' } }
+  }
+});
+check('a callback with our QR id but no payment at the provider is refused',
+  forgedReal.ok === true && forgedReal.state !== 'PAID', JSON.stringify(forgedReal));
+check('our QR id alone cannot mark a team paid', countRows('Online Squad') === 0);
+
+/* --- a real payment for the wrong amount --- */
+resetFetch();
+queueJson({ id: 'order_ONLINE2', amount: 15000, currency: 'INR', status: 'created' });
+queueJson({ id: 'qr_ONLINE2', image_url: 'https://rzp.io/i/ONLINE2', status: 'active' });
+const shortOrder = postRoute('payorder', validPayload('Online Wrong Amount'));
+check('a second team can open its own QR', shortOrder.ok === true && shortOrder.token !== opened.token);
+
+resetFetch();
+queueJson({ id: 'qr_ONLINE2', payments: [{ payment_id: 'pay_SHORT' }] });
+queueJson({ id: 'pay_SHORT', status: 'captured', captured: true, amount: 100, currency: 'INR', order_id: 'order_ONLINE2' });
+const shortPaid = postRoute('paystatus', { token: shortOrder.token });
+check('a captured payment for the wrong amount is not accepted',
+  shortPaid.state === 'REVIEW', JSON.stringify(shortPaid));
+check('the wrong amount registers no team', countRows('Online Wrong Amount') === 0);
+check('the draft is kept for an organiser instead of being deleted',
+  draftRowFor(shortOrder.token).values[12] === 'MISMATCH', draftRowFor(shortOrder.token).values[12]);
+
+/* --- the real thing --- */
+resetFetch();
+queueJson({ id: 'qr_ONLINE1', payments: [{ payment_id: 'pay_OK1' }] });
+queueJson({
+  id: 'pay_OK1', status: 'captured', captured: true, amount: 15000,
+  currency: 'INR', order_id: 'order_ONLINE1', method: 'upi'
+});
+const paid = postRoute('paystatus', { token: opened.token });
+check('a verified captured payment registers the team',
+  paid.ok === true && paid.state === 'PAID' && paid.team === 'Online Squad', JSON.stringify(paid));
+check('exactly one row was written', countRows('Online Squad') === 1);
+
+const paidRow = sheetRowFor('Online Squad');
+check('the row is ONLINE / PAID',
+  String(paidRow[14]) === 'ONLINE' && String(paidRow[15]) === 'PAID', JSON.stringify(paidRow.slice(13, 20)));
+check('the fee came from the snapshot taken when the QR was opened',
+  Number(paidRow[13]) === 150, String(paidRow[13]));
+check('the order id is stored', String(paidRow[20]) === 'order_ONLINE1', String(paidRow[20]));
+check('the payment id is stored', String(paidRow[21]) === 'pay_OK1', String(paidRow[21]));
+check('the verified amount and currency are stored',
+  Number(paidRow[22]) === 150 && String(paidRow[23]) === 'INR',
+  JSON.stringify(paidRow.slice(22, 24)));
+check('the verification time is a real timestamp',
+  Object.prototype.toString.call(paidRow[24]) === '[object Date]');
+check('the provider is named', String(paidRow[25]) === 'RAZORPAY', String(paidRow[25]));
+check('the registration id is handed back',
+  typeof paid.registrationId === 'string' && paid.registrationId.length >= 10, paid.registrationId);
+check('the draft is marked FINALISED with its registration id',
+  draftRowFor(opened.token).values[12] === 'FINALISED' &&
+  String(draftRowFor(opened.token).values[15]) === paid.registrationId,
+  JSON.stringify(draftRowFor(opened.token).values.slice(12, 16)));
+
+const payAudit = adminCall({ action: 'audit-list', session: superSession, pageSize: 100 });
+const payActions = (payAudit.entries || []).map(e => e.action);
+check('the verified payment is in the audit trail', payActions.indexOf('payment-verified') !== -1, JSON.stringify(payActions.slice(0, 8)));
+check('the registration it created is too', payActions.indexOf('registration-created') !== -1);
+check('the audit names the payment id',
+  JSON.stringify(payAudit.entries).indexOf('pay_OK1') !== -1);
+check('the audit never contains the key secret',
+  JSON.stringify(payAudit.entries).indexOf('test_secret_value') === -1);
+
+/* --- the provider repeats itself --- */
+resetFetch();
+queueJson({ id: 'qr_ONLINE1', payments: [{ payment_id: 'pay_OK1' }] });
+queueJson({ id: 'pay_OK1', status: 'captured', captured: true, amount: 15000, currency: 'INR', order_id: 'order_ONLINE1' });
+const duplicateCallback = postRoute('paywebhook', {
+  event: 'qr_code.credited',
+  payload: { qr_code: { entity: { id: 'qr_ONLINE1' } }, payment: { entity: { id: 'pay_OK1' } } }
+});
+check('a repeated callback is answered without error', duplicateCallback.ok === true, JSON.stringify(duplicateCallback));
+check('a repeated callback does not add a second team', countRows('Online Squad') === 1);
+
+const paidAgain = postRoute('paystatus', { token: opened.token });
+check('polling after success keeps returning the same registration',
+  paidAgain.state === 'PAID' && paidAgain.registrationId === paid.registrationId, JSON.stringify(paidAgain));
+check('and still one row', countRows('Online Squad') === 1);
+
+/* --- the fee moves; old money must not follow it --- */
+adminCall({ action: 'settings-set', session: superSession, fee: 200 });
+check('raising the fee leaves an existing row alone',
+  Number(sheetRowFor('Online Squad')[13]) === 150, String(sheetRowFor('Online Squad')[13]));
+check('the page now quotes the new fee', publicConfig().fee === 200);
+
+const cashAtNewFee = post(Object.assign(validPayload('Fee Cash At 200'), { payment: { method: 'CASH' } }));
+check('a cash registration snapshots the new fee',
+  cashAtNewFee.ok === true && Number(sheetRowFor('Fee Cash At 200')[13]) === 200,
+  String(sheetRowFor('Fee Cash At 200')[13]));
+check('cash is still PENDING, never PAID',
+  String(sheetRowFor('Fee Cash At 200')[15]) === 'PENDING', String(sheetRowFor('Fee Cash At 200')[15]));
+
+/* --- cancelling and expiring --- */
+resetFetch();
+queueJson({ id: 'order_ONLINE3', amount: 20000, currency: 'INR', status: 'created' });
+queueJson({ id: 'qr_ONLINE3', image_url: 'https://rzp.io/i/ONLINE3', status: 'active' });
+const cancelledOrder = postRoute('payorder', validPayload('Online Cancel Me'));
+check('a third team opens a QR at the new fee', cancelledOrder.ok === true && cancelledOrder.amount === 200, JSON.stringify(cancelledOrder));
+
+resetFetch();
+queueJson({ id: 'qr_ONLINE3', status: 'closed' });
+const cancelled = postRoute('paycancel', { token: cancelledOrder.token });
+check('cancelling answers CANCELLED', cancelled.ok === true && cancelled.state === 'CANCELLED', JSON.stringify(cancelled));
+check('cancelling closes the QR at the provider',
+  fetchCalls.length === 1 && /\/close$/.test(fetchCalls[0].url), fetchCalls.map(c => c.url).join(', '));
+check('a cancelled draft registers nobody', countRows('Online Cancel Me') === 0);
+check('the draft is marked CANCELLED', draftRowFor(cancelledOrder.token).values[12] === 'CANCELLED');
+
+resetFetch();
+queueJson({ id: 'order_ONLINE4', amount: 20000, currency: 'INR', status: 'created' });
+queueJson({ id: 'qr_ONLINE4', image_url: 'https://rzp.io/i/ONLINE4', status: 'active' });
+const expiring = postRoute('payorder', validPayload('Online Expired'));
+{
+  const found = draftRowFor(expiring.token);
+  found.sheet.getRange(found.row, 3).setValue(new Date(Date.now() - 60000));
+}
+resetFetch();
+const expired = postRoute('paystatus', { token: expiring.token });
+check('an expired QR is reported as EXPIRED', expired.ok === true && expired.state === 'EXPIRED', JSON.stringify(expired));
+check('an expired QR registers nobody', countRows('Online Expired') === 0);
+check('an expired QR spends no provider call', fetchCalls.length === 0);
+
+/* --- a failed provider call is not a paid team --- */
+resetFetch();
+queueJson({ error: { description: 'Authentication failed' } }, 401);
+const providerDown = postRoute('payorder', validPayload('Online Provider Down'));
+check('a rejected order is reported, not faked',
+  providerDown.ok === false && providerDown.code === 'PROVIDER', JSON.stringify(providerDown));
+check('no draft survives a rejected order',
+  !spreadsheet.getSheetByName('PaymentDrafts') ||
+  spreadsheet.getSheetByName('PaymentDrafts').getLastRow() === 0 ||
+  (function () {
+    const drafts = spreadsheet.getSheetByName('PaymentDrafts');
+    const values = drafts.getRange(2, 1, drafts.getLastRow() - 1, 4).getValues();
+    return values.filter(v => String(v[3]) === 'Online Provider Down').length === 0;
+  })());
+check('nobody is registered when the provider refuses', countRows('Online Provider Down') === 0);
+
+/* Leave the sheet on its original fee for anything that follows. */
+adminCall({ action: 'settings-set', session: superSession, fee: 100 });
+scriptProps.delete('payment_provider');
+resetFetch();
+}
+
+/* ==================================================================
+   36. YouPI PG as the provider
+   ------------------------------------------------------------------
+   The gateway here is a self-hosted YouPI instance. What matters is that
+   this project never treats "the checkout page opened" as payment: only a
+   merchant-authenticated GET that answers SUCCESS, for our order, for the
+   snapshotted fee, in INR, at the required verification level, may write a
+   row. The API shapes below are copied from YouPI's openapi.yaml and from
+   real answers captured from a local instance.
+   ================================================================== */
+
+console.log('\n36. YouPI PG provider');
+
+{
+const YOUPI_KEY = 'youpi_merchant_key_for_tests_0123456789';
+
+function yPost(route, payload) {
+  const res = sandbox.doPost({
+    parameter: { action: route },
+    postData: { contents: JSON.stringify(payload) }
+  });
+  return JSON.parse(res.getContent());
+}
+
+function yQueue(body, code) {
+  queueFetch({ code: code === undefined ? 200 : code, body: JSON.stringify(body) });
+}
+
+/** Answers as the gateway does: echo the order id it was just given. */
+function yQueueEcho(extra) {
+  queueFetch({
+    code: 200,
+    bodyFn: (url, options) => JSON.stringify(Object.assign(
+      { orderId: JSON.parse(options.payload || '{}').orderId },
+      extra)
+    )
+  });
+}
+
+function yDraft(token) {
+  const drafts = spreadsheet.getSheetByName('PaymentDrafts');
+  if (!drafts || drafts.getLastRow() < 2) return null;
+  const values = drafts.getRange(2, 1, drafts.getLastRow() - 1, sandbox.DRAFT_HEADERS.length).getValues();
+  for (let i = 0; i < values.length; i++) {
+    if (String(values[i][0]) === token) return { sheet: drafts, row: i + 2, values: values[i] };
+  }
+  return null;
+}
+
+function yRows(name) {
+  const rows = sheet.getLastRow() - 1;
+  if (rows < 1) return 0;
+  return sheet.getRange(2, 1, rows, sandbox.HEADERS.length).getValues()
+    .filter(v => v[1] === name).length;
+}
+
+function yConfig() {
+  return JSON.parse(sandbox.doGet({ parameter: { action: 'config' } }).getContent());
+}
+
+/* --- switch the deployment to YouPI, credentials in Script Properties --- */
+scriptProps.set('payment_provider', 'youpi');
+scriptProps.set('youpi_base_url', 'http://127.0.0.1:6100');
+scriptProps.set('youpi_merchant_id', '00000000-0000-0000-0000-000000000001');
+scriptProps.set('youpi_merchant_key', YOUPI_KEY);
+scriptProps.delete('youpi_min_verification_level');
+
+const yCfg = yConfig();
+check('the page is told the gateway is YouPI',
+  yCfg.provider === 'YOUPI' && yCfg.hosted === true && yCfg.online === true, JSON.stringify(yCfg));
+check('the page is told the verification level this event requires',
+  yCfg.minVerification === 2, JSON.stringify(yCfg));
+check('the merchant key never reaches the page', JSON.stringify(yCfg).indexOf(YOUPI_KEY) === -1);
+check('the dashboard sees the same gateway',
+  (() => { const s = adminCall({ action: 'settings-get', session: superSession });
+    return s.ok === true && s.provider === 'YOUPI' && s.minVerification === 2; })(), 'settings-get');
+
+/* --- opening a payment --- */
+resetFetch();
+yQueueEcho({
+  paymentId: 'pay_YOUPI1', amount: '100.00',
+  amountPaise: '10000', currency: 'INR', status: 'INITIATED', queuePosition: 0,
+  checkoutUrl: 'http://127.0.0.1:7000/checkout/pay_YOUPI1'
+});
+
+const yOpened = yPost('payorder', validPayload('YouPI Squad'));
+check('opening a YouPI payment returns the gateway checkout page',
+  yOpened.ok === true && yOpened.hosted === true &&
+  yOpened.checkoutUrl === 'http://127.0.0.1:7000/checkout/pay_YOUPI1',
+  JSON.stringify(yOpened));
+check('the YouPI call goes to the configured instance',
+  fetchCalls.length === 1 && fetchCalls[0].url === 'http://127.0.0.1:6100/api/v1/payments',
+  fetchCalls.map(c => c.url).join(', '));
+check('the merchant key is sent as X-Merchant-Key, never in the URL',
+  fetchCalls[0].options.headers['X-Merchant-Key'] === YOUPI_KEY &&
+  fetchCalls[0].options.headers['X-Merchant-Id'] === '00000000-0000-0000-0000-000000000001' &&
+  fetchCalls[0].url.indexOf(YOUPI_KEY) === -1);
+
+const yBody = JSON.parse(fetchCalls[0].options.payload);
+check('the amount is the snapshotted fee, in rupees with two decimals',
+  yBody.amount === '100.00' && yBody.currency === 'INR', JSON.stringify(yBody));
+check('the order id is generated by us, not taken from the browser',
+  /^QQSGP-[A-Z0-9]{6,}$/.test(yBody.orderId), yBody.orderId);
+check('an answer about a different order is refused',
+  (function () {
+    resetFetch();
+    yQueue({
+      paymentId: 'pay_OTHER', orderId: 'QQSGP-SOMEBODY-ELSE', amount: '100.00',
+      amountPaise: '10000', currency: 'INR', status: 'INITIATED',
+      checkoutUrl: 'http://127.0.0.1:7000/checkout/pay_OTHER'
+    });
+    const other = yPost('payorder', validPayload('YouPI Wrong Echo'));
+    return other.ok === false && yRows('YouPI Wrong Echo') === 0;
+  })(), 'wrong order echo');
+check('nothing about the team is charged twice or guessed',
+  yBody.metadata && yBody.metadata.token === yOpened.token);
+check('no registration row exists while the checkout is open', yRows('YouPI Squad') === 0);
+check('the draft remembers the gateway and the checkout URL',
+  (() => { const d = yDraft(yOpened.token);
+    return d.values[17] === 'YOUPI' && String(d.values[18]) === 'http://127.0.0.1:7000/checkout/pay_YOUPI1'; })(),
+  JSON.stringify(yDraft(yOpened.token).values.slice(17, 20)));
+check('the key secret is never echoed to the browser',
+  JSON.stringify(yOpened).indexOf(YOUPI_KEY) === -1);
+
+/* --- the gateway refuses our credential --- */
+resetFetch();
+yQueue({ error: 'Invalid merchant key', code: 'INVALID_MERCHANT_KEY' }, 401);
+const yBadKey = yPost('payorder', validPayload('YouPI Bad Key'));
+check('a rejected merchant key is reported, not faked',
+  yBadKey.ok === false && yBadKey.code === 'PROVIDER', JSON.stringify(yBadKey));
+check('nobody is registered when the gateway refuses', yRows('YouPI Bad Key') === 0);
+
+/* --- still waiting --- */
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI1', orderId: yBody.orderId, amount: '100.00', amountPaise: '10000',
+  currency: 'INR', status: 'ACTIVE', verificationLevel: 0, verificationTag: 'UNVERIFIED'
+});
+const yWaiting = yPost('paystatus', { token: yOpened.token });
+check('an open checkout stays PENDING', yWaiting.ok === true && yWaiting.state === 'PENDING', JSON.stringify(yWaiting));
+check('PENDING writes no row', yRows('YouPI Squad') === 0);
+check('the owner status call is authenticated with the merchant key',
+  fetchCalls.length === 1 &&
+  fetchCalls[0].options.headers['X-Merchant-Key'] === YOUPI_KEY &&
+  /\/api\/v1\/payments\/pay_YOUPI1$/.test(fetchCalls[0].url), fetchCalls.map(c => c.url).join(', '));
+
+/* --- a forged webhook with a body full of SUCCESS --- */
+const yForged = yPost('paywebhook', {
+  event: 'SUCCESS', paymentId: 'pay_NEVER_MADE', orderId: 'QQSGP-NEVER',
+  amount: '100.00', amountPaise: 10000, currency: 'INR', utr: '999999999999'
+});
+check('a webhook naming a session we never opened is ignored',
+  yForged.ok === true && yForged.ignored === true, JSON.stringify(yForged));
+check('a forged webhook registers nobody', yRows('YouPI Squad') === 0);
+
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI1', orderId: yBody.orderId, amount: '100.00', amountPaise: '10000',
+  currency: 'INR', status: 'ACTIVE', verificationLevel: 0
+});
+const yDoorbell = yPost('paywebhook', {
+  event: 'SUCCESS', paymentId: 'pay_YOUPI1', orderId: yBody.orderId,
+  amount: '100.00', amountPaise: 10000, currency: 'INR', utr: '123456789012'
+});
+check('a SUCCESS body with our ids but no payment at the gateway is refused',
+  yDoorbell.ok === true && yDoorbell.state !== 'PAID', JSON.stringify(yDoorbell));
+check('the forged body did not create a paid team', yRows('YouPI Squad') === 0);
+
+/* --- money reported below the required verification level --- */
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI1', orderId: yBody.orderId, amount: '100.00', amountPaise: '10000',
+  currency: 'INR', status: 'SUCCESS', method: 'UPI', verificationLevel: 1,
+  verificationTag: 'SMS_ONLY', completedAt: new Date().toISOString()
+});
+const yWeak = yPost('paystatus', { token: yOpened.token });
+check('a level-1 payment is not accepted at the configured level 2',
+  yWeak.ok === true && yWeak.state === 'REVIEW', JSON.stringify(yWeak));
+check('a weakly verified payment registers no team', yRows('YouPI Squad') === 0);
+check('the attempt is held as NEEDS REVIEW for an organiser',
+  yDraft(yOpened.token).values[12] === 'NEEDS REVIEW', yDraft(yOpened.token).values[12]);
+
+const yWeakAudit = adminCall({ action: 'audit-list', session: superSession, pageSize: 100 });
+check('the unverified payment is audited',
+  (yWeakAudit.entries || []).some(e => e.action === 'payment-unverified'),
+  JSON.stringify((yWeakAudit.entries || []).slice(0, 5).map(e => e.action)));
+
+/* --- the same team cannot open a second way to pay while one is held --- */
+resetFetch();
+const yHeldAgain = yPost('payorder', validPayload('YouPI Squad'));
+check('a team with a payment under review is not handed a second checkout',
+  yHeldAgain.ok === false && yHeldAgain.code === 'REVIEW', JSON.stringify(yHeldAgain));
+check('that refusal opens no new session', fetchCalls.length === 0);
+
+/* --- the right money, the wrong amount (its own draft: a mismatch closes an
+       attempt, by design) --- */
+resetFetch();
+yQueueEcho({
+  paymentId: 'pay_YOUPI_SHORT', amount: '100.00', amountPaise: '10000',
+  currency: 'INR', status: 'INITIATED',
+  checkoutUrl: 'http://127.0.0.1:7000/checkout/pay_YOUPI_SHORT'
+});
+const yShortOpen = yPost('payorder', validPayload('YouPI Short'));
+const yShortOrder = JSON.parse(fetchCalls[0].options.payload).orderId;
+
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI_SHORT', orderId: yShortOrder, amount: '50.00', amountPaise: '5000',
+  currency: 'INR', status: 'SUCCESS', verificationLevel: 2
+});
+const yShort = yPost('paystatus', { token: yShortOpen.token });
+check('a SUCCESS for the wrong amount is refused',
+  yShort.state === 'REVIEW', JSON.stringify(yShort));
+check('the wrong amount registers no team', yRows('YouPI Short') === 0);
+
+/* --- the right amount against another order --- */
+resetFetch();
+yQueueEcho({
+  paymentId: 'pay_YOUPI_OTHER', amount: '100.00', amountPaise: '10000',
+  currency: 'INR', status: 'INITIATED',
+  checkoutUrl: 'http://127.0.0.1:7000/checkout/pay_YOUPI_OTHER'
+});
+const yOtherOpen = yPost('payorder', validPayload('YouPI Wrong Order'));
+
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI_OTHER', orderId: 'QQSGP-SOMEONE-ELSE', amount: '100.00', amountPaise: '10000',
+  currency: 'INR', status: 'SUCCESS', verificationLevel: 2
+});
+const yWrongOrder = yPost('paystatus', { token: yOtherOpen.token });
+check('a payment for another order is refused',
+  yWrongOrder.state === 'REVIEW', JSON.stringify(yWrongOrder));
+check('another order registers nobody here', yRows('YouPI Wrong Order') === 0);
+
+/* --- the real thing --- */
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI1', orderId: yBody.orderId, amount: '100.00', amountPaise: '10000',
+  currency: 'INR', status: 'SUCCESS', method: 'UPI', verificationLevel: 2,
+  verificationTag: 'DUAL_VERIFIED', completedAt: new Date().toISOString()
+});
+const yPaid = yPost('paystatus', { token: yOpened.token });
+check('a SUCCESS at level 2 registers the team',
+  yPaid.ok === true && yPaid.state === 'PAID' && yPaid.team === 'YouPI Squad', JSON.stringify(yPaid));
+check('exactly one row was written', yRows('YouPI Squad') === 1);
+
+const yRow = sheetRowFor('YouPI Squad');
+check('the row is ONLINE / PAID',
+  String(yRow[14]) === 'ONLINE' && String(yRow[15]) === 'PAID', JSON.stringify(yRow.slice(14, 16)));
+check('the row keeps the fee snapshot', Number(yRow[13]) === 100, String(yRow[13]));
+check('the row names YouPI as the provider', String(yRow[25]) === 'YOUPI', String(yRow[25]));
+check('the gateway session id is stored', String(yRow[21]) === 'pay_YOUPI1', String(yRow[21]));
+check('the verified amount and currency are stored',
+  Number(yRow[22]) === 100 && String(yRow[23]) === 'INR', JSON.stringify(yRow.slice(22, 24)));
+check('the verification time is a real timestamp',
+  Object.prototype.toString.call(yRow[24]) === '[object Date]');
+check('the note says how it was verified, including the level',
+  /YouPI/.test(String(yRow[17])) && /verification level 2/.test(String(yRow[17])), String(yRow[17]));
+check('the draft is FINALISED with the registration id',
+  yDraft(yOpened.token).values[12] === 'FINALISED' &&
+  String(yDraft(yOpened.token).values[15]) === yPaid.registrationId);
+
+/* --- the gateway rings twice --- */
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI1', orderId: yBody.orderId, amount: '100.00', amountPaise: '10000',
+  currency: 'INR', status: 'SUCCESS', verificationLevel: 2
+});
+const yDupe = yPost('paywebhook', {
+  event: 'SUCCESS', paymentId: 'pay_YOUPI1', orderId: yBody.orderId,
+  amount: '100.00', amountPaise: 10000, currency: 'INR', utr: '123456789012'
+});
+check('a repeated YouPI callback is answered without error',
+  yDupe.ok === true && yDupe.duplicate === true, JSON.stringify(yDupe));
+check('a repeated callback does not add a second team', yRows('YouPI Squad') === 1);
+
+/* --- cancelling the session --- */
+resetFetch();
+yQueueEcho({
+  paymentId: 'pay_YOUPI2', amount: '100.00',
+  amountPaise: '10000', currency: 'INR', status: 'INITIATED',
+  checkoutUrl: 'http://127.0.0.1:7000/checkout/pay_YOUPI2'
+});
+const yCancelOpen = yPost('payorder', validPayload('YouPI Cancel'));
+check('another team can open its own YouPI session', yCancelOpen.ok === true && yCancelOpen.token !== yOpened.token);
+
+resetFetch();
+yQueue({ success: true, status: 'CANCELLED' });
+const yCancelled = yPost('paycancel', { token: yCancelOpen.token });
+check('cancelling answers CANCELLED', yCancelled.ok === true && yCancelled.state === 'CANCELLED', JSON.stringify(yCancelled));
+check('cancelling calls the gateway cancel endpoint',
+  fetchCalls.length === 1 &&
+  fetchCalls[0].url === 'http://127.0.0.1:6100/api/v1/checkout/pay_YOUPI2/cancel',
+  fetchCalls.map(c => c.url).join(', '));
+check('a cancelled session registers nobody', yRows('YouPI Cancel') === 0);
+
+/* --- the organiser decides on a held payment --- */
+resetFetch();
+yQueueEcho({
+  paymentId: 'pay_YOUPI3', amount: '100.00',
+  amountPaise: '10000', currency: 'INR', status: 'INITIATED',
+  checkoutUrl: 'http://127.0.0.1:7000/checkout/pay_YOUPI3'
+});
+const yHeld = yPost('payorder', validPayload('YouPI Held'));
+// The order id must be the one the draft holds; read it from the sheet.
+const heldDraft = yDraft(yHeld.token);
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI3', orderId: String(heldDraft.values[9]), amount: '100.00',
+  amountPaise: '10000', currency: 'INR', status: 'SUCCESS', verificationLevel: 1
+});
+const yHeldStatus = yPost('paystatus', { token: yHeld.token });
+check('a level-1 payment is held, not registered', yHeldStatus.state === 'REVIEW' && yRows('YouPI Held') === 0, JSON.stringify(yHeldStatus));
+
+const yQueueList = adminCall({ action: 'drafts-list', session: superSession });
+check('the dashboard lists the held payment',
+  yQueueList.ok === true && (yQueueList.drafts || []).some(d => d.token === yHeld.token),
+  JSON.stringify(yQueueList).slice(0, 400));
+check('the queue never leaks the merchant key',
+  JSON.stringify(yQueueList).indexOf(YOUPI_KEY) === -1);
+
+const noNote = adminCall({ action: 'draft-resolve', session: superSession, token: yHeld.token, decision: 'accept' });
+check('accepting a held payment needs a note for the audit',
+  noNote.ok === false && noNote.code === 'NOTE', JSON.stringify(noNote));
+
+const yAccepted = adminCall({
+  action: 'draft-resolve', session: superSession, token: yHeld.token,
+  decision: 'accept', note: 'Seen in the organiser UPI app, UTR 112233445566'
+});
+check('the organiser can accept a held payment',
+  yAccepted.ok === true && yAccepted.state === 'PAID', JSON.stringify(yAccepted));
+check('accepting writes exactly one row', yRows('YouPI Held') === 1);
+const acceptedRow = sheetRowFor('YouPI Held');
+check('the accepted row is ONLINE / PAID',
+  String(acceptedRow[14]) === 'ONLINE' && String(acceptedRow[15]) === 'PAID',
+  JSON.stringify(acceptedRow.slice(14, 16)));
+check('the row records who accepted it and why',
+  /Accepted by organiser/.test(String(acceptedRow[17])) && /112233445566/.test(String(acceptedRow[17])),
+  String(acceptedRow[17]));
+check('manual acceptance is audited',
+  (adminCall({ action: 'audit-list', session: superSession, pageSize: 100 }).entries || [])
+    .some(e => e.action === 'payment-manual-accept'));
+
+const yAgain = adminCall({ action: 'draft-resolve', session: superSession, token: yHeld.token, decision: 'accept', note: 'second press' });
+check('pressing accept twice does not register a second team',
+  yAgain.ok === true && yRows('YouPI Held') === 1, JSON.stringify(yAgain));
+
+/* --- rejection saves nobody --- */
+resetFetch();
+yQueueEcho({
+  paymentId: 'pay_YOUPI4', amount: '100.00',
+  amountPaise: '10000', currency: 'INR', status: 'INITIATED',
+  checkoutUrl: 'http://127.0.0.1:7000/checkout/pay_YOUPI4'
+});
+const yRejectOpen = yPost('payorder', validPayload('YouPI Reject'));
+const rejectDraft = yDraft(yRejectOpen.token);
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI4', orderId: String(rejectDraft.values[9]), amount: '100.00',
+  amountPaise: '10000', currency: 'INR', status: 'SUCCESS', verificationLevel: 1
+});
+yPost('paystatus', { token: yRejectOpen.token });
+const yRejected = adminCall({
+  action: 'draft-resolve', session: superSession, token: yRejectOpen.token,
+  decision: 'reject', note: 'No such credit in the bank statement'
+});
+check('the organiser can reject a held payment',
+  yRejected.ok === true && yRejected.state === 'REJECTED', JSON.stringify(yRejected));
+check('rejecting registers nobody', yRows('YouPI Reject') === 0);
+
+/* --- the level is configuration, not a hardcoded 2 --- */
+scriptProps.set('youpi_min_verification_level', '1');
+check('the required level is read from Script Properties', yConfig().minVerification === 1);
+scriptProps.delete('youpi_min_verification_level');
+
+/* --- cash is unchanged under a YouPI deployment --- */
+const yCash = post(Object.assign(validPayload('YouPI Cash'), { payment: { method: 'CASH' } }));
+check('cash registration still saves under YouPI', yCash.ok === true, JSON.stringify(yCash));
+check('cash is still PENDING, never PAID',
+  String(sheetRowFor('YouPI Cash')[15]) === 'PENDING', String(sheetRowFor('YouPI Cash')[15]));
+
+/* --- a plain ONLINE claim is still refused with YouPI configured --- */
+const yClaim = JSON.parse(sandbox.doPost({ postData: { contents: JSON.stringify(Object.assign(validPayload('YouPI Claim'), { payment: { method: 'ONLINE', status: 'PAID' } })) } }).getContent());
+check('a claim of online payment is refused under YouPI too',
+  yClaim.ok === false, JSON.stringify(yClaim));
+check('that claim wrote no row', yRows('YouPI Claim') === 0);
+
+/* Put the deployment back the way the rest of the repository describes it. */
+scriptProps.delete('payment_provider');
+scriptProps.delete('youpi_base_url');
+scriptProps.delete('youpi_merchant_id');
+scriptProps.delete('youpi_merchant_key');
+scriptProps.delete('youpi_min_verification_level');
+resetFetch();
+}
+
+/* ORG_TESTS */
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail === 0 ? 0 : 1);

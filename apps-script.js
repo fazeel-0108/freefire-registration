@@ -37,7 +37,15 @@ var CONFIG = {
 
   // Leave '' when this script is bound to the sheet (normal case).
   // Paste a spreadsheet ID here only for a standalone script.
+  //
+  // A web app deployed as "Execute as me / Anyone" has NO active spreadsheet,
+  // so getActiveSpreadsheet() returns null there and the ID has to come from
+  // somewhere. Pinning it in this file would put the sheet's ID in a public
+  // repository, so it is read from the script_id Script Property instead -- see
+  // sheetId_() below and ADMIN.md for the one-line setup. This also means a
+  // fresh copy of this file can be deployed without editing anything.
   SHEET_ID: '',
+  SHEET_ID_PROPERTY: 'sheet_id',
 
   // Optional: receive an email for every registration.
   ORGANIZER_EMAIL: '',
@@ -62,6 +70,45 @@ var CONFIG = {
   ADMIN_PAGE_SIZE: 25,
   ADMIN_NOTE_LIMIT: 500,
 
+  // --- Entry fee -----------------------------------------------------
+  // ₹100 per TEAM is only the DEFAULT. The live fee comes from the Settings
+  // tab (entry_fee), which the organiser dashboard writes, so it lives in one
+  // place: the sheet. Whatever the fee is at the moment a team registers is
+  // copied onto that row, so a later change never rewrites an older team's fee.
+  TEAM_FEE: 100,
+  // --- Online payments ---------------------------------------------
+  // Which gateway is used is a deployment decision, held in Script Properties
+  // like every other credential. YouPI PG is the default; 'razorpay' opts into
+  // the fallback adapter.
+  PAYMENT_PROVIDER_PROPERTY: 'payment_provider',
+
+  // Razorpay credentials live in Script Properties, never in this file, the
+  // repository or the published site. See PAYMENTS.md for the exact setup.
+  RAZORPAY_KEY_ID_PROPERTY: 'razorpay_key_id',
+  RAZORPAY_KEY_SECRET_PROPERTY: 'razorpay_key_secret',
+  RAZORPAY_WEBHOOK_SECRET_PROPERTY: 'razorpay_webhook_secret',
+  RAZORPAY_API_BASE: 'https://api.razorpay.com/v1',
+
+  // YouPI PG (self-hosted) credentials. Same rules: Script Properties only.
+  // The merchant key is the merchant's webhook secret, which YouPI also accepts
+  // as X-Merchant-Key on the merchant API. It never reaches the browser.
+  YOUPI_BASE_URL_PROPERTY: 'youpi_base_url',
+  YOUPI_MERCHANT_ID_PROPERTY: 'youpi_merchant_id',
+  YOUPI_MERCHANT_KEY_PROPERTY: 'youpi_merchant_key',
+  // YouPI reports how it decided a payment arrived:
+  //   0 = unverified, 1 = bank SMS observed, 2 = SMS + Gmail (dual) observed.
+  // Anything below this level is held for an organiser instead of registering
+  // a team, because the gateway itself says that is not conclusive.
+  YOUPI_MIN_VERIFICATION_PROPERTY: 'youpi_min_verification_level',
+  YOUPI_DEFAULT_MIN_VERIFICATION: 2,
+
+  PAYMENT_CURRENCY: 'INR',
+  // A QR is only useful for a short while; an abandoned draft must expire so
+  // the sheet does not fill with dead payment attempts.
+  PAYMENT_DRAFT_TTL_MINUTES: 30,
+  PAYMENT_SETTINGS_SHEET: 'Settings',
+  PAYMENT_DRAFT_SHEET: 'PaymentDrafts',
+
   // --- WhatsApp notifications (optional) ---------------------------
   // Credentials are NOT here. They live in Script Properties, so they are
   // never in this file, the repository or the published website. The exact
@@ -81,6 +128,9 @@ var CONFIG = {
 
 // Column order. The website sends exactly this data; Status and Note are
 // appended by this script and are never sent by a public registration.
+// The payment columns were appended to the END of this list so every sheet
+// written by an older version of this script keeps its data in the same
+// cells. Nothing is inserted, renamed or moved.
 var HEADERS = [
   'Timestamp',
   'Team Name',
@@ -92,11 +142,48 @@ var HEADERS = [
   'Status',
   'Note',
   'WhatsApp Consent',
-  'Consent At'
+  'Consent At',
+  'Entry Fee',
+  'Payment Method',
+  'Payment Status',
+  'UTR / Reference',
+  'Payment Note',
+  'Payment Updated At',
+  'Payment Updated By',
+  // Appended again, never inserted: a team's verified-payment evidence is
+  // recorded next to the money it describes.
+  'Payment Order ID',
+  'Payment ID',
+  'Paid Amount',
+  'Paid Currency',
+  'Payment Verified At',
+  'Payment Provider'
 ];
 
 // Organiser workflow states. A blank status on an older row reads as PENDING.
 var STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'WAITLISTED'];
+
+// Payment method and status. These exact strings are what the sheet dropdowns
+// offer, so a hand edit on a phone and a dashboard click write the same value.
+var PAY = {
+  NOT_SELECTED: 'NOT SELECTED',
+  PENDING: 'PENDING',
+  PENDING_VERIFICATION: 'PENDING VERIFICATION',
+  PAID: 'PAID',
+  NEEDS_REVIEW: 'NEEDS REVIEW',
+  REJECTED: 'REJECTED'
+};
+
+var PAYMENT_STATUSES = [
+  PAY.NOT_SELECTED, PAY.PENDING, PAY.PENDING_VERIFICATION,
+  PAY.PAID, PAY.NEEDS_REVIEW, PAY.REJECTED
+];
+
+var PAYMENT_METHODS = ['ONLINE', 'CASH'];
+
+// Statuses a team may never set for itself. Only an organiser can move a
+// payment to PAID — a UTR typed by a visitor proves nothing.
+var PAYMENT_ORGANISER_ONLY = [PAY.PAID, PAY.NEEDS_REVIEW, PAY.REJECTED];
 
 // A squad may register short-handed: 2 to 4 players is a valid entry.
 var MIN_PLAYERS = 2;
@@ -116,14 +203,22 @@ var COL = {
   TIMESTAMP: 1, TEAM: 2, DEPARTMENT: 3,
   P1: 4, P1_WA: 5, P2: 6, P2_WA: 7, P3: 8, P4: 9,
   STATUS: 10, NOTE: 11,
-  CONSENT: 12, CONSENT_AT: 13
+  CONSENT: 12, CONSENT_AT: 13,
+  FEE: 14, METHOD: 15, PAY_STATUS: 16, UTR: 17, PAY_NOTE: 18,
+  PAY_AT: 19, PAY_BY: 20,
+  PAY_ORDER: 21, PAY_ID: 22, PAID_AMOUNT: 23, PAID_CURRENCY: 24,
+  PAY_VERIFIED_AT: 25, PAY_PROVIDER: 26
 };
 
 // Only players 1 and 2 give a WhatsApp number.
 var PHONE_COLUMNS = [COL.P1_WA, COL.P2_WA];
 var NAME_COLUMNS = [COL.P1, COL.P2, COL.P3, COL.P4];
 
-var COLUMN_WIDTHS = [160, 170, 280, 135, 150, 135, 150, 135, 135, 110, 260];
+var COLUMN_WIDTHS = [
+  160, 170, 280, 135, 150, 135, 150, 135, 135, 110, 260, 100, 120,
+  90, 120, 150, 165, 190, 160, 120,
+  180, 175, 100, 100, 150, 120
+];
 
 // A calm, record-like palette. The brand lime survives only as one thin rule
 // under the header and on the tab. Lime text on near-black read as cheap, and
@@ -143,7 +238,7 @@ var THEME = {
 
 // Includes the sheet name so renaming the tab can never serve stale counters.
 var CACHE_KEY_STATS = 'qqsgp_stats_v2_' + CONFIG.SHEET_NAME;
-var PROP_FORMATTED = 'qqsgp_sheet_format_v2';
+var PROP_FORMATTED = 'qqsgp_sheet_format_v3';
 
 
 /* ================================================================
@@ -169,11 +264,17 @@ function doGet(e) {
       return jsonResponse_(getStats_());
     }
 
+    // The live entry fee and whether online payment is actually switched on.
+    // The page never assumes either: it asks.
+    if (action === 'config') {
+      return jsonResponse_(publicConfig_());
+    }
+
     return jsonResponse_({
       ok: true,
       service: 'QQSGP Free Fire Registration',
       status: 'running',
-      endpoints: ['?action=stats', '?action=webhook']
+      endpoints: ['?action=stats', '?action=config', '?action=webhook', '?action=paywebhook']
     });
   } catch (error) {
     return errorResponse_('Server error: ' + messageOf_(error));
@@ -207,6 +308,45 @@ function doPost(e) {
       return jsonResponse_(adminHandle_(e));
     } catch (error) {
       return errorResponse_('Server error: ' + messageOf_(error));
+    }
+  }
+
+  // Verified online payment. The browser can open an order, ask about it and
+  // cancel it; it can never tell the server that money arrived. Only the
+  // provider's own API answer can do that (see verifyRazorpayPayment_).
+  if (route === 'payorder') {
+    try {
+      return jsonResponse_(publicPaymentOrder_(e));
+    } catch (error) {
+      return errorResponse_('Server error: ' + messageOf_(error));
+    }
+  }
+
+  if (route === 'paystatus') {
+    try {
+      return jsonResponse_(publicPaymentStatus_(e));
+    } catch (error) {
+      return errorResponse_('Server error: ' + messageOf_(error));
+    }
+  }
+
+  if (route === 'paycancel') {
+    try {
+      return jsonResponse_(publicPaymentCancel_(e));
+    } catch (error) {
+      return errorResponse_('Server error: ' + messageOf_(error));
+    }
+  }
+
+  // The provider's callback is a doorbell, not evidence. Its body is read for
+  // ids only, then thrown away: the payment is re-fetched from Razorpay with
+  // our secret key before a single cell is written.
+  if (route === 'paywebhook') {
+    try {
+      return jsonResponse_(publicPaymentWebhook_(e));
+    } catch (error) {
+      console.error('Payment webhook failed: ' + messageOf_(error));
+      return jsonResponse_({ ok: false });
     }
   }
 
@@ -255,12 +395,23 @@ function doPost(e) {
     //    switch it on, and it can never fail the registration either.
     maybeSendReceipt_(sheet, rowNumber);
 
+    // The id is the same opaque record id the dashboard uses. Everything the
+    // site is told about money is read back from the row that was just
+    // written, never taken from the request.
+    var stamp = sheet.getRange(rowNumber, COL.TIMESTAMP).getValue();
+    var newId = recordId_(stamp, checked.value.teamName);
+    var written = sheet.getRange(rowNumber, 1, 1, HEADERS.length).getValues()[0];
+    var payment = paymentFromRow_(written);
+
     return jsonResponse_({
       ok: true,
       team: checked.value.teamName,
       row: rowNumber,
       teams: stats.teams,
-      players: stats.players
+      players: stats.players,
+      id: newId,
+      fee: payment.entryFee,
+      payment: payment
     });
 
   } catch (error) {
@@ -454,6 +605,13 @@ function validateRegistration_(payload) {
   // The timestamp is kept so an organiser can show when consent was given.
   var consent = payload.whatsappConsent === true;
 
+  // --- Payment choice ---------------------------------------------------
+  // The website now sends the choice WITH the registration, because nothing is
+  // registered until a method is picked. The field stays optional so an older
+  // page (or a direct POST) still registers a team rather than failing.
+  var payment = validatePaymentChoice_(payload.payment || {});
+  if (!payment.ok) return { ok: false, error: payment.error };
+
   return {
     ok: true,
     value: {
@@ -461,7 +619,56 @@ function validateRegistration_(payload) {
       department: department,
       members: members,
       whatsappConsent: consent,
-      consentAt: consent ? new Date() : ''
+      consentAt: consent ? new Date() : '',
+      payment: payment.value
+    }
+  };
+}
+
+/**
+ * Turns the team's choice into the values written on the row.
+ *
+ *   CASH   -> PENDING. The money has not been handed over yet.
+ *   ONLINE -> REFUSED. "I paid" is not evidence: a registration that claims
+ *             online payment is only ever written by the verified-payment
+ *             path below, after the provider confirms the money. A browser
+ *             that posts ONLINE straight at this endpoint is turned away
+ *             instead of being trusted.
+ *   none   -> NOT SELECTED (older clients).
+ */
+function validatePaymentChoice_(raw) {
+  var source = raw && typeof raw === 'object' ? raw : {};
+  var rawText = cleanText_(source.method || (typeof raw === 'string' ? raw : ''));
+  var method = normalisePaymentMethod_(rawText);
+
+  // An empty choice is allowed: the previous website sends no payment block and
+  // must keep working. Every other value must be one of the two methods.
+  if (!method) {
+    if (rawText) {
+      return { ok: false, error: 'Choose Online or Cash to submit the entry.' };
+    }
+    return {
+      ok: true,
+      value: { method: '', status: PAY.NOT_SELECTED, utr: '', note: '', by: '' }
+    };
+  }
+
+  if (method === 'ONLINE') {
+    return {
+      ok: false,
+      error: 'Online payment has to be completed through the payment step, after the ' +
+        'provider confirms it. Nothing was submitted. Choose Cash, or pay online first.'
+    };
+  }
+
+  return {
+    ok: true,
+    value: {
+      method: 'CASH',
+      status: PAY.PENDING,
+      utr: '',
+      note: 'Cash to be collected by an organiser.',
+      by: 'TEAM'
     }
   };
 }
@@ -485,14 +692,31 @@ function messageOf_(error) {
    SHEET ACCESS
    ================================================================ */
 
-function getSheet_() {
-  var spreadsheet;
+/**
+ * The spreadsheet to use. CONFIG first (a standalone script may pin it), then
+ * the sheet_id Script Property. The property is what a deployed web app needs:
+ * bound scripts reach their own sheet from the editor, but a web app request
+ * running as the deployer has no active spreadsheet.
+ */
+function sheetId_() {
+  if (CONFIG.SHEET_ID) return CONFIG.SHEET_ID;
 
-  if (CONFIG.SHEET_ID) {
-    spreadsheet = SpreadsheetApp.openById(CONFIG.SHEET_ID);
-  } else {
-    spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  try {
+    return PropertiesService.getScriptProperties().getProperty(CONFIG.SHEET_ID_PROPERTY) || '';
+  } catch (ignored) {
+    return '';
   }
+}
+
+/** Opens the spreadsheet by ID, falling back to the bound sheet in the editor. */
+function openBook_() {
+  var id = sheetId_();
+  if (id) return SpreadsheetApp.openById(id);
+  return SpreadsheetApp.getActiveSpreadsheet();
+}
+
+function getSheet_() {
+  var spreadsheet = openBook_();
 
   if (!spreadsheet) {
     throw new Error('No spreadsheet found. Open this script from Extensions > Apps Script inside your Google Sheet.');
@@ -579,6 +803,7 @@ function dayKey_(date) {
 /** Appends one registration row and returns its row number. */
 function appendRegistration_(sheet, registration) {
   var members = registration.members;
+  var payment = registration.payment || null;
 
   var row = [
     new Date(),
@@ -592,7 +817,23 @@ function appendRegistration_(sheet, registration) {
     'PENDING',
     '',
     registration.whatsappConsent ? 'YES' : 'NO',
-    registration.consentAt || ''
+    registration.consentAt || '',
+    // The fee is stored per row so a later price change never rewrites
+    // what an already-registered team agreed to pay.
+    payment && payment.fee ? Number(payment.fee) : entryFee_(),
+    payment ? payment.method : '',
+    payment ? payment.status : PAY.NOT_SELECTED,
+    payment ? (payment.utr || '') : '',
+    payment ? (payment.note || '') : '',
+    payment ? new Date() : '',
+    payment ? (payment.by || 'TEAM') : '',
+    // Verified-payment evidence. Empty for cash, which has none.
+    payment ? (payment.orderId || '') : '',
+    payment ? (payment.paymentId || '') : '',
+    payment ? (payment.paidAmount || '') : '',
+    payment ? (payment.paidCurrency || '') : '',
+    payment ? (payment.verifiedAt || '') : '',
+    payment ? (payment.provider || '') : ''
   ];
 
   var target = sheet.getLastRow() + 1;
@@ -701,13 +942,26 @@ function collectStats_(sheet) {
 function ensureFormattingApplied_(sheet) {
   // Formatting is a convenience: if anything here fails, a registration
   // must still go through untouched.
-  try {
-    var properties = PropertiesService.getDocumentProperties();
+  //
+  // Document Properties only exist on a container-bound script. This project is
+  // a standalone one (the web app opens the sheet by id), so getDocumentProperties()
+  // is null there and a naive memo threw, leaving the sheet unformatted and the
+  // payment dropdowns missing. Fall back to Script Properties and, if neither
+  // store is reachable, just apply the formatting without remembering it.
+  var properties = null;
 
-    if (properties.getProperty(PROP_FORMATTED) === 'yes') return;
+  try {
+    properties = PropertiesService.getDocumentProperties() ||
+      PropertiesService.getScriptProperties();
+  } catch (ignored) {
+    properties = null;
+  }
+
+  try {
+    if (properties && properties.getProperty(PROP_FORMATTED) === 'yes') return;
 
     applySheetFormatting_(sheet);
-    properties.setProperty(PROP_FORMATTED, 'yes');
+    if (properties) properties.setProperty(PROP_FORMATTED, 'yes');
   } catch (error) {
     console.error('Sheet formatting skipped: ' + messageOf_(error));
   }
@@ -764,6 +1018,10 @@ function applySheetFormatting_(sheet) {
   // The department dropdown is installed by refreshBodyStyles_, which also runs
   // on every registration, so its range always matches the registered rows.
 
+  // The fee is a number in the sheet, shown as ₹100, so it can be summed.
+  sheet.getRange(2, COL.FEE, bodyRows, 1).setNumberFormat('"₹"#,##0');
+  sheet.getRange(2, COL.FEE, bodyRows, 1).setHorizontalAlignment('right');
+
   // --- Highlight a WhatsApp number that appears in more than one team ---
   applyDuplicateRules_(sheet, width);
 
@@ -777,6 +1035,7 @@ function refreshBodyStyles_(sheet) {
 
   // Called before the early return so an emptied sheet still loses stale arrows.
   refreshDepartmentDropdown_(sheet);
+  refreshPaymentStyles_(sheet);
 
   if (rows === 0) return;
 
@@ -821,6 +1080,43 @@ function refreshDepartmentDropdown_(sheet) {
   }
 }
 
+/**
+ * Payment dropdowns, kept only on real rows. This is what lets the sheet be
+ * managed from a phone: tap the cell, pick a status, and the dashboard picks
+ * the change up on its next refresh.
+ */
+function refreshPaymentStyles_(sheet) {
+  try {
+    var bodyRows = Math.max(sheet.getMaxRows() - 1, 1);
+    var dataRows = Math.min(Math.max(countTeams_(sheet), 0), bodyRows);
+
+    if (dataRows > 0) {
+      var methodRule = SpreadsheetApp.newDataValidation()
+        .requireValueInList(PAYMENT_METHODS, true)
+        .setAllowInvalid(true)
+        .setHelpText('Online or Cash. Anything else is flagged for review.')
+        .build();
+      sheet.getRange(2, COL.METHOD, dataRows, 1).setDataValidation(methodRule);
+
+      var statusRule = SpreadsheetApp.newDataValidation()
+        .requireValueInList(PAYMENT_STATUSES, true)
+        .setAllowInvalid(true)
+        .setHelpText('Only an organiser can mark a payment PAID, and only after checking it.')
+        .build();
+      sheet.getRange(2, COL.PAY_STATUS, dataRows, 1).setDataValidation(statusRule);
+    }
+
+    var staleRows = bodyRows - dataRows;
+    if (staleRows > 0) {
+      sheet.getRange(2 + dataRows, COL.METHOD, staleRows, 1).clearDataValidations();
+      sheet.getRange(2 + dataRows, COL.PAY_STATUS, staleRows, 1).clearDataValidations();
+    }
+  } catch (error) {
+    // Formatting is a convenience. A registration must still save without it.
+    console.error('Payment formatting skipped: ' + messageOf_(error));
+  }
+}
+
 function applyDuplicateRules_(sheet, width) {
   var rows = Math.max(sheet.getMaxRows() - 1, 1);
   var rules = [];
@@ -849,6 +1145,27 @@ function applyDuplicateRules_(sheet, width) {
     .setRanges([sheet.getRange(2, COL.P2_WA, rows, 1)])
     .build();
   rules.push(secondRule);
+
+  // --- Payment status colours -----------------------------------------
+  // Deliberately quiet: a coloured cell should be readable at a glance on a
+  // phone without turning the sheet into a traffic light.
+  var statusColumn = '$' + columnLetter_(COL.PAY_STATUS);
+  var payStyles = [
+    { value: PAY.PAID, bg: '#e6f4ea', fg: '#137333' },
+    { value: PAY.PENDING, bg: '#fef7e0', fg: '#a15c00' },
+    { value: PAY.PENDING_VERIFICATION, bg: '#e8f0fe', fg: '#1a56db' },
+    { value: PAY.NEEDS_REVIEW, bg: '#fdecec', fg: '#b3261e' },
+    { value: PAY.REJECTED, bg: '#f1f3f4', fg: '#5f6368' }
+  ];
+
+  for (var p = 0; p < payStyles.length; p++) {
+    rules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied('=' + statusColumn + '2="' + payStyles[p].value + '"')
+      .setBackground(payStyles[p].bg)
+      .setFontColor(payStyles[p].fg)
+      .setRanges([sheet.getRange(2, COL.PAY_STATUS, rows, 1)])
+      .build());
+  }
 
   sheet.setConditionalFormatRules(rules);
 }
@@ -879,6 +1196,13 @@ function onOpen() {
       .addItem('Apply sheet formatting', 'menuApplyFormatting')
       .addItem('Show registration stats', 'menuShowStats')
       .addItem('Repair header row', 'menuRepairHeader')
+      .addItem('Payments: backfill ₹100 fee', 'menuBackfillFee')
+      .addSeparator()
+      .addItem('Organiser accounts: create', 'menuCreateAccount')
+      .addItem('Organiser accounts: reset a PIN', 'menuResetPin')
+      .addItem('Organiser accounts: enable / disable', 'menuToggleAccount')
+      .addItem('Organiser accounts: sign out everywhere', 'menuRevokeSessions')
+      .addItem('Organiser accounts: list', 'menuListAccounts')
       .addSeparator()
       .addItem('Clear stats cache', 'menuClearCache')
       .addToUi();
@@ -891,8 +1215,19 @@ function onOpen() {
 function menuApplyFormatting() {
   var sheet = getSheet_();
   applySheetFormatting_(sheet);
-  PropertiesService.getDocumentProperties().setProperty(PROP_FORMATTED, 'yes');
+  markFormatted_();
   showAlert_('Formatting applied', 'The "' + CONFIG.SHEET_NAME + '" sheet now uses the tournament layout.');
+}
+
+/** Remembers that formatting is done, on whichever property store exists. */
+function markFormatted_() {
+  try {
+    var properties = PropertiesService.getDocumentProperties() ||
+      PropertiesService.getScriptProperties();
+    if (properties) properties.setProperty(PROP_FORMATTED, 'yes');
+  } catch (ignored) {
+    // No property store (standalone script): formatting simply re-applies.
+  }
 }
 
 function menuRepairHeader() {
@@ -900,6 +1235,44 @@ function menuRepairHeader() {
   ensureHeaders_(sheet);
   applySheetFormatting_(sheet);
   showAlert_('Header repaired', 'The header row was rebuilt and the sheet was re-formatted.');
+}
+
+/**
+ * Fills a blank Entry Fee on rows written before the fee column existed.
+ * It never changes a fee that is already recorded, and never touches a
+ * payment status — a team still has to pay until an organiser says otherwise.
+ */
+function menuBackfillFee() {
+  var sheet = getSheet_();
+  ensureHeaders_(sheet);
+
+  var rows = countTeams_(sheet);
+  if (rows === 0) {
+    showAlert_('Nothing to do', 'There are no registrations in this sheet yet.');
+    return;
+  }
+
+  var range = sheet.getRange(2, COL.FEE, rows, 1);
+  var values = range.getValues();
+  var filled = 0;
+
+  for (var i = 0; i < values.length; i++) {
+    if (cleanText_(values[i][0]) === '') {
+      values[i][0] = CONFIG.TEAM_FEE;
+      filled++;
+    }
+  }
+
+  if (filled > 0) {
+    range.setValues(values);
+    range.setNumberFormat('"₹"#,##0');
+  }
+
+  showAlert_(
+    'Entry fee backfilled',
+    filled + ' row(s) set to ₹' + CONFIG.TEAM_FEE + '.\n' +
+      (rows - filled) + ' row(s) already had a fee and were left untouched.'
+  );
 }
 
 function menuShowStats() {
@@ -956,6 +1329,2405 @@ function setupSheet() {
   console.log('Sheet layout is ready.');
 }
 
+
+/* ================================================================
+   ORGANISER ACCOUNTS, PIN LOGIN, ROLES AND SESSIONS
+   ----------------------------------------------------------------
+   Replaces "one shared key for everybody" with named accounts. Each
+   organiser has an id, a role and a personal PIN. PINs are never
+   stored: what lives here is a salted PBKDF2-HMAC-SHA256 verifier.
+   Signing in mints a server-side session; every later call carries
+   the session token, and the server decides what that role may do.
+
+   Everything below is stored in Script Properties, which only this
+   script can read. Nothing here is in the website, the repository or
+   the sheet, and no PIN or token is ever written to a log line.
+   ================================================================ */
+
+var ORG = {
+  ACCOUNTS_PROPERTY: 'org_accounts_v1',
+  SESSIONS_PROPERTY: 'org_sessions_v1',
+
+  /* A property value tops out at about 9 KB, so both stores are split across
+     numbered chunks and rejoined on read. */
+  CHUNK_CHARS: 7000,
+
+  /* Sessions: idle timeout, absolute lifetime, and the longer absolute
+     lifetime granted when the organiser ticks "keep me signed in". */
+  IDLE_SECONDS: 12 * 60 * 60,
+  ABSOLUTE_SECONDS: 7 * 24 * 60 * 60,
+  REMEMBER_ABSOLUTE_SECONDS: 30 * 24 * 60 * 60,
+  /* Sliding renewal is written at most this often, so a busy dashboard does
+     not rewrite the session store on every poll. */
+  SLIDE_AFTER_SECONDS: 300,
+  MAX_SESSIONS_PER_ACCOUNT: 10,
+  MAX_SESSIONS_TOTAL: 200,
+
+  /* Lockout after repeated wrong PINs, counted per submitted organiser id so
+     guessing ids is as slow as guessing PINs. */
+  LOGIN_MAX_FAILS: 5,
+  LOGIN_FAIL_WINDOW_SECONDS: 900,
+  LOGIN_LOCK_SECONDS: 900,
+
+  ID_MIN: 3,
+  ID_MAX: 32,
+  NAME_MAX: 60,
+  PIN_MIN: 6,
+  PIN_MAX: 64,
+
+  /* PBKDF2-HMAC-SHA256. Every iteration is a native call, so the count is
+     calibrated to a time budget rather than fixed, and the count actually
+     used is recorded inside the verifier. The floor keeps a fast runtime
+     from calibrating down to something trivial. */
+  PBKDF2_FLOOR: 600,
+  PBKDF2_CEIL: 20000,
+  PBKDF2_TARGET_MS: 400,
+  PBKDF2_CALIBRATE_ITERATIONS: 64,
+  PBKDF2_ALGORITHM: 'pbkdf2-sha256',
+
+  AUDIT_SHEET_NAME: 'Audit',
+  AUDIT_PAGE_SIZE: 30,
+  AUDIT_MAX_ROWS: 2000
+};
+
+var ORG_ROLE = { SUPER: 'SUPER', ORGANIZER: 'ORGANIZER' };
+
+/* What each role may do. One table, checked on the server for every action:
+   hiding a button in the browser is never what stops somebody. */
+var ORG_PERMISSIONS = {
+  SUPER: [
+    'records.view', 'records.update', 'records.export',
+    'pay.view', 'pay.update',
+    'wa.view', 'wa.send',
+    'accounts.manage', 'sessions.manage', 'audit.view'
+  ],
+  ORGANIZER: [
+    'records.view', 'records.update', 'records.export',
+    'pay.view', 'pay.update',
+    'wa.view', 'wa.send'
+  ]
+};
+
+/* Dashboard action -> permission. Anything not listed needs only a session,
+   which is how the read-only and self-service calls are covered. */
+var ORG_ACTION_PERMISSION = {
+  'list': 'records.view',
+  'status': 'records.update',
+  'note': 'records.update',
+  'payment-status': 'pay.update',
+  'settings-get': 'pay.view',
+  'settings-set': 'pay.update',
+  'drafts-list': 'pay.view',
+  'draft-resolve': 'pay.update',
+  'export': 'records.export',
+  'notif-config': 'wa.view',
+  'notif-list': 'wa.view',
+  'notif-retry': 'wa.send',
+  'announce-preview': 'wa.view',
+  'announce-send': 'wa.send',
+  'account-list': 'accounts.manage',
+  'account-create': 'accounts.manage',
+  'account-update': 'accounts.manage',
+  'account-reset-pin': 'accounts.manage',
+  'account-delete': 'accounts.manage',
+  'session-list': 'sessions.manage',
+  'session-revoke': 'sessions.manage',
+  'account-revoke-sessions': 'sessions.manage',
+  'audit-list': 'audit.view'
+};
+
+/* Pins that are a single repeated character, a straight run, or on this list
+   are refused at creation and at reset. */
+var ORG_WEAK_PINS = [
+  '000000', '111111', '1111111', '123123', '123321', '112233', '121212',
+  '123456', '1234567', '12345678', '123456789', '1234567890', '654321',
+  '987654', '010203', 'noname', 'admin', 'admin123', 'administrator',
+  'password', 'passw0rd', 'pass123', 'qwerty', 'qwerty123', 'abc123',
+  'letmein', 'welcome', 'iloveyou', 'secret', 'letmein1', 'tournament',
+  'qqsgp', 'qqsgp123', 'freefire', 'freefire1'
+];
+
+/* ------------------------ server-side stores ------------------------ */
+
+/**
+ * Reads a JSON document held in Script Properties under numbered chunks.
+ * A property value is capped at roughly 9 KB, so anything that could grow
+ * (accounts, sessions) is split and rejoined here. A corrupt chunk reads as
+ * an empty store rather than throwing, which keeps a bad write from locking
+ * every organiser out.
+ */
+function orgStoreRead_(prefix) {
+  var properties;
+  try {
+    properties = PropertiesService.getScriptProperties();
+  } catch (ignored) {
+    return [];
+  }
+
+  var text = '';
+  var index = 0;
+  while (index < 200) {
+    var chunk = properties.getProperty(prefix + '_' + index);
+    if (chunk === null || chunk === undefined) break;
+    text += chunk;
+    index++;
+  }
+
+  if (!text) return [];
+
+  try {
+    var value = JSON.parse(text);
+    return (value && value.length !== undefined) ? value : [];
+  } catch (ignored) {
+    return [];
+  }
+}
+
+/** Splits a JSON document across chunks and clears any chunk left behind. */
+function orgStoreWrite_(prefix, list) {
+  var properties = PropertiesService.getScriptProperties();
+  var text = JSON.stringify(list || []);
+  var chunks = [];
+
+  for (var at = 0; at < text.length; at += ORG.CHUNK_CHARS) {
+    chunks.push(text.substr(at, ORG.CHUNK_CHARS));
+  }
+  if (chunks.length === 0) chunks.push('[]');
+
+  for (var i = 0; i < chunks.length; i++) {
+    properties.setProperty(prefix + '_' + i, chunks[i]);
+  }
+
+  // Remove the tail of a previous, longer document so a stale chunk can never
+  // be appended to a shorter one.
+  for (var stale = chunks.length; stale < 200; stale++) {
+    if (properties.getProperty(prefix + '_' + stale) === null) break;
+    properties.deleteProperty(prefix + '_' + stale);
+  }
+
+  return chunks.length;
+}
+
+/* ------------------------------ crypto ------------------------------ */
+
+/** HMAC-SHA256 over raw bytes. Apps Script returns signed bytes; the XOR in
+    PBKDF2 below relies on that, so nothing is normalised here. */
+function orgHmacBytes_(messageBytes, keyBytes) {
+  return Utilities.computeHmacSha256Signature(messageBytes, keyBytes);
+}
+
+function orgBase64_(bytes) {
+  return Utilities.base64Encode(bytes);
+}
+
+function orgHexToBytes_(hex) {
+  var bytes = [];
+  for (var i = 0; i < hex.length; i++) bytes.push(hex.charCodeAt(i));
+  return bytes;
+}
+
+/** The PIN as UTF-8 code units, capped to one byte each. */
+function orgPinBytes_(pin) {
+  var bytes = [];
+  for (var i = 0; i < pin.length; i++) bytes.push(pin.charCodeAt(i) % 256);
+  return bytes;
+}
+
+/**
+ * PBKDF2-HMAC-SHA256, one output block (32 bytes).
+ * U1 = HMAC(PIN, salt || INT(1)); Ui = HMAC(PIN, Ui-1); DK = U1 ^ U2 ^ ...
+ */
+function orgPbkdf2Bytes_(pinBytes, saltBytes, iterations) {
+  var seed = saltBytes.concat([0, 0, 0, 1]);
+  var block = orgHmacBytes_(seed, pinBytes);
+  var result = block.slice(0);
+
+  for (var round = 1; round < iterations; round++) {
+    block = orgHmacBytes_(block, pinBytes);
+    for (var i = 0; i < result.length; i++) result[i] = result[i] ^ block[i];
+  }
+
+  return result;
+}
+
+/** 32 hex characters of salt, from two random UUIDs. */
+function orgNewSalt_() {
+  return (Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '')).slice(0, 32);
+}
+
+/**
+ * Chooses an iteration count that costs about PBKDF2_TARGET_MS on this
+ * runtime, then clamps it. The count that was actually used is stored in the
+ * verifier, so a later verification always repeats the same work.
+ */
+function orgCalibrateIterations_(pinBytes, saltBytes) {
+  var started = new Date().getTime();
+  orgPbkdf2Bytes_(pinBytes, saltBytes, ORG.PBKDF2_CALIBRATE_ITERATIONS);
+  var elapsed = new Date().getTime() - started;
+
+  if (elapsed <= 0) return ORG.PBKDF2_FLOOR;
+
+  var perIteration = elapsed / ORG.PBKDF2_CALIBRATE_ITERATIONS;
+  var wanted = Math.round(ORG.PBKDF2_TARGET_MS / perIteration);
+
+  return Math.max(ORG.PBKDF2_FLOOR, Math.min(ORG.PBKDF2_CEIL, wanted));
+}
+
+/** Builds the stored verifier. The PIN itself is never written anywhere. */
+function orgMakeVerifier_(pin) {
+  var salt = orgNewSalt_();
+  var pinBytes = orgPinBytes_(pin);
+  var saltBytes = orgHexToBytes_(salt);
+  var iterations = orgCalibrateIterations_(pinBytes, saltBytes);
+  var digest = orgPbkdf2Bytes_(pinBytes, saltBytes, iterations);
+
+  return ORG.PBKDF2_ALGORITHM + '$' + iterations + '$' + salt + '$' + orgBase64_(digest);
+}
+
+/**
+ * Repeats exactly the work a real verification does, for a submitted id that
+ * does not exist. Without it, a wrong id would answer measurably faster than a
+ * wrong PIN and the login form would leak which ids are real.
+ */
+function orgDummyVerifier_() {
+  var properties = PropertiesService.getScriptProperties();
+  var stored = properties.getProperty('org_dummy_v1');
+  if (stored) return stored;
+
+  stored = orgMakeVerifier_(Utilities.getUuid());
+
+  try {
+    properties.setProperty('org_dummy_v1', stored);
+  } catch (ignored) {}
+
+  return stored;
+}
+
+/** true when the PIN matches the stored verifier. Never reveals the PIN. */
+function orgCheckVerifier_(pin, verifier) {
+  var parts = String(verifier || '').split('$');
+  if (parts.length !== 4) return false;
+  if (parts[0] !== ORG.PBKDF2_ALGORITHM) return false;
+
+  var iterations = Number(parts[1]);
+  if (!isFinite(iterations) || iterations < 1 || iterations > 2000000) return false;
+
+  var digest = orgPbkdf2Bytes_(orgPinBytes_(pin), orgHexToBytes_(parts[2]), iterations);
+
+  return constantTimeEquals_(orgBase64_(digest), parts[3]);
+}
+
+/** 64 hex characters of session token, from two random UUIDs. */
+function orgNewToken_() {
+  return (Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '')).slice(0, 64);
+}
+
+/** Only the hash of a session token is stored, so a store leak is not a login. */
+function orgTokenHash_(token) {
+  var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, 'qqsgp-session|' + token);
+  return Utilities.base64EncodeWebSafe(digest).replace(/=+$/, '');
+}
+
+/* --------------------------- input policy --------------------------- */
+
+/** Organiser ids are lowercase and URL-safe, so they are easy to type on a phone. */
+function orgNormaliseId_(value) {
+  return cleanText_(value).toLowerCase();
+}
+
+function orgIdValid_(id) {
+  return /^[a-z0-9][a-z0-9._-]*$/.test(id) && id.length >= ORG.ID_MIN && id.length <= ORG.ID_MAX;
+}
+
+/**
+ * The PIN policy. A short all-numeric PIN is genuinely weaker than a password:
+ * six digits is a one-in-a-million guess and eight is not much better against
+ * an offline attacker, which is why the verifier is slow, the account locks
+ * after five wrong tries, and a longer alphanumeric PIN is recommended.
+ */
+function orgPinProblem_(id, pin) {
+  if (typeof pin !== 'string') return 'Enter your PIN.';
+  if (pin.length < ORG.PIN_MIN) return 'The PIN must be at least ' + ORG.PIN_MIN + ' characters.';
+  if (pin.length > ORG.PIN_MAX) return 'The PIN must be ' + ORG.PIN_MAX + ' characters or fewer.';
+  if (/^\s|\s$/.test(pin)) return 'The PIN cannot start or end with a space.';
+  if (/[\x00-\x1f]/.test(pin)) return 'The PIN cannot contain control characters.';
+
+  var lower = pin.toLowerCase();
+  var compact = lower.replace(/[^a-z0-9]/g, '');
+
+  if (compact.length && /^(.)\1*$/.test(compact)) {
+    return 'That PIN is one character repeated. Choose something less predictable.';
+  }
+  if (orgIsSequence_(compact)) {
+    return 'That PIN is a straight run of characters. Choose something less predictable.';
+  }
+  if (ORG_WEAK_PINS.indexOf(compact) !== -1) {
+    return 'That PIN is too common. Choose something less predictable.';
+  }
+  if (id) {
+    var idCompact = id.replace(/[^a-z0-9]/g, '');
+    if (idCompact && compact === idCompact) return 'The PIN cannot be your organiser ID.';
+    if (idCompact.length >= ORG.ID_MIN && compact.indexOf(idCompact) !== -1) {
+      return 'The PIN cannot contain your organiser ID.';
+    }
+  }
+
+  return '';
+}
+
+/** true for 4 or more characters stepping by one, up or down, e.g. 1234 or 8765. */
+function orgIsSequence_(compact) {
+  if (compact.length < 4) return false;
+
+  for (var start = 0; start + 4 <= compact.length; start++) {
+    var step = compact.charCodeAt(start + 1) - compact.charCodeAt(start);
+    if (step !== 1 && step !== -1) continue;
+
+    var run = 2;
+    while (start + run < compact.length &&
+           compact.charCodeAt(start + run) - compact.charCodeAt(start + run - 1) === step) {
+      run++;
+    }
+    if (run >= 4) return true;
+  }
+
+  return false;
+}
+
+function orgCleanDevice_(value) {
+  var label = cleanText_(value).replace(/[^\w .\-()/]/g, '').slice(0, 60);
+  return label || 'Unnamed device';
+}
+
+/* ---------------------------- the accounts ---------------------------- */
+
+function orgAccounts_() {
+  return orgStoreRead_(ORG.ACCOUNTS_PROPERTY);
+}
+
+function orgFindAccount_(id) {
+  var wanted = orgNormaliseId_(id);
+  var accounts = orgAccounts_();
+
+  for (var i = 0; i < accounts.length; i++) {
+    if (orgNormaliseId_(accounts[i].id) === wanted) return accounts[i];
+  }
+
+  return null;
+}
+
+/** Everything the browser may know about an account. The verifier never leaves. */
+function orgPublicAccount_(account) {
+  if (!account) return null;
+  return {
+    id: account.id,
+    name: account.name || account.id,
+    role: account.role === ORG_ROLE.SUPER ? ORG_ROLE.SUPER : ORG_ROLE.ORGANIZER,
+    enabled: account.enabled !== false,
+    created: account.created || '',
+    createdBy: account.createdBy || '',
+    pinChanged: account.pinChanged || '',
+    lastLogin: account.lastLogin || '',
+    lastDevice: account.lastDevice || ''
+  };
+}
+
+/** Never logs or returns a PIN; the caller only sees how many accounts exist. */
+function orgCountSuperAdmins_(accounts) {
+  var count = 0;
+  for (var i = 0; i < (accounts || []).length; i++) {
+    if (accounts[i].role === ORG_ROLE.SUPER && accounts[i].enabled !== false) count++;
+  }
+  return count;
+}
+
+/**
+ * Creates an account. The PIN is hashed here and discarded; it is not stored,
+ * not returned and not logged. Only a Super Admin, or the one-time setup
+ * helper run from the sheet menu, can reach this.
+ */
+function orgCreateAccount_(options) {
+  var id = orgNormaliseId_(options && options.id);
+  var pin = (options && options.pin) || '';
+  var role = (options && options.role) === ORG_ROLE.SUPER ? ORG_ROLE.SUPER : ORG_ROLE.ORGANIZER;
+
+  if (!orgIdValid_(id)) {
+    return {
+      ok: false,
+      code: 'ORGID',
+      error: 'The organiser ID must be ' + ORG.ID_MIN + '-' + ORG.ID_MAX +
+        ' characters: letters, numbers, dot, dash or underscore, starting with a letter or number.'
+    };
+  }
+
+  var problem = orgPinProblem_(id, pin);
+  if (problem) return { ok: false, code: 'PIN', error: problem };
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(CONFIG.LOCK_TIMEOUT_MS)) {
+    return { ok: false, code: 'BUSY', error: 'The account store is busy. Try again in a moment.' };
+  }
+
+  try {
+    var accounts = orgAccounts_();
+    for (var i = 0; i < accounts.length; i++) {
+      if (orgNormaliseId_(accounts[i].id) === id) {
+        return { ok: false, code: 'EXISTS', error: 'That organiser ID is already taken.' };
+      }
+    }
+
+    var name = cleanText_(options && options.name).slice(0, ORG.NAME_MAX) || id;
+    var now = new Date().toISOString();
+    var account = {
+      id: id,
+      name: name,
+      role: role,
+      enabled: true,
+      verifier: orgMakeVerifier_(pin),
+      created: now,
+      createdBy: cleanText_(options && options.createdBy).slice(0, ORG.ID_MAX) || 'setup',
+      pinChanged: now,
+      lastLogin: '',
+      lastDevice: ''
+    };
+
+    accounts.push(account);
+    orgStoreWrite_(ORG.ACCOUNTS_PROPERTY, accounts);
+
+    return { ok: true, account: orgPublicAccount_(account), accounts: accounts.length };
+  } finally {
+    try { lock.releaseLock(); } catch (ignored) {}
+  }
+}
+
+/**
+ * Changes one account. Two rules are enforced here, not in the browser: the
+ * last enabled Super Admin can never be demoted or disabled (that would lock
+ * everybody out of account management), and a PIN change always invalidates
+ * that account's existing sessions.
+ */
+function orgUpdateAccount_(id, patch, actor) {
+  var wanted = orgNormaliseId_(id);
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(CONFIG.LOCK_TIMEOUT_MS)) {
+    return { ok: false, code: 'BUSY', error: 'The account store is busy. Try again in a moment.' };
+  }
+
+  try {
+    var accounts = orgAccounts_();
+    var index = -1;
+    for (var i = 0; i < accounts.length; i++) {
+      if (orgNormaliseId_(accounts[i].id) === wanted) { index = i; break; }
+    }
+    if (index === -1) return { ok: false, code: 'NOACCOUNT', error: 'That organiser account no longer exists.' };
+
+    var account = accounts[index];
+    var next = {
+      id: account.id,
+      name: account.name,
+      role: account.role,
+      enabled: account.enabled !== false,
+      verifier: account.verifier,
+      created: account.created,
+      createdBy: account.createdBy,
+      pinChanged: account.pinChanged,
+      lastLogin: account.lastLogin,
+      lastDevice: account.lastDevice
+    };
+
+    if (patch.role !== undefined) {
+      next.role = patch.role === ORG_ROLE.SUPER ? ORG_ROLE.SUPER : ORG_ROLE.ORGANIZER;
+    }
+    if (patch.enabled !== undefined) next.enabled = patch.enabled === true || patch.enabled === 'true';
+    if (patch.name !== undefined) next.name = cleanText_(patch.name).slice(0, ORG.NAME_MAX) || next.id;
+
+    if (patch.pin !== undefined && patch.pin !== '') {
+      var problem = orgPinProblem_(next.id, patch.pin);
+      if (problem) return { ok: false, code: 'PIN', error: problem };
+      next.verifier = orgMakeVerifier_(patch.pin);
+      next.pinChanged = new Date().toISOString();
+    }
+
+    var demoting = !(next.role === ORG_ROLE.SUPER && next.enabled);
+    if (demoting) {
+      var remaining = 0;
+      for (var j = 0; j < accounts.length; j++) {
+        if (j === index) continue;
+        if (accounts[j].role === ORG_ROLE.SUPER && accounts[j].enabled !== false) remaining++;
+      }
+      if (remaining === 0) {
+        return {
+          ok: false,
+          code: 'LASTSUPER',
+          error: 'This is the only active Super Admin. Give another organiser that role first, or create one.'
+        };
+      }
+    }
+
+    accounts[index] = next;
+    orgStoreWrite_(ORG.ACCOUNTS_PROPERTY, accounts);
+
+    // A PIN reset, a disable, or a role change ends whichever sessions that
+    // account is holding, on every device.
+    var revoked = 0;
+    if (patch.pin !== undefined && patch.pin !== '') revoked = orgRevokeAccountSessions_(next.id);
+    if (patch.enabled !== undefined && !next.enabled) revoked += orgRevokeAccountSessions_(next.id);
+    if (patch.role !== undefined && next.role !== account.role) revoked += orgRevokeAccountSessions_(next.id);
+
+    return {
+      ok: true,
+      account: orgPublicAccount_(next),
+      sessionsRevoked: revoked,
+      actor: actor ? actor.id : ''
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (ignored) {}
+  }
+}
+
+/** Deletes an account outright. The last Super Admin cannot be removed. */
+function orgDeleteAccount_(id) {
+  var wanted = orgNormaliseId_(id);
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(CONFIG.LOCK_TIMEOUT_MS)) {
+    return { ok: false, code: 'BUSY', error: 'The account store is busy. Try again in a moment.' };
+  }
+
+  try {
+    var accounts = orgAccounts_();
+    var kept = [];
+    var found = false;
+
+    for (var i = 0; i < accounts.length; i++) {
+      if (orgNormaliseId_(accounts[i].id) === wanted) { found = true; continue; }
+      kept.push(accounts[i]);
+    }
+    if (!found) return { ok: false, code: 'NOACCOUNT', error: 'That organiser account no longer exists.' };
+    if (orgCountSuperAdmins_(kept) === 0) {
+      return { ok: false, code: 'LASTSUPER', error: 'This is the only Super Admin. Add another one before deleting it.' };
+    }
+
+    orgStoreWrite_(ORG.ACCOUNTS_PROPERTY, kept);
+    var revoked = orgRevokeAccountSessions_(wanted);
+
+    return { ok: true, deleted: wanted, sessionsRevoked: revoked };
+  } finally {
+    try { lock.releaseLock(); } catch (ignored) {}
+  }
+}
+
+/* ----------------------------- sessions ----------------------------- */
+
+function orgSessions_() {
+  return orgStoreRead_(ORG.SESSIONS_PROPERTY);
+}
+
+/** Drops expired sessions and caps the store so it can never grow unbounded. */
+function orgPruneSessions_(sessions, nowMs, keepTokenHash) {
+  var alive = [];
+  var perAccount = {};
+
+  // Newest first, so the cap always discards the oldest device.
+  var ordered = sessions.slice(0).sort(function (a, b) {
+    return (Number(b.seen) || 0) - (Number(a.seen) || 0);
+  });
+
+  for (var i = 0; i < ordered.length; i++) {
+    var session = ordered[i];
+    if (!session || !session.t) continue;
+
+    var expired = nowMs > Number(session.abs) || nowMs > Number(session.idle);
+    if (expired && session.t !== keepTokenHash) continue;
+
+    var id = String(session.a || '');
+    perAccount[id] = perAccount[id] || 0;
+    if (perAccount[id] >= ORG.MAX_SESSIONS_PER_ACCOUNT) continue;
+    perAccount[id]++;
+
+    if (alive.length >= ORG.MAX_SESSIONS_TOTAL) continue;
+    alive.push(session);
+  }
+
+  return alive;
+}
+
+function orgCreateSession_(account, device, remember) {
+  var now = new Date().getTime();
+  var token = orgNewToken_();
+  var hash = orgTokenHash_(token);
+
+  var absolute = now + (remember ? ORG.REMEMBER_ABSOLUTE_SECONDS : ORG.ABSOLUTE_SECONDS) * 1000;
+  var record = {
+    t: hash,
+    a: account.id,
+    iat: now,
+    seen: now,
+    idle: now + ORG.IDLE_SECONDS * 1000,
+    abs: absolute,
+    dev: orgCleanDevice_(device)
+  };
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(CONFIG.LOCK_TIMEOUT_MS)) {
+    return { ok: false, code: 'BUSY', error: 'Could not start a session right now. Try again.' };
+  }
+
+  try {
+    var sessions = orgPruneSessions_(orgSessions_(), now, hash);
+    sessions.push(record);
+    orgStoreWrite_(ORG.SESSIONS_PROPERTY, sessions);
+  } finally {
+    try { lock.releaseLock(); } catch (ignored) {}
+  }
+
+  return {
+    ok: true,
+    session: token,
+    device: record.dev,
+    idleMinutes: Math.round(ORG.IDLE_SECONDS / 60),
+    expiresAt: new Date(absolute).toISOString()
+  };
+}
+
+/**
+ * Turns a session token into an actor. Anything expired, revoked, unknown, or
+ * belonging to a disabled account is refused, and the stored session is
+ * dropped when it is found to be dead.
+ */
+function orgResolveSession_(token) {
+  if (typeof token !== 'string' || !/^[a-f0-9]{64}$/.test(token)) {
+    return { ok: false, code: 'AUTH', error: 'Sign in to continue.' };
+  }
+
+  var hash = orgTokenHash_(token);
+  var now = new Date().getTime();
+  var sessions = orgSessions_();
+  var index = -1;
+
+  for (var i = 0; i < sessions.length; i++) {
+    if (sessions[i] && sessions[i].t === hash) { index = i; break; }
+  }
+
+  if (index === -1) return { ok: false, code: 'SESSION', error: 'Your session is no longer valid. Sign in again.' };
+
+  var session = sessions[index];
+  if (now > Number(session.abs) || now > Number(session.idle)) {
+    orgDropSession_(hash);
+    return { ok: false, code: 'SESSION', error: 'Your session expired. Sign in again.' };
+  }
+
+  var account = orgFindAccount_(session.a);
+  if (!account || account.enabled === false) {
+    orgRevokeAccountSessions_(session.a);
+    return {
+      ok: false,
+      code: 'SESSION',
+      error: account ? 'This organiser account has been disabled.' : 'Your account is no longer available.'
+    };
+  }
+
+  // Sliding idle timeout, written at most once every SLIDE_AFTER_SECONDS so a
+  // 30-second auto-refresh does not rewrite the store on every poll.
+  if (now - Number(session.seen) > ORG.SLIDE_AFTER_SECONDS * 1000) {
+    session.seen = now;
+    session.idle = now + ORG.IDLE_SECONDS * 1000;
+    sessions[index] = session;
+    try {
+      orgStoreWrite_(ORG.SESSIONS_PROPERTY, sessions);
+    } catch (ignored) {}
+  }
+
+  return {
+    ok: true,
+    actor: {
+      id: account.id,
+      name: account.name || account.id,
+      role: account.role === ORG_ROLE.SUPER ? ORG_ROLE.SUPER : ORG_ROLE.ORGANIZER,
+      source: 'session'
+    },
+    session: { device: session.dev || '', expiresAt: new Date(Number(session.abs)).toISOString() }
+  };
+}
+
+function orgDropSession_(hash) {
+  var sessions = orgSessions_();
+  var kept = [];
+  for (var i = 0; i < sessions.length; i++) {
+    if (sessions[i] && sessions[i].t === hash) continue;
+    kept.push(sessions[i]);
+  }
+  orgStoreWrite_(ORG.SESSIONS_PROPERTY, kept);
+  return true;
+}
+
+function orgRevokeSession_(token) {
+  if (typeof token !== 'string' || !token) return 0;
+  return orgDropSession_(orgTokenHash_(token)) ? 1 : 0;
+}
+
+/** Ends every session an account holds, on every device. */
+function orgRevokeAccountSessions_(id) {
+  var wanted = orgNormaliseId_(id);
+  var sessions = orgSessions_();
+  var kept = [];
+  var removed = 0;
+
+  for (var i = 0; i < sessions.length; i++) {
+    if (sessions[i] && orgNormaliseId_(sessions[i].a) === wanted) { removed++; continue; }
+    kept.push(sessions[i]);
+  }
+
+  if (removed) orgStoreWrite_(ORG.SESSIONS_PROPERTY, kept);
+  return removed;
+}
+
+/** Session list for the Super Admin view. Tokens are never included. */
+function orgSessionList_() {
+  var now = new Date().getTime();
+  var sessions = orgPruneSessions_(orgSessions_(), now, '');
+  var out = [];
+
+  for (var i = 0; i < sessions.length; i++) {
+    var session = sessions[i];
+    var account = orgFindAccount_(session.a);
+    out.push({
+      id: String(session.t).slice(0, 10),
+      handle: String(session.t),
+      organiser: session.a,
+      name: account ? (account.name || account.id) : session.a,
+      role: account ? account.role : 'UNKNOWN',
+      device: session.dev || 'Unnamed device',
+      started: new Date(Number(session.iat)).toISOString(),
+      lastSeen: new Date(Number(session.seen)).toISOString(),
+      expiresAt: new Date(Number(session.abs)).toISOString()
+    });
+  }
+
+  out.sort(function (a, b) { return a.lastSeen < b.lastSeen ? 1 : -1; });
+  return out;
+}
+
+/* ---------------------- lockout and rate limiting ---------------------- */
+
+/* Keys are derived from a hash of the submitted id, so a crafted id cannot
+   turn into a malformed cache key or collide with another account's counter. */
+function orgFailKey_(id) { return 'org_f_' + orgTokenHash_(String(id || '').toLowerCase()).slice(0, 24); }
+function orgLockKey_(id) { return 'org_l_' + orgTokenHash_(String(id || '').toLowerCase()).slice(0, 24); }
+
+/** Seconds left on the lockout for this id, or 0 when it is not locked. */
+function orgLockRemaining_(id) {
+  var cache = CacheService.getScriptCache();
+  var lockedUntil = Number(cache.get(orgLockKey_(id)) || 0);
+  var left = Math.ceil((lockedUntil - new Date().getTime()) / 1000);
+  return left > 0 ? left : 0;
+}
+
+function orgRecordLoginFail_(id) {
+  var cache = CacheService.getScriptCache();
+  var fails = Number(cache.get(orgFailKey_(id)) || 0) + 1;
+  var window = ORG.LOGIN_FAIL_WINDOW_SECONDS;
+
+  if (fails >= ORG.LOGIN_MAX_FAILS) {
+    cache.put(orgLockKey_(id), String(new Date().getTime() + ORG.LOGIN_LOCK_SECONDS * 1000), ORG.LOGIN_LOCK_SECONDS);
+    cache.put(orgFailKey_(id), String(fails), window);
+    return { locked: true, fails: fails };
+  }
+
+  cache.put(orgFailKey_(id), String(fails), window);
+  return { locked: false, fails: fails };
+}
+
+function orgClearLoginFails_(id) {
+  var cache = CacheService.getScriptCache();
+  cache.remove(orgFailKey_(id));
+  cache.remove(orgLockKey_(id));
+}
+
+/* ------------------------------- audit ------------------------------- */
+
+var AUDIT_HEADERS = ['Timestamp', 'Actor', 'Role', 'Action', 'Target', 'Detail', 'Result'];
+
+/**
+ * Appends one audit row. Recording must never break the operation it
+ * describes: no PIN, no session token and no registration phone number is ever
+ * written here, and any failure is swallowed after being logged.
+ */
+function orgAudit_(actor, action, target, detail, result) {
+  try {
+    var spreadsheet = openBook_();
+    if (!spreadsheet) return false;
+
+    var sheet = spreadsheet.getSheetByName(ORG.AUDIT_SHEET_NAME);
+    if (!sheet) {
+      sheet = spreadsheet.insertSheet(ORG.AUDIT_SHEET_NAME);
+      sheet.getRange(1, 1, 1, AUDIT_HEADERS.length).setValues([AUDIT_HEADERS]).setFontWeight('bold');
+      sheet.setFrozenRows(1);
+    }
+
+    var who = actor ? (actor.id || '') : '';
+    var role = actor ? (actor.role || '') : '';
+    var safeDetail = cleanText_(detail).replace(/[\r\n]+/g, ' ').slice(0, 200);
+
+    sheet.appendRow([
+      new Date(),
+      cleanText_(who).slice(0, ORG.ID_MAX) || 'anonymous',
+      cleanText_(role).slice(0, 12),
+      cleanText_(action).slice(0, 40),
+      cleanText_(target).slice(0, 40),
+      safeDetail,
+      cleanText_(result).slice(0, 20) || 'ok'
+    ]);
+
+    if (sheet.getLastRow() > ORG.AUDIT_MAX_ROWS + 1) {
+      sheet.deleteRows(2, sheet.getLastRow() - ORG.AUDIT_MAX_ROWS - 1);
+    }
+
+    return true;
+  } catch (error) {
+    console.log('Audit write failed: ' + messageOf_(error));
+    return false;
+  }
+}
+
+function orgAuditList_(payload) {
+  var spreadsheet = openBook_();
+  var sheet = spreadsheet ? spreadsheet.getSheetByName(ORG.AUDIT_SHEET_NAME) : null;
+  var pageSize = Math.min(Math.max(Number(payload.pageSize) || ORG.AUDIT_PAGE_SIZE, 1), 100);
+  var page = Math.max(Number(payload.page) || 1, 1);
+
+  if (!sheet || sheet.getLastRow() < 2) {
+    return { ok: true, entries: [], total: 0, page: page, pageSize: pageSize };
+  }
+
+  var rows = sheet.getLastRow() - 1;
+  var values = sheet.getRange(2, 1, rows, AUDIT_HEADERS.length).getValues();
+  var entries = [];
+
+  for (var i = values.length - 1; i >= 0; i--) {
+    var at = values[i][0];
+    entries.push({
+      at: isDate_(at) ? at.toISOString() : cleanText_(at),
+      atLabel: isDate_(at)
+        ? Utilities.formatDate(at, Session.getScriptTimeZone(), 'dd MMM yyyy, hh:mm a')
+        : cleanText_(at),
+      actor: cleanText_(values[i][1]),
+      role: cleanText_(values[i][2]),
+      action: cleanText_(values[i][3]),
+      target: cleanText_(values[i][4]),
+      detail: cleanText_(values[i][5]),
+      result: cleanText_(values[i][6])
+    });
+  }
+
+  var start = (page - 1) * pageSize;
+  return {
+    ok: true,
+    entries: entries.slice(start, start + pageSize),
+    total: entries.length,
+    page: page,
+    pageSize: pageSize,
+    generatedAt: new Date().toISOString()
+  };
+}
+
+/* --------------------------- sign in and out --------------------------- */
+
+/** Records the last successful sign-in without touching the verifier. */
+function orgTouchAccount_(id, device) {
+  try {
+    var accounts = orgAccounts_();
+    for (var i = 0; i < accounts.length; i++) {
+      if (orgNormaliseId_(accounts[i].id) === id) {
+        accounts[i].lastLogin = new Date().toISOString();
+        accounts[i].lastDevice = device;
+        orgStoreWrite_(ORG.ACCOUNTS_PROPERTY, accounts);
+        return true;
+      }
+    }
+  } catch (ignored) {}
+  return false;
+}
+
+/**
+ * POST ?action=admin with { action:'login', organiserId, pin, device, remember }.
+ *
+ * Runs before authorisation because its whole job is to create the session.
+ * An unknown id is put through exactly the same PBKDF2 work as a real one, so
+ * the response time does not say whether the id exists.
+ */
+function orgLogin_(payload) {
+  var id = orgNormaliseId_(payload.organiserId || payload.id);
+  var pin = typeof payload.pin === 'string' ? payload.pin : '';
+  var device = orgCleanDevice_(payload.device);
+
+  if (!id || id.length > 64 || !pin) {
+    return { ok: false, code: 'CREDENTIALS', error: 'Enter your organiser ID and personal PIN.' };
+  }
+
+  var locked = orgLockRemaining_(id);
+  if (locked > 0) {
+    return {
+      ok: false,
+      code: 'LOCKED',
+      retryAfterSeconds: locked,
+      error: 'Too many failed attempts. Try again in ' + Math.max(1, Math.ceil(locked / 60)) + ' minute(s).'
+    };
+  }
+
+  var account = orgFindAccount_(id);
+  var matches = false;
+
+  try {
+    matches = orgCheckVerifier_(pin, account ? account.verifier : orgDummyVerifier_());
+  } catch (error) {
+    console.log('PIN verification failed: ' + messageOf_(error));
+    return { ok: false, code: 'SERVER', error: 'Could not verify the PIN right now. Try again.' };
+  }
+
+  if (!account || !matches) {
+    var fail = orgRecordLoginFail_(id);
+    orgAudit_({ id: id, role: '' }, 'login', id, fail.locked ? 'locked out' : '', 'refused');
+    return {
+      ok: false,
+      code: 'CREDENTIALS',
+      attemptsLeft: Math.max(0, ORG.LOGIN_MAX_FAILS - fail.fails),
+      error: fail.locked
+        ? 'Too many failed attempts. This ID is locked for ' + Math.max(1, Math.ceil(ORG.LOGIN_LOCK_SECONDS / 60)) + ' minute(s).'
+        : 'That organiser ID and PIN do not match.'
+    };
+  }
+
+  if (account.enabled === false) {
+    orgAudit_({ id: id, role: account.role }, 'login', id, 'disabled account', 'refused');
+    return { ok: false, code: 'DISABLED', error: 'This organiser account is disabled. Ask a Super Admin to enable it.' };
+  }
+
+  orgClearLoginFails_(id);
+
+  var session = orgCreateSession_(account, device, payload.remember === true || payload.remember === 'true');
+  if (!session.ok) return session;
+
+  orgTouchAccount_(account.id, device);
+  orgAudit_({ id: account.id, role: account.role }, 'login', account.id, device, 'ok');
+
+  return {
+    ok: true,
+    actor: {
+      id: account.id,
+      name: account.name || account.id,
+      role: account.role === ORG_ROLE.SUPER ? ORG_ROLE.SUPER : ORG_ROLE.ORGANIZER,
+      source: 'session'
+    },
+    session: session.session,
+    device: device,
+    idleMinutes: session.idleMinutes,
+    expiresAt: session.expiresAt,
+    permissions: orgPermissionsOf_(account.role)
+  };
+}
+
+/** Ends the session named by the token. Safe to call with a dead token. */
+function orgLogout_(payload) {
+  var token = cleanText_(payload.session);
+  var revoked = token ? orgRevokeSession_(token) : 0;
+
+  if (revoked) {
+    var resolved = null;
+    try {
+      resolved = null;
+    } catch (ignored) {}
+    orgAudit_({ id: 'session', role: '' }, 'logout', '', '', 'ok');
+  }
+
+  return { ok: true, revoked: revoked };
+}
+
+function orgPermissionsOf_(role) {
+  return (role === ORG_ROLE.SUPER ? ORG_PERMISSIONS.SUPER : ORG_PERMISSIONS.ORGANIZER).slice(0);
+}
+
+/* ------------------------ authorisation and roles ------------------------ */
+
+/**
+ * Decides who is calling. A session token is the normal path; the legacy
+ * dashboard key is kept as a break-glass Super Admin credential so the owner
+ * cannot be locked out of their own tournament, and it can be retired at any
+ * time by deleting the admin_key property (see ADMIN.md).
+ */
+function orgAuthorize_(payload) {
+  var token = typeof payload.session === 'string' ? payload.session : '';
+  if (token) return orgResolveSession_(token);
+
+  if (adminAuthorized_(payload.key)) {
+    return {
+      ok: true,
+      actor: { id: 'dashboard-key', name: 'Dashboard key', role: ORG_ROLE.SUPER, source: 'key' },
+      session: null
+    };
+  }
+
+  return { ok: false, code: 'AUTH', error: 'Wrong or missing dashboard key.' };
+}
+
+/** Server-side permission check. The browser never decides this. */
+function orgAllowedTo_(actor, action) {
+  var needed = ORG_ACTION_PERMISSION[action];
+  if (!needed) return true;
+  return orgPermissionsOf_(actor.role).indexOf(needed) !== -1;
+}
+
+/* --------------------------- account actions --------------------------- */
+
+/**
+ * Returns a result for an account or session action, or null when the action
+ * belongs to the registration API below. Every branch re-checks the role: the
+ * only reason an Organizer cannot manage organisers is this code, not the
+ * fact that the panel is hidden.
+ */
+function orgHandleAccountAction_(action, payload, actor) {
+  if (action === 'session-info') {
+    return {
+      ok: true,
+      actor: actor,
+      permissions: orgPermissionsOf_(actor.role),
+      session: actor.source === 'session' ? payload.session : null
+    };
+  }
+
+  if (action === 'account-list') {
+    var accounts = orgAccounts_();
+    return {
+      ok: true,
+      accounts: accounts.map(orgPublicAccount_),
+      superAdmins: orgCountSuperAdmins_(accounts),
+      sessions: orgSessionList_(),
+      generatedAt: new Date().toISOString()
+    };
+  }
+
+  if (action === 'account-create') {
+    var created = orgCreateAccount_({
+      id: payload.organiserId,
+      name: payload.name,
+      pin: payload.pin,
+      role: payload.role,
+      createdBy: actor.id
+    });
+    if (!created.ok) return created;
+    orgAudit_(actor, 'account-create', created.account.id, created.account.role, 'ok');
+    return { ok: true, account: created.account, accounts: created.accounts };
+  }
+
+  if (action === 'account-update') {
+    var update = orgUpdateAccount_(payload.id, {
+      role: payload.role,
+      enabled: payload.enabled,
+      name: payload.name
+    }, actor);
+    if (!update.ok) return update;
+    orgAudit_(actor, 'account-update', update.account.id,
+      'role=' + update.account.role + ' enabled=' + update.account.enabled, 'ok');
+    return update;
+  }
+
+  if (action === 'account-reset-pin') {
+    if (payload.pin === undefined || payload.pin === '') {
+      return { ok: false, code: 'PIN', error: 'Provide the new PIN.' };
+    }
+    var reset = orgUpdateAccount_(payload.id, { pin: payload.pin }, actor);
+    if (!reset.ok) return reset;
+    orgAudit_(actor, 'account-reset-pin', reset.account.id, '', 'ok');
+    return { ok: true, account: reset.account, sessionsRevoked: reset.sessionsRevoked };
+  }
+
+  if (action === 'account-delete') {
+    var deleted = orgDeleteAccount_(payload.id);
+    if (!deleted.ok) return deleted;
+    orgAudit_(actor, 'account-delete', deleted.deleted, 'sessions=' + deleted.sessionsRevoked, 'ok');
+    return deleted;
+  }
+
+  if (action === 'session-list') {
+    return { ok: true, sessions: orgSessionList_(), generatedAt: new Date().toISOString() };
+  }
+
+  if (action === 'session-revoke') {
+    var handle = cleanText_(payload.handle);
+    if (!/^[A-Za-z0-9_-]{20,44}$/.test(handle)) {
+      return { ok: false, code: 'SESSION', error: 'Unknown session.' };
+    }
+    var sessions = orgSessions_();
+    var owner = '';
+    for (var i = 0; i < sessions.length; i++) {
+      if (sessions[i] && sessions[i].t === handle) { owner = sessions[i].a; break; }
+    }
+    if (!owner) return { ok: false, code: 'SESSION', error: 'That session has already ended.' };
+    orgDropSession_(handle);
+    orgAudit_(actor, 'session-revoke', owner, 'device=' + cleanText_((payload.device || '')).slice(0, 40), 'ok');
+    return { ok: true, revoked: true, organiser: owner };
+  }
+
+  if (action === 'account-revoke-sessions') {
+    var id = orgNormaliseId_(payload.id);
+    if (!orgFindAccount_(id)) return { ok: false, code: 'NOACCOUNT', error: 'That organiser account no longer exists.' };
+    var removed = orgRevokeAccountSessions_(id);
+    orgAudit_(actor, 'account-revoke-sessions', id, 'ended=' + removed, 'ok');
+    return { ok: true, revoked: removed };
+  }
+
+  if (action === 'self-change-pin') {
+    if (actor.source !== 'session') {
+      return { ok: false, code: 'SESSION', error: 'Sign in with your own account to change your PIN.' };
+    }
+
+    var me = orgFindAccount_(actor.id);
+    if (!me) return { ok: false, code: 'NOACCOUNT', error: 'Your account is no longer available.' };
+
+    var current = typeof payload.currentPin === 'string' ? payload.currentPin : '';
+    if (!current || !orgCheckVerifier_(current, me.verifier)) {
+      orgAudit_(actor, 'self-change-pin', actor.id, 'wrong current PIN', 'refused');
+      return { ok: false, code: 'CREDENTIALS', error: 'Your current PIN is not correct.' };
+    }
+
+    var changed = orgUpdateAccount_(actor.id, { pin: payload.newPin }, actor);
+    if (!changed.ok) return changed;
+
+    // The change just ended every session for this account, this one included,
+    // so a fresh session is issued instead of leaving the organiser signed out
+    // mid-task on the device they are holding.
+    var account = orgFindAccount_(actor.id);
+    var fresh = orgCreateSession_(account, orgCleanDevice_(payload.device), false);
+    orgAudit_(actor, 'self-change-pin', actor.id, 'sessions ended=' + changed.sessionsRevoked, 'ok');
+
+    return { ok: true, session: fresh.ok ? fresh.session : '', endsOtherDevices: changed.sessionsRevoked };
+  }
+
+  if (action === 'audit-list') {
+    var log = orgAuditList_(payload);
+    if (log.ok) log.actor = actor;
+    return log;
+  }
+
+  return null;
+}
+
+/* ================================================================
+   ROW LOOKUP
+   ----------------------------------------------------------------
+   Records are addressed by a hash of their timestamp and team name.
+   The dashboard recomputes it, so a caller cannot name a row.
+   ================================================================ */
+
+/** Finds the 1-based sheet row for a record id, or -1. */
+function findRowById_(sheet, id) {
+  var rows = countTeams_(sheet);
+  if (rows === 0) return -1;
+
+  var values = sheet.getRange(2, 1, rows, HEADERS.length).getValues();
+  for (var i = 0; i < values.length; i++) {
+    if (recordId_(values[i][COL.TIMESTAMP - 1], cleanText_(values[i][COL.TEAM - 1])) === id) {
+      return i + 2;
+    }
+  }
+
+  return -1;
+}
+
+/**
+ * Records a team's own payment choice.
+ *   ONLINE -> PENDING VERIFICATION (never PAID)
+ *   CASH   -> PENDING, until an organiser receives the cash
+ * Repeating the same choice is a no-op, so a refresh or a retry cannot create
+ * a second state, and a PAID row can never be dragged back to pending by the
+ * team that already paid.
+ *//* ================================================================
+   VERIFIED ONLINE PAYMENTS (RAZORPAY or YOUPI PG)
+   ----------------------------------------------------------------
+   The old online flow was a claim dressed up as automation: the team typed
+   a reference, the row said PAID, and nothing had checked the money. This
+   section replaces it end to end.
+
+   The shape of a payment now:
+
+     1. payorder    Validates the form, snapshots the live fee, opens a
+                    session at the configured gateway for exactly that
+                    amount, and records the attempt in PaymentDrafts. No
+                    registration row exists yet.
+     2. paystatus   Asks the gateway, with our secret key, what happened to
+                    that session. Only a confirmed payment, in INR, for the
+                    exact snapshotted fee, against the session we opened, may
+                    register the team.
+     3. paywebhook  The provider's doorbell. It is used to find the draft;
+                    the amount and the status always come from step 2's API
+                    answer. A forged callback therefore cannot create a paid
+                    row - it can only make us ask the gateway a question.
+     4. finalise    Under a script lock, writes the row once, stores the
+                    payment ids and the verified amount, and audits both the
+                    payment and the registration.
+
+   Which gateway is used is deployment configuration:
+
+     * YOUPI PG (default) - hosted checkout page on the merchant's own
+       instance. The page embeds that checkout. YouPI decides whether money
+       arrived by observing bank SMS / Gmail alerts and reports a
+       verificationLevel; anything below the configured level is held for an
+       organiser instead of registering a team.
+     * RAZORPAY (opt-in) - order + single-use UPI QR, shown on the page.
+
+   Neither provider's signature header can be read by Apps Script, so both
+   callbacks are treated as doorbells: the proof is always a fresh API answer,
+   fetched over TLS with the merchant secret. A proxy is only needed if
+   signature-level checking is required as well.
+   ================================================================ */
+
+var SETTINGS_HEADERS = ['Key', 'Value', 'Updated At', 'Updated By'];
+var SETTING_FEE = 'entry_fee';
+
+var DRAFT_HEADERS = [
+  'Token', 'Created At', 'Expires At', 'Team', 'Department', 'Members JSON',
+  'WhatsApp Consent', 'Fee', 'Currency', 'Order ID', 'QR ID', 'QR Image URL',
+  'Status', 'Payment ID', 'Paid Amount', 'Registration ID', 'Last Checked At',
+  'Provider', 'Checkout URL', 'Verification'
+];
+
+var DCOL = {
+  TOKEN: 1, CREATED: 2, EXPIRES: 3, TEAM: 4, DEPT: 5, MEMBERS: 6,
+  CONSENT: 7, FEE: 8, CURRENCY: 9, ORDER: 10, QR: 11, QR_IMAGE: 12,
+  STATUS: 13, PAYMENT: 14, PAID_AMOUNT: 15, REG: 16, CHECKED: 17,
+  PROVIDER: 18, CHECKOUT: 19, VERIFICATION: 20
+};
+
+var DRAFT = {
+  OPEN: 'OPEN',
+  FINALISED: 'FINALISED',
+  CANCELLED: 'CANCELLED',
+  EXPIRED: 'EXPIRED',
+  MISMATCH: 'MISMATCH',
+  UNPLACED: 'PAID - NO SLOT',
+  // The gateway says money arrived but its own confidence is below the level
+  // this event requires. A human decides; the team is not registered yet.
+  UNVERIFIED: 'NEEDS REVIEW'
+};
+
+var PAY_ACTOR = { id: 'payment-gateway', role: 'PAYMENT' };
+
+/* ------------------------------ settings ------------------------------ */
+
+function settingsSheet_() {
+  var book = openBook_();
+  if (!book) throw new Error('No spreadsheet found.');
+
+  var sheet = book.getSheetByName(CONFIG.PAYMENT_SETTINGS_SHEET);
+  if (!sheet) {
+    sheet = book.insertSheet(CONFIG.PAYMENT_SETTINGS_SHEET);
+  }
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, SETTINGS_HEADERS.length).setValues([SETTINGS_HEADERS]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+/** All settings as a plain object. A broken tab must never stop a payment. */
+function readSettings_() {
+  var out = {};
+  try {
+    var sheet = settingsSheet_();
+    var rows = sheet.getLastRow() - 1;
+    if (rows < 1) return out;
+    var values = sheet.getRange(2, 1, rows, 2).getValues();
+    for (var i = 0; i < values.length; i++) {
+      var key = cleanText_(values[i][0]);
+      if (key) out[key] = cleanText_(values[i][1]);
+    }
+  } catch (ignored) {}
+  return out;
+}
+
+/**
+ * The live entry fee. The Settings tab is the single source of truth; the
+ * constant in CONFIG is only the default for a sheet that has never been
+ * configured. Anything unreadable falls back instead of charging a team zero.
+ */
+function entryFee_() {
+  var raw = readSettings_()[SETTING_FEE];
+  var value = Number(raw);
+  if (isFinite(value) && value >= 1 && value <= 10000) return Math.round(value);
+  return CONFIG.TEAM_FEE;
+}
+
+function saveEntryFee_(fee, actor) {
+  var value = Number(fee);
+  if (!isFinite(value) || value < 1 || value > 10000) {
+    return { ok: false, code: 'FEE', error: 'The entry fee must be a whole number between 1 and 10000.' };
+  }
+  value = Math.round(value);
+
+  var sheet = settingsSheet_();
+  var rows = Math.max(sheet.getLastRow() - 1, 0);
+  var stamp = new Date();
+  var who = actor ? actor.id : 'organiser';
+
+  if (rows > 0) {
+    var values = sheet.getRange(2, 1, rows, 1).getValues();
+    for (var i = 0; i < values.length; i++) {
+      if (cleanText_(values[i][0]) === SETTING_FEE) {
+        sheet.getRange(i + 2, 2, 1, 3).setValues([[value, stamp, who]]);
+        return { ok: true, fee: value };
+      }
+    }
+  }
+
+  sheet.appendRow([SETTING_FEE, value, stamp, who]);
+  return { ok: true, fee: value };
+}
+
+function publicConfig_() {
+  var provider = paymentProvider_();
+  return {
+    ok: true,
+    fee: entryFee_(),
+    currency: CONFIG.PAYMENT_CURRENCY,
+    provider: provider,
+    // The page must not offer a payment it cannot verify. When the provider is
+    // not configured the online button is replaced by a plain explanation and
+    // cash still works.
+    online: paymentOnline_(),
+    // What the page may honestly say about the online path.
+    hosted: provider === 'YOUPI',
+    label: provider === 'YOUPI' ? 'YouPI PG' : 'Razorpay',
+    minVerification: provider === 'YOUPI' ? youpiMinVerification_() : 0,
+    generatedAt: new Date().toISOString()
+  };
+}
+
+/* --------------------------- provider access --------------------------- */
+
+function propertyOr_(name) {
+  try {
+    return PropertiesService.getScriptProperties().getProperty(name) || '';
+  } catch (ignored) {
+    return '';
+  }
+}
+
+function trimSlash_(value) {
+  return cleanText_(value).replace(/\/+$/, '');
+}
+
+/**
+ * Which gateway this deployment uses. The Script Property wins; anything
+ * unrecognised stays on Razorpay instead of silently disabling payments.
+ */
+/**
+ * Which gateway this deployment uses. YouPI PG is the intended gateway for
+ * this event; Razorpay remains available as an explicitly configured fallback
+ * (`payment_provider=razorpay`) because YouPI needs a host and an observer
+ * phone that GitHub Pages and Apps Script cannot provide.
+ */
+function paymentProvider_() {
+  var raw = cleanText_(propertyOr_(CONFIG.PAYMENT_PROVIDER_PROPERTY)).toLowerCase();
+  return raw === 'razorpay' ? 'RAZORPAY' : 'YOUPI';
+}
+
+function paymentOnline_() {
+  return paymentProvider_() === 'YOUPI' ? youpiConfigured_() : razorpayConfigured_();
+}
+
+function razorpayConfigured_() {
+  return !!(propertyOr_(CONFIG.RAZORPAY_KEY_ID_PROPERTY) &&
+           propertyOr_(CONFIG.RAZORPAY_KEY_SECRET_PROPERTY));
+}
+
+/* ------------------------------ YouPI PG ------------------------------ */
+
+function youpiBaseUrl_() {
+  return trimSlash_(propertyOr_(CONFIG.YOUPI_BASE_URL_PROPERTY));
+}
+
+function youpiConfigured_() {
+  var base = youpiBaseUrl_();
+  if (!/^https?:\/\/[^\s]+$/i.test(base)) return false;
+  return !!(propertyOr_(CONFIG.YOUPI_MERCHANT_ID_PROPERTY) &&
+           propertyOr_(CONFIG.YOUPI_MERCHANT_KEY_PROPERTY));
+}
+
+function youpiMinVerification_() {
+  var rawText = cleanText_(propertyOr_(CONFIG.YOUPI_MIN_VERIFICATION_PROPERTY));
+  if (!rawText) return CONFIG.YOUPI_DEFAULT_MIN_VERIFICATION;
+  var raw = Number(rawText);
+  if (!isFinite(raw) || raw < 0 || raw > 2) return CONFIG.YOUPI_DEFAULT_MIN_VERIFICATION;
+  return Math.round(raw);
+}
+
+/**
+ * One call to a self-hosted YouPI PG instance.
+ *
+ * The merchant key is sent as X-Merchant-Key. YouPI treats that same value as
+ * the merchant's webhook secret, so it is kept in Script Properties and never
+ * written to a sheet, a log line or a browser response.
+ */
+function youpiCall_(method, path, payload) {
+  var base = youpiBaseUrl_();
+  var merchantId = propertyOr_(CONFIG.YOUPI_MERCHANT_ID_PROPERTY);
+  var merchantKey = propertyOr_(CONFIG.YOUPI_MERCHANT_KEY_PROPERTY);
+  if (!base || !merchantId || !merchantKey) {
+    return { ok: false, code: 'NOT_CONFIGURED', error: 'Online payment is not configured yet.' };
+  }
+
+  var options = {
+    method: method,
+    contentType: 'application/json',
+    muteHttpExceptions: true,
+    headers: {
+      'X-Merchant-Id': merchantId,
+      'X-Merchant-Key': merchantKey
+    }
+  };
+  if (payload) options.payload = JSON.stringify(payload);
+
+  var response;
+  try {
+    response = UrlFetchApp.fetch(base + path, options);
+  } catch (error) {
+    return { ok: false, code: 'NETWORK', error: 'The payment gateway could not be reached.' };
+  }
+
+  var code = 0;
+  var text = '';
+  try {
+    code = response.getResponseCode();
+    text = response.getContentText();
+  } catch (ignored) {}
+
+  var body = null;
+  try { body = text ? JSON.parse(text) : null; } catch (ignored) {}
+
+  if (code < 200 || code >= 300) {
+    return {
+      ok: false,
+      code: code === 401 ? 'AUTH' : 'PROVIDER',
+      status: code,
+      error: (body && (body.error || body.message)) || ('The payment gateway returned ' + code + '.')
+    };
+  }
+
+  return { ok: true, status: code, body: body || {} };
+}
+
+/**
+ * POST /api/v1/payments on the merchant's own YouPI instance.
+ *
+ * The order id is generated here (not taken from the browser), the amount is
+ * the fee snapshot in rupees with two decimals, and the response's
+ * paymentId/checkoutUrl are the only things kept. The customer pays inside
+ * YouPI's own checkout page - this site never draws its QR.
+ */
+function youpiCreatePayment_(token, teamName, fee, expires) {
+  var orderId = 'QQSGP-' + String(token).slice(0, 18).toUpperCase();
+  var res = youpiCall_('POST', '/api/v1/payments', {
+    orderId: orderId,
+    amount: Number(fee).toFixed(2),
+    currency: CONFIG.PAYMENT_CURRENCY,
+    description: 'QQSGP entry fee - ' + cleanText_(teamName).slice(0, 60),
+    metadata: { token: token, team: cleanText_(teamName).slice(0, 120), purpose: 'QQSGP entry fee' }
+  });
+  if (!res.ok) return res;
+
+  var body = res.body || {};
+  var paymentId = cleanText_(body.paymentId);
+  var checkoutUrl = cleanText_(body.checkoutUrl);
+  if (!paymentId) return { ok: false, code: 'PROVIDER', error: 'The gateway did not return a payment id.' };
+  if (!/^https?:\/\/[^\s]+$/i.test(checkoutUrl)) {
+    return { ok: false, code: 'PROVIDER', error: 'The gateway did not return a checkout page.' };
+  }
+
+  // The order id is ours. A gateway answering about some other order must not
+  // be allowed to become this draft's identity.
+  var echoed = cleanText_(body.orderId);
+  if (echoed && echoed !== orderId) {
+    return { ok: false, code: 'PROVIDER', error: 'The gateway answered for a different order.' };
+  }
+
+  return {
+    ok: true,
+    paymentId: paymentId,
+    orderId: orderId,
+    checkoutUrl: checkoutUrl,
+    amount: Number(body.amount) || Number(fee),
+    currency: cleanText_(body.currency) || CONFIG.PAYMENT_CURRENCY
+  };
+}
+
+/**
+ * One call to Razorpay. The key secret is used here and nowhere else; it is
+ * never written to a sheet, a log line or a response.
+ */
+function razorpayCall_(method, path, payload) {
+  var keyId = propertyOr_(CONFIG.RAZORPAY_KEY_ID_PROPERTY);
+  var keySecret = propertyOr_(CONFIG.RAZORPAY_KEY_SECRET_PROPERTY);
+  if (!keyId || !keySecret) {
+    return { ok: false, code: 'NOT_CONFIGURED', error: 'Online payment is not configured yet.' };
+  }
+
+  var options = {
+    method: method,
+    contentType: 'application/json',
+    muteHttpExceptions: true,
+    headers: {
+      Authorization: 'Basic ' + Utilities.base64Encode(keyId + ':' + keySecret)
+    }
+  };
+  if (payload) options.payload = JSON.stringify(payload);
+
+  var response;
+  try {
+    response = UrlFetchApp.fetch(CONFIG.RAZORPAY_API_BASE + path, options);
+  } catch (error) {
+    return { ok: false, code: 'NETWORK', error: 'The payment provider could not be reached.' };
+  }
+
+  var code = 0;
+  var text = '';
+  try {
+    code = response.getResponseCode();
+    text = response.getContentText();
+  } catch (ignored) {}
+
+  var body = null;
+  try { body = text ? JSON.parse(text) : null; } catch (ignored) {}
+
+  if (code < 200 || code >= 300) {
+    return {
+      ok: false,
+      code: 'PROVIDER',
+      status: code,
+      error: (body && body.error && (body.error.description || body.error.reason)) ||
+        ('The payment provider returned ' + code + '.')
+    };
+  }
+
+  return { ok: true, status: code, body: body || {} };
+}
+
+/* ------------------------------ drafts ------------------------------ */
+
+function draftSheet_() {
+  var book = openBook_();
+  if (!book) throw new Error('No spreadsheet found.');
+
+  var sheet = book.getSheetByName(CONFIG.PAYMENT_DRAFT_SHEET);
+  if (!sheet) {
+    sheet = book.insertSheet(CONFIG.PAYMENT_DRAFT_SHEET);
+  }
+
+  // An existing tab may predate the provider columns. Widen it instead of
+  // writing past the last column, which would throw on every payment.
+  if (sheet.getMaxColumns() < DRAFT_HEADERS.length) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), DRAFT_HEADERS.length - sheet.getMaxColumns());
+  }
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, DRAFT_HEADERS.length).setValues([DRAFT_HEADERS]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  } else {
+    var header = sheet.getRange(1, 1, 1, DRAFT_HEADERS.length).getValues()[0];
+    var missing = false;
+    for (var i = 0; i < DRAFT_HEADERS.length; i++) {
+      if (cleanText_(header[i]) !== DRAFT_HEADERS[i]) { missing = true; break; }
+    }
+    if (missing) {
+      sheet.getRange(1, 1, 1, DRAFT_HEADERS.length).setValues([DRAFT_HEADERS]).setFontWeight('bold');
+    }
+  }
+  return sheet;
+}
+
+function newPaymentToken_() {
+  return String(Utilities.getUuid()).replace(/-/g, '');
+}
+
+function draftFromValues_(row) {
+  return {
+    token: cleanText_(row[DCOL.TOKEN - 1]),
+    created: row[DCOL.CREATED - 1],
+    expiresAt: row[DCOL.EXPIRES - 1],
+    teamName: cleanText_(row[DCOL.TEAM - 1]),
+    department: cleanText_(row[DCOL.DEPT - 1]),
+    membersJson: cleanText_(row[DCOL.MEMBERS - 1]),
+    consent: cleanText_(row[DCOL.CONSENT - 1]),
+    fee: Number(row[DCOL.FEE - 1]) || 0,
+    currency: cleanText_(row[DCOL.CURRENCY - 1]),
+    orderId: cleanText_(row[DCOL.ORDER - 1]),
+    qrId: cleanText_(row[DCOL.QR - 1]),
+    qrImageUrl: cleanText_(row[DCOL.QR_IMAGE - 1]),
+    status: cleanText_(row[DCOL.STATUS - 1]),
+    paymentId: cleanText_(row[DCOL.PAYMENT - 1]),
+    paidAmount: Number(row[DCOL.PAID_AMOUNT - 1]) || 0,
+    registrationId: cleanText_(row[DCOL.REG - 1]),
+    checkedAt: row[DCOL.CHECKED - 1],
+    provider: cleanText_(row[DCOL.PROVIDER - 1]) || 'RAZORPAY',
+    checkoutUrl: cleanText_(row[DCOL.CHECKOUT - 1]),
+    verification: cleanText_(row[DCOL.VERIFICATION - 1])
+  };
+}
+
+function allDrafts_(sheet) {
+  var rows = sheet.getLastRow() - 1;
+  if (rows < 1) return [];
+  var values = sheet.getRange(2, 1, rows, DRAFT_HEADERS.length).getValues();
+  var out = [];
+  for (var i = 0; i < values.length; i++) {
+    var draft = draftFromValues_(values[i]);
+    draft.row = i + 2;
+    if (draft.token) out.push(draft);
+  }
+  return out;
+}
+
+function findDraft_(sheet, token) {
+  if (!/^[A-Za-z0-9-]{8,64}$/.test(token)) return null;
+  var drafts = allDrafts_(sheet);
+  for (var i = 0; i < drafts.length; i++) {
+    if (drafts[i].token === token) return drafts[i];
+  }
+  return null;
+}
+
+/** Finds a draft by one of the server-generated ids. Never by anything the
+ *  browser or a callback body can invent on its own: these ids only exist
+ *  because we created them at Razorpay. */
+function findDraftByProviderId_(sheet, field, value) {
+  if (!value) return null;
+  var drafts = allDrafts_(sheet);
+  for (var i = 0; i < drafts.length; i++) {
+    if (drafts[i][field] === value) return drafts[i];
+  }
+  return null;
+}
+
+function saveDraft_(draft) {
+  var sheet = draftSheet_();
+  var row = [
+    draft.token, new Date(), draft.expiresAt, draft.teamName, draft.department,
+    JSON.stringify(draft.members), draft.consent ? 'YES' : 'NO', draft.fee,
+    draft.currency, draft.orderId, draft.qrId, draft.qrImageUrl, DRAFT.OPEN,
+    '', '', '', '', draft.provider || paymentProvider_(), draft.checkoutUrl || '', ''
+  ];
+  var target = sheet.getLastRow() + 1;
+  sheet.getRange(target, DCOL.CREATED).setNumberFormat('dd mmm yyyy, hh:mm AM/PM');
+  sheet.getRange(target, DCOL.EXPIRES).setNumberFormat('dd mmm yyyy, hh:mm AM/PM');
+  sheet.getRange(target, 1, 1, DRAFT_HEADERS.length).setValues([row]);
+  return target;
+}
+
+function setDraftRow_(sheet, row, fields) {
+  if (fields.status) sheet.getRange(row, DCOL.STATUS).setValue(fields.status);
+  if (fields.paymentId !== undefined) sheet.getRange(row, DCOL.PAYMENT).setValue(fields.paymentId);
+  if (fields.paidAmount !== undefined) sheet.getRange(row, DCOL.PAID_AMOUNT).setValue(fields.paidAmount);
+  if (fields.registrationId !== undefined) sheet.getRange(row, DCOL.REG).setValue(fields.registrationId);
+  if (fields.verification !== undefined) sheet.getRange(row, DCOL.VERIFICATION).setValue(fields.verification);
+  sheet.getRange(row, DCOL.CHECKED).setValue(new Date());
+}
+
+function draftExpired_(draft) {
+  var when = draft.expiresAt;
+  if (Object.prototype.toString.call(when) !== '[object Date]') return false;
+  return when.getTime() <= new Date().getTime();
+}
+
+/* ------------------------ opening a payment ------------------------ */
+
+function openHeldDraftForTeam_(sheet, teamName) {
+  var target = cleanText_(teamName).toLowerCase();
+  var drafts = allDrafts_(sheet);
+  for (var i = 0; i < drafts.length; i++) {
+    var draft = drafts[i];
+    if ([DRAFT.UNVERIFIED, DRAFT.MISMATCH, DRAFT.UNPLACED].indexOf(draft.status) === -1) continue;
+    if (cleanText_(draft.teamName).toLowerCase() === target) return draft;
+  }
+  return null;
+}
+
+function openDraftForTeam_(sheet, teamName) {
+  var target = cleanText_(teamName).toLowerCase();
+  var drafts = allDrafts_(sheet);
+  for (var i = 0; i < drafts.length; i++) {
+    var draft = drafts[i];
+    if (draft.status !== DRAFT.OPEN) continue;
+    if (draftExpired_(draft)) continue;
+    if (cleanText_(draft.teamName).toLowerCase() === target) return draft;
+  }
+  return null;
+}
+
+/**
+ * POST ?action=payorder  { teamName, department, members, whatsappConsent }
+ *
+ * Nothing is registered here. The team's answers and the fee at this moment
+ * are kept in PaymentDrafts, and the page receives a token plus the image URL
+ * of a single-use UPI QR for exactly that amount.
+ */
+function publicPaymentOrder_(e) {
+  if (!paymentOnline_()) {
+    return {
+      ok: false,
+      code: 'PAYMENT_OFFLINE',
+      error: 'Online payment is not switched on yet. Your entry can still be paid in cash.'
+    };
+  }
+
+  var body = readBody_(e);
+  if (!body.ok) return { ok: false, code: 'BODY', error: body.error };
+
+  var payload = body.value || {};
+
+  // The payment choice is not a form field here: choosing online IS opening an
+  // order. Anything the browser sends under `payment` is ignored, so nobody can
+  // smuggle "PAID" into this path either.
+  var formOnly = {};
+  for (var key in payload) {
+    if (Object.prototype.hasOwnProperty.call(payload, key) && key !== 'payment') {
+      formOnly[key] = payload[key];
+    }
+  }
+
+  var checked = validateRegistration_(formOnly);
+  if (!checked.ok) return { ok: false, code: 'FORM', error: checked.error };
+
+  var team = checked.value;
+  var fee = entryFee_();
+  if (!fee) return { ok: false, code: 'FEE', error: 'The entry fee is not set. Ask an organiser.' };
+
+  var draftSheet = draftSheet_();
+
+  // A team whose earlier payment is already waiting for an organiser must not
+  // be handed a second way to pay: that is how someone pays twice.
+  var held = openHeldDraftForTeam_(draftSheet, team.teamName);
+  if (held) {
+    return {
+      ok: false,
+      code: 'REVIEW',
+      error: 'A payment for "' + team.teamName + '" is already being checked by an organiser. ' +
+        'Please contact the organisers before paying again.'
+    };
+  }
+
+  // Resume an attempt that is still inside its window instead of opening a
+  // second QR for the same team.
+  var open = openDraftForTeam_(draftSheet, team.teamName);
+  if (open) {
+    return {
+      ok: true,
+      resumed: true,
+      token: open.token,
+      amount: open.fee,
+      currency: open.currency || CONFIG.PAYMENT_CURRENCY,
+      provider: open.provider || paymentProvider_(),
+      hosted: (open.provider || paymentProvider_()) === 'YOUPI',
+      qrImageUrl: open.qrImageUrl,
+      checkoutUrl: open.checkoutUrl,
+      expiresAt: open.expiresAt instanceof Date ? open.expiresAt.toISOString() : ''
+    };
+  }
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(CONFIG.LOCK_TIMEOUT_MS)) {
+    return { ok: false, code: 'BUSY', error: 'The server is busy. Please try again in a few seconds.' };
+  }
+  try {
+    var sheet = adminSheet_();
+    ensureHeaders_(sheet);
+    if (CONFIG.MAX_TEAMS > 0 && countTeams_(sheet) >= CONFIG.MAX_TEAMS) {
+      return { ok: false, code: 'FULL', error: 'All ' + CONFIG.MAX_TEAMS + ' team slots are taken. Registration is closed.' };
+    }
+    if (hasTeamRegisteredToday_(sheet, team.teamName)) {
+      return { ok: false, code: 'DUPLICATE', error: 'A team named "' + team.teamName + '" has already registered today.' };
+    }
+  } finally {
+    try { lock.releaseLock(); } catch (ignored) {}
+  }
+
+  var token = newPaymentToken_();
+  var expires = new Date(new Date().getTime() + CONFIG.PAYMENT_DRAFT_TTL_MINUTES * 60 * 1000);
+  var amountPaise = Math.round(fee * 100);
+  var provider = paymentProvider_();
+
+  var orderId = '';
+  var qrId = '';
+  var qrImageUrl = '';
+  var checkoutUrl = '';
+  var paymentId = '';
+
+  if (provider === 'YOUPI') {
+    var created = youpiCreatePayment_(token, team.teamName, fee, expires);
+    if (!created.ok) {
+      orgAudit_(PAY_ACTOR, 'payment-open-failed', token,
+        'youpi create failed: ' + cleanText_(created.error), 'failed');
+      return { ok: false, code: 'PROVIDER', error: 'The payment could not be started. Please try again.' };
+    }
+    orderId = created.orderId;
+    paymentId = created.paymentId;
+    checkoutUrl = created.checkoutUrl;
+  } else {
+    var order = razorpayCall_('POST', '/orders', {
+      amount: amountPaise,
+      currency: CONFIG.PAYMENT_CURRENCY,
+      receipt: token.slice(0, 40),
+      notes: { token: token, team: cleanText_(team.teamName).slice(0, 200), purpose: 'QQSGP entry fee' }
+    });
+    if (!order.ok) {
+      return { ok: false, code: 'PROVIDER', error: 'The payment could not be started. Please try again.' };
+    }
+    orderId = cleanText_(order.body && order.body.id);
+
+    var qr = razorpayCall_('POST', '/payments/qr_codes', {
+      type: 'upi_qr',
+      usage: 'single_use',
+      fixed_amount: true,
+      payment_amount: amountPaise,
+      description: 'QQSGP entry fee - ' + cleanText_(team.teamName).slice(0, 60),
+      close_by: Math.floor(expires.getTime() / 1000),
+      notes: { order_id: orderId, token: token }
+    });
+
+    if (!qr.ok) {
+      orgAudit_(PAY_ACTOR, 'payment-open-failed', orderId, 'qr create failed: ' + cleanText_(qr.error), 'failed');
+      return { ok: false, code: 'PROVIDER', error: 'The payment QR could not be created. Please try again.' };
+    }
+
+    qrId = cleanText_(qr.body && qr.body.id);
+    qrImageUrl = cleanText_(qr.body && qr.body.image_url);
+  }
+
+  var draft = {
+    token: token,
+    expiresAt: expires,
+    teamName: team.teamName,
+    department: team.department,
+    members: team.members,
+    consent: team.whatsappConsent === true,
+    fee: fee,
+    currency: CONFIG.PAYMENT_CURRENCY,
+    orderId: orderId,
+    qrId: qrId,
+    qrImageUrl: qrImageUrl,
+    checkoutUrl: checkoutUrl,
+    provider: provider
+  };
+  var draftRow = saveDraft_(draft);
+
+  // A YouPI session is opened with the merchant key; its payment id exists
+  // from the start, so it belongs on the draft immediately. It is NOT a
+  // payment, and nothing is marked paid until status is SUCCESS.
+  if (paymentId) {
+    setDraftRow_(draftSheet, draftRow, { paymentId: paymentId });
+  }
+
+  orgAudit_(PAY_ACTOR, 'payment-opened', orderId || qrId || paymentId,
+    team.teamName + ' · ₹' + fee + ' ' + CONFIG.PAYMENT_CURRENCY + ' · ' + provider +
+    (qrId ? ' · qr ' + qrId : '') + (paymentId ? ' · session ' + paymentId : ''), 'ok');
+
+  return {
+    ok: true,
+    token: token,
+    amount: fee,
+    currency: CONFIG.PAYMENT_CURRENCY,
+    provider: provider,
+    hosted: provider === 'YOUPI',
+    qrImageUrl: qrImageUrl,
+    checkoutUrl: checkoutUrl,
+    expiresAt: expires.toISOString()
+  };
+}
+
+/* ------------------------ checking a payment ------------------------ */
+
+/**
+ * The only place that decides whether money really arrived.
+ *
+ * The browser, the webhook body and the sheet are all ignored for this: the
+ * payment is fetched from Razorpay by id, and the answer must be captured, in
+ * INR, for the fee snapshotted on the draft, against an order we created.
+ */
+function verifyRazorpayPayment_(paymentId, draft) {
+  if (!paymentId) return { state: 'PENDING' };
+
+  var res = razorpayCall_('GET', '/payments/' + encodeURIComponent(paymentId));
+  if (!res.ok) return { state: 'PENDING', error: res.error };
+
+  var payment = res.body || {};
+  var status = cleanText_(payment.status).toLowerCase();
+  var captured = status === 'captured' || payment.captured === true;
+  if (!captured) return { state: 'PENDING', paymentStatus: status };
+
+  var amount = Number(payment.amount);
+  var currency = cleanText_(payment.currency).toUpperCase();
+
+  if (currency !== CONFIG.PAYMENT_CURRENCY) {
+    return { state: 'MISMATCH', reason: 'currency', paymentId: cleanText_(payment.id), amount: amount, currency: currency };
+  }
+  if (amount !== Math.round(Number(draft.fee) * 100)) {
+    return { state: 'MISMATCH', reason: 'amount', paymentId: cleanText_(payment.id), amount: amount, currency: currency };
+  }
+  if (payment.order_id && draft.orderId && cleanText_(payment.order_id) !== draft.orderId) {
+    return { state: 'MISMATCH', reason: 'order', paymentId: cleanText_(payment.id), amount: amount, currency: currency };
+  }
+
+  return {
+    state: 'PAID',
+    paymentId: cleanText_(payment.id) || paymentId,
+    amount: amount,
+    currency: currency,
+    orderId: cleanText_(payment.order_id) || draft.orderId,
+    method: cleanText_(payment.method) || 'upi'
+  };
+}
+
+/**
+ * Looks at the QR's own payment list at Razorpay. A payment id is never taken
+ * from a request body; this is the only source of one.
+ */
+/**
+ * YouPI's own answer about the session we opened, read with the merchant key.
+ *
+ * The gateway reports its confidence separately from the outcome:
+ * verificationLevel 2 means both the bank SMS and the Gmail alert agreed. This
+ * deployment can require 2 (the default), because the project's own README
+ * says its status alone is not conclusive proof of settlement. Below the
+ * required level the money is recorded but the team is NOT registered: the
+ * attempt goes to NEEDS REVIEW for an organiser, who can accept it.
+ */
+function verifyYoupiPayment_(draft) {
+  if (!draft.paymentId) return { state: 'PENDING' };
+
+  var res = youpiCall_('GET', '/api/v1/payments/' + encodeURIComponent(draft.paymentId));
+  if (!res.ok) return { state: 'PENDING', error: res.error };
+
+  var session = res.body || {};
+  var status = cleanText_(session.status).toUpperCase();
+  var amountPaise = Number(session.amountPaise);
+  if (!isFinite(amountPaise) || !amountPaise) amountPaise = Math.round((Number(session.amount) || 0) * 100);
+  var currency = cleanText_(session.currency).toUpperCase();
+
+  if (status === 'CANCELLED') return { state: 'CANCELLED' };
+  if (status === 'EXPIRED') return { state: 'EXPIRED' };
+  if (status === 'FAILED') return { state: 'FAILED' };
+  if (status !== 'SUCCESS') return { state: 'PENDING', paymentStatus: status };
+
+  var expected = Math.round(Number(draft.fee) * 100);
+  var proof = {
+    state: 'PAID',
+    provider: 'YOUPI',
+    paymentId: cleanText_(session.paymentId) || draft.paymentId,
+    orderId: cleanText_(session.orderId),
+    amount: amountPaise,
+    currency: currency,
+    method: cleanText_(session.method) || 'UPI',
+    verificationLevel: Number(session.verificationLevel) || 0,
+    verificationTag: cleanText_(session.verificationTag)
+  };
+
+  if (!proof.orderId || proof.orderId !== draft.orderId) {
+    return { state: 'MISMATCH', reason: 'order', provider: 'YOUPI', paymentId: proof.paymentId,
+      amount: amountPaise, currency: currency };
+  }
+  if (currency !== CONFIG.PAYMENT_CURRENCY) {
+    return { state: 'MISMATCH', reason: 'currency', provider: 'YOUPI', paymentId: proof.paymentId,
+      amount: amountPaise, currency: currency };
+  }
+  if (amountPaise !== expected) {
+    return { state: 'MISMATCH', reason: 'amount', provider: 'YOUPI', paymentId: proof.paymentId,
+      amount: amountPaise, currency: currency };
+  }
+
+  if (proof.verificationLevel < youpiMinVerification_()) {
+    return {
+      state: 'UNVERIFIED',
+      provider: 'YOUPI',
+      paymentId: proof.paymentId,
+      amount: amountPaise,
+      currency: currency,
+      verificationLevel: proof.verificationLevel,
+      reason: 'level'
+    };
+  }
+
+  return proof;
+}
+
+function latestDraftPayment_(draft) {
+  if ((draft.provider || paymentProvider_()) === 'YOUPI') return verifyYoupiPayment_(draft);
+  if (!draft.qrId) return { state: 'PENDING' };
+
+  var qr = razorpayCall_('GET', '/payments/qr_codes/' + encodeURIComponent(draft.qrId));
+  if (!qr.ok) return { state: 'PENDING', error: qr.error };
+
+  var payments = (qr.body && qr.body.payments) || [];
+  if (!payments.length) return { state: 'PENDING' };
+
+  var checked = 0;
+  for (var i = payments.length - 1; i >= 0 && checked < 3; i--) {
+    var entry = payments[i] || {};
+    var paymentId = cleanText_(entry.payment_id || entry.id);
+    if (!paymentId) continue;
+    checked++;
+    var result = verifyRazorpayPayment_(paymentId, draft);
+    if (result.state === 'PAID' || result.state === 'MISMATCH') return result;
+  }
+
+  return { state: 'PENDING' };
+}
+
+/**
+ * Writes the registration row for a verified payment, exactly once.
+ *
+ * Called under a script lock and safe to call twice: a draft that is already
+ * FINALISED returns the same registration id instead of adding a second team.
+ */
+function finaliseVerifiedPayment_(draft, evidence) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(CONFIG.LOCK_TIMEOUT_MS)) {
+    return { ok: false, code: 'BUSY', error: 'The sheet is busy. Your payment is safe - refresh in a moment.' };
+  }
+
+  try {
+    var draftSheet = draftSheet_();
+    var fresh = findDraft_(draftSheet, draft.token);
+    if (!fresh) return { ok: false, code: 'TOKEN', error: 'Unknown payment.' };
+
+    if (fresh.status === DRAFT.FINALISED) {
+      return {
+        ok: true, already: true, state: 'PAID', team: fresh.teamName,
+        registrationId: fresh.registrationId, amount: fresh.paidAmount || fresh.fee,
+        currency: fresh.currency
+      };
+    }
+    var manual = evidence.manual === true;
+
+    // A held-for-review draft may still become valid: YouPI's second observer
+    // (Gmail) can upgrade a level-1 payment to level 2 a moment later, and the
+    // strongest evidence always wins. A wrong amount or a team that could not
+    // be placed is NOT re-opened by a later poll - only an organiser can do
+    // that, with a note.
+    if (!manual && (fresh.status === DRAFT.UNPLACED || fresh.status === DRAFT.MISMATCH)) {
+      return {
+        ok: false, code: 'REVIEW', paid: true,
+        error: 'This payment is recorded but the team was not registered. An organiser will contact you.'
+      };
+    }
+
+    if (evidence.state !== 'PAID') {
+      return { ok: false, code: 'UNVERIFIED', error: 'The payment has not been verified yet.' };
+    }
+
+    var paidAmount = Number(evidence.amount);
+    var expected = Math.round(Number(fresh.fee) * 100);
+    if (!manual && (paidAmount !== expected || cleanText_(evidence.currency).toUpperCase() !== CONFIG.PAYMENT_CURRENCY)) {
+      setDraftRow_(draftSheet, fresh.row, {
+        status: DRAFT.MISMATCH, paymentId: evidence.paymentId || '', paidAmount: paidAmount / 100
+      });
+      orgAudit_(PAY_ACTOR, 'payment-mismatch', fresh.orderId || fresh.paymentId || fresh.qrId,
+        'paid ' + paidAmount / 100 + ' ' + evidence.currency + ', expected ' + fresh.fee + ' ' + CONFIG.PAYMENT_CURRENCY, 'refused');
+      return {
+        ok: false, code: 'MISMATCH', paid: true,
+        error: 'The amount received did not match the entry fee. An organiser will check it - nothing was lost.'
+      };
+    }
+
+    var sheet = adminSheet_();
+    ensureHeaders_(sheet);
+    var members = [];
+    try { members = JSON.parse(fresh.membersJson || '[]'); } catch (ignored) { members = []; }
+
+    if (!members || members.length < MIN_PLAYERS) {
+      setDraftRow_(draftSheet, fresh.row, { status: DRAFT.MISMATCH, paymentId: evidence.paymentId, paidAmount: paidAmount / 100 });
+      orgAudit_(PAY_ACTOR, 'payment-unusable', fresh.orderId || fresh.qrId, 'draft has no players', 'refused');
+      return { ok: false, code: 'REVIEW', paid: true, error: 'The payment could not be matched to a team. An organiser will contact you.' };
+    }
+
+    // Money can arrive after the last slot was taken or after a teammate
+    // registered the same name: keep the payment, refuse the second entry, and
+    // leave a trail an organiser can act on.
+    var full = CONFIG.MAX_TEAMS > 0 && countTeams_(sheet) >= CONFIG.MAX_TEAMS;
+    var duplicate = hasTeamRegisteredToday_(sheet, fresh.teamName);
+    if (full || duplicate) {
+      setDraftRow_(draftSheet, fresh.row, {
+        status: DRAFT.UNPLACED, paymentId: evidence.paymentId, paidAmount: paidAmount / 100
+      });
+      orgAudit_(PAY_ACTOR, 'payment-no-slot', fresh.orderId || fresh.qrId,
+        fresh.teamName + ' paid ₹' + paidAmount / 100 + ' but ' + (full ? 'the event is full' : 'the team name is already registered'), 'refused');
+      return {
+        ok: false, code: 'FULL', paid: true,
+        error: 'Your payment was received, but the team could not be added automatically. An organiser will contact you.'
+      };
+    }
+
+    var verifiedAt = new Date();
+    var provider = cleanText_(evidence.provider) || fresh.provider || paymentProvider_();
+    var level = evidence.verificationLevel === undefined || evidence.verificationLevel === ''
+      ? ''
+      : Number(evidence.verificationLevel);
+    var note = provider === 'YOUPI'
+      ? 'Verified by YouPI PG: session ' + evidence.paymentId + ', ₹' +
+        (paidAmount / 100) + ' ' + evidence.currency +
+        (level === '' ? '' : ', verification level ' + level + '/' + youpiMinVerification_())
+      : 'Verified by Razorpay: captured payment ' + evidence.paymentId +
+        ', ₹' + (paidAmount / 100) + ' ' + evidence.currency;
+    if (manual) {
+      note += ' Accepted by organiser ' + cleanText_(evidence.acceptedBy) +
+        ' after manual check: ' + cleanText_(evidence.acceptedNote);
+    }
+    var registration = {
+      teamName: fresh.teamName,
+      department: fresh.department,
+      members: members,
+      whatsappConsent: fresh.consent === 'YES',
+      consentAt: fresh.consent === 'YES' ? verifiedAt : '',
+      payment: {
+        method: 'ONLINE',
+        status: PAY.PAID,
+        fee: Number(fresh.fee),
+        utr: evidence.paymentId,
+        note: note + '.',
+        by: manual ? cleanText_(evidence.acceptedBy) : provider,
+        orderId: fresh.orderId,
+        paymentId: evidence.paymentId,
+        paidAmount: paidAmount / 100,
+        paidCurrency: evidence.currency,
+        verifiedAt: verifiedAt,
+        provider: provider
+      }
+    };
+
+    var rowNumber = appendRegistration_(sheet, registration);
+    refreshBodyStyles_(sheet);
+    clearStatsCache_();
+
+    var stamp = sheet.getRange(rowNumber, COL.TIMESTAMP).getValue();
+    var registrationId = recordId_(stamp, fresh.teamName);
+
+    setDraftRow_(draftSheet, fresh.row, {
+      status: DRAFT.FINALISED,
+      paymentId: evidence.paymentId,
+      paidAmount: paidAmount / 100,
+      registrationId: registrationId,
+      verification: manual ? 'MANUAL by ' + cleanText_(evidence.acceptedBy)
+        : provider + (level === '' ? '' : ' L' + level)
+    });
+
+    orgAudit_(PAY_ACTOR, manual ? 'payment-manual-verified' : 'payment-verified',
+      fresh.orderId || fresh.paymentId || fresh.qrId,
+      'payment ' + evidence.paymentId + ' · ₹' + (paidAmount / 100) + ' ' + evidence.currency +
+      ' · ' + provider + (level === '' ? '' : ' L' + level) + ' · team ' + fresh.teamName, 'verified');
+    orgAudit_(PAY_ACTOR, 'registration-created', registrationId,
+      fresh.teamName + ' · row ' + rowNumber, 'ok');
+
+    // Nice-to-haves. Neither may undo a registration that has already been
+    // written and paid for.
+    try { notifyOrganizer_(registration, rowNumber); } catch (ignored) {}
+    try { maybeSendReceipt_(sheet, rowNumber); } catch (ignored) {}
+
+    return {
+      ok: true,
+      state: 'PAID',
+      team: fresh.teamName,
+      registrationId: registrationId,
+      row: rowNumber,
+      amount: paidAmount / 100,
+      currency: evidence.currency,
+      paidAt: verifiedAt.toISOString()
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (ignored) {}
+  }
+}
+
+/**
+ * POST ?action=paystatus  { token }
+ * The page polls this. Every answer is derived from Razorpay, not from the
+ * timestamp of the last poll, so a refresh cannot invent a paid team.
+ */
+function publicPaymentStatus_(e) {
+  var body = readBody_(e);
+  if (!body.ok) return { ok: false, code: 'BODY', error: body.error };
+
+  var token = cleanText_(body.value && body.value.token);
+  var sheet = draftSheet_();
+  var draft = findDraft_(sheet, token);
+  if (!draft) return { ok: false, code: 'TOKEN', error: 'That payment is not known here. Start the payment again.' };
+
+  if (draft.status === DRAFT.FINALISED) {
+    return {
+      ok: true, state: 'PAID', team: draft.teamName,
+      registrationId: draft.registrationId, amount: draft.paidAmount || draft.fee,
+      currency: draft.currency
+    };
+  }
+  if (draft.status === DRAFT.CANCELLED) return { ok: true, state: 'CANCELLED' };
+  if (draft.status === DRAFT.MISMATCH) {
+    return { ok: true, state: 'REVIEW', error: 'The payment did not match the entry fee. An organiser will check it.' };
+  }
+  if (draft.status === DRAFT.UNPLACED) {
+    return { ok: true, state: 'REVIEW', error: 'Your payment was received, but the team was not added automatically. An organiser will contact you.' };
+  }
+  // A Razorpay QR is single-use and is closed at expiry, so there is nothing
+  // left to ask about. A YouPI session has its own window and a payment can
+  // land a few seconds after ours, so it is always asked before giving up.
+  var provider = draft.provider || paymentProvider_();
+  if (provider !== 'YOUPI' && draftExpired_(draft)) {
+    setDraftRow_(sheet, draft.row, { status: DRAFT.EXPIRED });
+    return { ok: true, state: 'EXPIRED' };
+  }
+
+  var evidence = latestDraftPayment_(draft);
+
+  if (evidence.state === 'UNVERIFIED') {
+    setDraftRow_(sheet, draft.row, {
+      status: DRAFT.UNVERIFIED,
+      paymentId: evidence.paymentId || '',
+      paidAmount: (evidence.amount || 0) / 100,
+      verification: 'YOUPI L' + (evidence.verificationLevel || 0)
+    });
+    orgAudit_(PAY_ACTOR, 'payment-unverified', draft.orderId || draft.paymentId,
+      'gateway reported money at verification level ' + (evidence.verificationLevel || 0) +
+      ' (needs ' + youpiMinVerification_() + ') · team ' + draft.teamName + ' · held for review', 'review');
+    return {
+      ok: true, state: 'REVIEW',
+      error: 'Your payment was reported by the gateway, but it could not be verified strongly enough to register your team automatically. An organiser will confirm it with you.'
+    };
+  }
+
+  if (evidence.state === 'CANCELLED' || evidence.state === 'FAILED' || evidence.state === 'EXPIRED') {
+    setDraftRow_(sheet, draft.row, { status: DRAFT.CANCELLED });
+    orgAudit_(PAY_ACTOR, 'payment-' + evidence.state.toLowerCase(), draft.orderId || draft.paymentId,
+      draft.teamName, 'closed');
+    return { ok: true, state: evidence.state };
+  }
+
+  if (evidence.state === 'PENDING' && draftExpired_(draft)) {
+    setDraftRow_(sheet, draft.row, { status: DRAFT.EXPIRED });
+    return { ok: true, state: 'EXPIRED' };
+  }
+
+  if (evidence.state === 'PAID') {
+    var result = finaliseVerifiedPayment_(draft, evidence);
+    if (result.ok) {
+      return {
+        ok: true, state: 'PAID', team: result.team,
+        registrationId: result.registrationId, amount: result.amount,
+        currency: result.currency, paidAt: result.paidAt
+      };
+    }
+    return { ok: true, state: result.code === 'BUSY' ? 'PENDING' : 'REVIEW', error: result.error };
+  }
+
+  if (evidence.state === 'MISMATCH') {
+    setDraftRow_(sheet, draft.row, {
+      status: DRAFT.MISMATCH, paymentId: evidence.paymentId || '',
+      paidAmount: (evidence.amount || 0) / 100
+    });
+    orgAudit_(PAY_ACTOR, 'payment-mismatch', draft.orderId || draft.paymentId || draft.qrId,
+      'paid ' + (evidence.amount || 0) / 100 + ' ' + evidence.currency + ', expected ' + draft.fee, 'refused');
+    return { ok: true, state: 'REVIEW', error: 'The amount received did not match the entry fee. An organiser will check it.' };
+  }
+
+  return {
+    ok: true, state: 'PENDING',
+    expiresAt: draft.expiresAt instanceof Date ? draft.expiresAt.toISOString() : ''
+  };
+}
+
+/** POST ?action=paycancel  { token } - the team backed out. */
+function publicPaymentCancel_(e) {
+  var body = readBody_(e);
+  if (!body.ok) return { ok: false, code: 'BODY', error: body.error };
+
+  var token = cleanText_(body.value && body.value.token);
+  var sheet = draftSheet_();
+  var draft = findDraft_(sheet, token);
+  if (!draft) return { ok: false, code: 'TOKEN', error: 'That payment is not known here.' };
+
+  if (draft.status === DRAFT.FINALISED) {
+    return { ok: true, state: 'PAID', team: draft.teamName, registrationId: draft.registrationId };
+  }
+  if (draft.status !== DRAFT.OPEN) return { ok: true, state: draft.status };
+
+  setDraftRow_(sheet, draft.row, { status: DRAFT.CANCELLED });
+  if ((draft.provider || paymentProvider_()) === 'YOUPI' && draft.paymentId) {
+    youpiCall_('POST', '/api/v1/checkout/' + encodeURIComponent(draft.paymentId) + '/cancel', {});
+  } else if (draft.qrId) {
+    razorpayCall_('POST', '/payments/qr_codes/' + encodeURIComponent(draft.qrId) + '/close', {});
+  }
+  orgAudit_(PAY_ACTOR, 'payment-cancelled', draft.orderId || draft.paymentId || draft.qrId, draft.teamName, 'cancelled');
+
+  return { ok: true, state: 'CANCELLED' };
+}
+
+/**
+ * POST ?action=paywebhook - the gateway calls this. Only the ids in the body
+ * are read; the money is confirmed by latestDraftPayment_ against the session
+ * we opened, so a forged body cannot mark anything paid.
+ */
+function publicPaymentWebhook_(e) {
+  var body = readBody_(e);
+  if (!body.ok) return { ok: false, code: 'BODY', error: body.error };
+
+  var payload = body.value || {};
+
+  // YouPI PG posts { event, paymentId, orderId, amount, amountPaise, currency,
+  // utr, ... } with an X-Gateway-Signature header. Apps Script cannot read
+  // request headers, so the signature is NOT checked here and the body is
+  // therefore treated as a doorbell only: the gateway is asked directly,
+  // with the merchant key, before anything is written.
+  if (!payload.payload && (payload.paymentId || payload.orderId) && payload.event) {
+    var ySheet = draftSheet_();
+    var yDraft = payload.paymentId ? findDraftByProviderId_(ySheet, 'paymentId', cleanText_(payload.paymentId)) : null;
+    if (!yDraft && payload.orderId) yDraft = findDraftByProviderId_(ySheet, 'orderId', cleanText_(payload.orderId));
+    if (!yDraft) return { ok: true, ignored: true };
+    if (yDraft.status === DRAFT.FINALISED) return { ok: true, duplicate: true };
+
+    var yEvidence = latestDraftPayment_(yDraft);
+    if (yEvidence.state === 'UNVERIFIED') {
+      setDraftRow_(ySheet, yDraft.row, {
+        status: DRAFT.UNVERIFIED, paymentId: yEvidence.paymentId || '',
+        paidAmount: (yEvidence.amount || 0) / 100,
+        verification: 'YOUPI L' + (yEvidence.verificationLevel || 0)
+      });
+      orgAudit_(PAY_ACTOR, 'payment-unverified', yDraft.orderId || yDraft.paymentId,
+        'gateway reported money at verification level ' + (yEvidence.verificationLevel || 0) +
+        ' · team ' + yDraft.teamName + ' · held for review', 'review');
+      return { ok: true, state: 'REVIEW' };
+    }
+    if (yEvidence.state !== 'PAID') return { ok: true, state: yEvidence.state || 'PENDING' };
+
+    var yResult = finaliseVerifiedPayment_(yDraft, yEvidence);
+    return { ok: true, state: yResult.ok ? 'PAID' : 'PENDING', duplicate: yResult.already === true };
+  }
+
+  var qrEntity = payload.payload && payload.payload.qr_code && payload.payload.qr_code.entity;
+  var qrId = qrEntity ? cleanText_(qrEntity.id) : '';
+  var orderEntity = payload.payload && payload.payload.order && payload.payload.order.entity;
+  var orderId = orderEntity ? cleanText_(orderEntity.id) : '';
+  var paymentEntity = payload.payload && payload.payload.payment && payload.payload.payment.entity;
+  if (!orderId && paymentEntity && paymentEntity.order_id) orderId = cleanText_(paymentEntity.order_id);
+
+  if (!qrId && !orderId) return { ok: true, ignored: true };
+
+  var sheet = draftSheet_();
+  var draft = qrId ? findDraftByProviderId_(sheet, 'qrId', qrId) : null;
+  if (!draft && orderId) draft = findDraftByProviderId_(sheet, 'orderId', orderId);
+  if (!draft) return { ok: true, ignored: true };
+
+  if (draft.status === DRAFT.FINALISED) return { ok: true, duplicate: true };
+
+  var evidence = latestDraftPayment_(draft);
+  if (evidence.state !== 'PAID') return { ok: true, state: evidence.state || 'PENDING' };
+
+  var result = finaliseVerifiedPayment_(draft, evidence);
+  return { ok: true, state: result.ok ? 'PAID' : 'PENDING', duplicate: result.already === true };
+}
 
 /* ================================================================
    ADMIN DASHBOARD API
@@ -1071,8 +3843,64 @@ function recordFromRow_(rowNumber, row) {
     note: cleanText_(row[COL.NOTE - 1]),
     // Blank on rows that predate the consent column, which reads as "no".
     whatsappConsent: cleanText_(row[COL.CONSENT - 1]).toUpperCase() === 'YES',
-    consentAt: isDate_(row[COL.CONSENT_AT - 1]) ? row[COL.CONSENT_AT - 1].toISOString() : ''
+    consentAt: isDate_(row[COL.CONSENT_AT - 1]) ? row[COL.CONSENT_AT - 1].toISOString() : '',
+    payment: paymentFromRow_(row)
   };
+}
+
+/**
+ * Payment fields for one row. Rows written before the payment columns existed
+ * read as NOT SELECTED with the configured fee, so nothing has to be migrated
+ * before the dashboard can show them.
+ */
+function paymentFromRow_(row) {
+  var feeCell = row[COL.FEE - 1];
+  var fee = Number(feeCell);
+  var recorded = cleanText_(feeCell) !== '' && isFinite(fee) && fee > 0;
+  var stamp = row[COL.PAY_AT - 1];
+  var method = normalisePaymentMethod_(row[COL.METHOD - 1]);
+
+  return {
+    entryFee: recorded ? fee : CONFIG.TEAM_FEE,
+    feeRecorded: recorded,
+    method: method,
+    status: normalisePaymentStatus_(row[COL.PAY_STATUS - 1], method),
+    utr: cleanText_(row[COL.UTR - 1]),
+    note: cleanText_(row[COL.PAY_NOTE - 1]),
+    updatedAt: isDate_(stamp)
+      ? Utilities.formatDate(stamp, Session.getScriptTimeZone(), 'dd MMM yyyy, hh:mm a')
+      : cleanText_(stamp),
+    updatedBy: cleanText_(row[COL.PAY_BY - 1]),
+    // Evidence the provider gave us, never what the browser said. Blank on
+    // cash rows and on every row written before this existed.
+    orderId: cleanText_(row[COL.PAY_ORDER - 1]),
+    paymentId: cleanText_(row[COL.PAY_ID - 1]),
+    paidAmount: Number(row[COL.PAID_AMOUNT - 1]) || 0,
+    paidCurrency: cleanText_(row[COL.PAID_CURRENCY - 1]),
+    verifiedAt: isDate_(row[COL.PAY_VERIFIED_AT - 1])
+      ? Utilities.formatDate(row[COL.PAY_VERIFIED_AT - 1], Session.getScriptTimeZone(), 'dd MMM yyyy, hh:mm a')
+      : cleanText_(row[COL.PAY_VERIFIED_AT - 1]),
+    provider: cleanText_(row[COL.PAY_PROVIDER - 1])
+  };
+}
+
+/**
+ * Reads a payment status, tolerating the spellings a hand edit can produce.
+ * A row with a method but no status is a team that chose and has not been
+ * verified yet — never silently "paid".
+ */
+function normalisePaymentStatus_(value, method) {
+  var text = cleanText_(value).toUpperCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
+  if (PAYMENT_STATUSES.indexOf(text) !== -1) return text;
+  if (!text) return method ? PAY.PENDING_VERIFICATION : PAY.NOT_SELECTED;
+  return PAY.NEEDS_REVIEW;
+}
+
+function normalisePaymentMethod_(value) {
+  var text = cleanText_(value).toUpperCase();
+  if (text === 'ONLINE' || text === 'UPI') return 'ONLINE';
+  if (text === 'CASH') return 'CASH';
+  return '';
 }
 
 function readRecords_(sheet) {
@@ -1091,14 +3919,47 @@ function readRecords_(sheet) {
 }
 
 function adminCounts_(records) {
-  var counts = { total: 0, players: 0, PENDING: 0, APPROVED: 0, REJECTED: 0, WAITLISTED: 0 };
+  var counts = {
+    total: 0, players: 0, PENDING: 0, APPROVED: 0, REJECTED: 0, WAITLISTED: 0,
+    // Payment totals are counted separately from approval: a team can be
+    // approved and still owe money, or paid and still be awaiting approval.
+    onlineAwaiting: 0, cashPending: 0, paid: 0, needsReview: 0, notSelected: 0,
+    paidTeams: 0, amountCollected: 0, amountOutstanding: 0,
+    // Online payments are confirmed from the team's own UPI reference, so they
+    // are counted separately: useful for a spot check at the venue.
+    selfReported: 0
+  };
 
   for (var i = 0; i < records.length; i++) {
+    var record = records[i];
+    var pay = record.payment || {};
+
     counts.total++;
-    counts.players += records[i].playerCount;
-    counts[records[i].status] = (counts[records[i].status] || 0) + 1;
+    counts.players += record.playerCount;
+    counts[record.status] = (counts[record.status] || 0) + 1;
+
+    if (pay.status === PAY.PAID) {
+      counts.paid++;
+      counts.paidTeams++;
+      counts.amountCollected += Number(pay.entryFee) || 0;
+      if (pay.method === 'ONLINE' && /^TEAM/i.test(String(pay.updatedBy))) {
+        counts.selfReported++;
+      }
+    } else {
+      if (pay.status === PAY.PENDING_VERIFICATION) counts.onlineAwaiting++;
+      else if (pay.status === PAY.PENDING) counts.cashPending++;
+      else if (pay.status === PAY.NEEDS_REVIEW) counts.needsReview++;
+      else if (pay.status === PAY.NOT_SELECTED) counts.notSelected++;
+
+      // A rejected payment is not "outstanding": the organisers have decided
+      // it will not be collected through this path. Everything else is.
+      if (pay.status !== PAY.REJECTED) {
+        counts.amountOutstanding += Number(pay.entryFee) || 0;
+      }
+    }
   }
 
+  counts.fee = entryFee_();
   return counts;
 }
 
@@ -1106,10 +3967,27 @@ function filterRecords_(records, payload) {
   var status = cleanText_(payload.status).toUpperCase();
   var department = cleanText_(payload.department);
   var query = cleanText_(payload.q).toLowerCase();
+  var payment = normalisePaymentFilter_(payload.payment);
+  var method = normalisePaymentMethod_(payload.method);
 
   return records.filter(function (record) {
     if (status && status !== 'ALL' && record.status !== status) return false;
     if (department && record.department !== department) return false;
+    if (method && record.payment.method !== method) return false;
+
+    if (payment) {
+      // Two friendly groupings the dashboard offers on top of the raw statuses.
+      if (payment === 'AWAITING') {
+        if ([PAY.PENDING, PAY.PENDING_VERIFICATION, PAY.NEEDS_REVIEW].indexOf(record.payment.status) === -1) {
+          return false;
+        }
+      } else if (payment === 'UNPAID') {
+        if (record.payment.status === PAY.PAID) return false;
+      } else if (record.payment.status !== payment) {
+        return false;
+      }
+    }
+
     if (!query) return true;
 
     if (record.teamName.toLowerCase().indexOf(query) !== -1) return true;
@@ -1122,6 +4000,14 @@ function filterRecords_(records, payload) {
 
     return false;
   });
+}
+
+/** "ALL"/blank means no filter; the two grouped views are handled above. */
+function normalisePaymentFilter_(value) {
+  var text = cleanText_(value).toUpperCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
+  if (!text || text === 'ALL') return '';
+  if (text === 'AWAITING' || text === 'UNPAID') return text;
+  return PAYMENT_STATUSES.indexOf(text) === -1 ? '' : text;
 }
 
 function uniqueDepartments_(records) {
@@ -1150,15 +4036,39 @@ function adminHandle_(e) {
     return { ok: false, code: 'BODY', error: 'The submitted data is not valid.' };
   }
 
-  if (!adminAuthorized_(payload.key)) {
-    return { ok: false, code: 'AUTH', error: 'Wrong or missing dashboard key.' };
+  var action = cleanText_(payload.action);
+
+  // Signing in and out are the only calls that run before authorisation: one
+  // creates the session and the other destroys it, so neither can depend on
+  // already having one.
+  if (action === 'login') return orgLogin_(payload);
+  if (action === 'logout') return orgLogout_(payload);
+
+  var auth = orgAuthorize_(payload);
+  if (!auth.ok) return auth;
+
+  // Role check, on the server, before any sheet data is read.
+  if (!orgAllowedTo_(auth.actor, action)) {
+    orgAudit_(auth.actor, 'permission-denied', action, '', 'refused');
+    return {
+      ok: false,
+      code: 'FORBIDDEN',
+      error: 'Your role (' + auth.actor.role + ') is not allowed to do that.'
+    };
   }
 
-  var action = cleanText_(payload.action);
+  var accountResult = orgHandleAccountAction_(action, payload, auth.actor);
+  if (accountResult) return accountResult;
+
   if (action === 'list') return adminList_(payload);
   if (action === 'status') return adminSetStatus_(payload);
   if (action === 'note') return adminSaveNote_(payload);
+  if (action === 'payment-status') return adminSetPayment_(payload, auth.actor);
   if (action === 'export') return adminExport_(payload);
+  if (action === 'settings-get') return adminSettingsGet_();
+  if (action === 'settings-set') return adminSettingsSet_(payload, auth.actor);
+  if (action === 'drafts-list') return adminDraftsList_();
+  if (action === 'draft-resolve') return adminDraftResolve_(payload, auth.actor);
 
   // WhatsApp: configuration, log, retry, and announcements.
   if (action === 'notif-config') return adminNotifConfig_();
@@ -1168,6 +4078,158 @@ function adminHandle_(e) {
   if (action === 'announce-send') return adminAnnounceSend_(payload);
 
   return { ok: false, code: 'ACTION', error: 'Unknown dashboard action.' };
+}
+
+/**
+ * The live tournament settings. The fee is stored in the sheet, written from
+ * the dashboard, and read here so the page and the backend can never disagree
+ * about what a team owes.
+ */
+function adminSettingsGet_() {
+  var provider = paymentProvider_();
+  return {
+    ok: true,
+    fee: entryFee_(),
+    currency: CONFIG.PAYMENT_CURRENCY,
+    provider: provider,
+    online: paymentOnline_(),
+    minVerification: provider === 'YOUPI' ? youpiMinVerification_() : 0,
+    // Read-only facts the organiser needs to trust the dashboard: which
+    // gateway is wired in, and whether it is actually reachable/configured.
+    hosted: provider === 'YOUPI',
+    gatewayHost: provider === 'YOUPI' ? youpiBaseUrl_() : 'api.razorpay.com'
+  };
+}
+
+function adminSettingsSet_(payload, actor) {
+  var result = saveEntryFee_(payload.fee, actor);
+  if (!result.ok) return result;
+
+  clearStatsCache_();
+  orgAudit_(actor, 'settings-fee', String(result.fee), 'entry fee set to ₹' + result.fee, 'ok');
+
+  return { ok: true, fee: result.fee, currency: CONFIG.PAYMENT_CURRENCY };
+}
+
+/* --------------------- payments held for review --------------------- */
+
+/**
+ * Payment attempts the gateway reported but this project would not register
+ * on its own: a wrong amount, a session that could not be placed, or a YouPI
+ * payment whose verification level was below the required threshold.
+ *
+ * These rows are the ONLY way a held payment becomes a team, and only an
+ * organiser can press the button. No secret is returned: a draft token, ids
+ * and amounts only.
+ */
+function adminDraftsList_() {
+  var sheet = draftSheet_();
+  var drafts = allDrafts_(sheet);
+  var held = [];
+
+  for (var i = 0; i < drafts.length; i++) {
+    var draft = drafts[i];
+    if ([DRAFT.UNVERIFIED, DRAFT.MISMATCH, DRAFT.UNPLACED].indexOf(draft.status) === -1) continue;
+    held.push({
+      token: draft.token,
+      teamName: draft.teamName,
+      department: draft.department,
+      fee: draft.fee,
+      currency: draft.currency || CONFIG.PAYMENT_CURRENCY,
+      provider: draft.provider || 'RAZORPAY',
+      orderId: draft.orderId,
+      paymentId: draft.paymentId,
+      paidAmount: draft.paidAmount,
+      verification: draft.verification,
+      status: draft.status,
+      createdAt: draft.created instanceof Date ? draft.created.toISOString() : ''
+    });
+  }
+
+  held.sort(function (a, b) {
+    return String(b.createdAt).localeCompare(String(a.createdAt));
+  });
+
+  return {
+    ok: true,
+    drafts: held.slice(0, 50),
+    total: held.length,
+    minVerification: youpiMinVerification_(),
+    provider: paymentProvider_()
+  };
+}
+
+/**
+ * POST ?action=admin { action: 'draft-resolve', token, decision, note }
+ *
+ * accept  - the organiser has seen the money (bank statement, UPI app, or the
+ *           gateway's own trail) and registers the team as PAID, recording
+ *           who accepted it and why.
+ * reject  - nothing is registered; the draft is closed with the reason.
+ *
+ * Idempotent: accepting an already-finalised draft returns the same
+ * registration id instead of adding a second team.
+ */
+function adminDraftResolve_(payload, actor) {
+  var token = cleanText_(payload.token);
+  var decision = cleanText_(payload.decision).toLowerCase();
+  var note = cleanText_(payload.note).slice(0, CONFIG.ADMIN_NOTE_LIMIT);
+  if (!token) return { ok: false, code: 'TOKEN', error: 'Which payment?' };
+  if (decision !== 'accept' && decision !== 'reject') {
+    return { ok: false, code: 'DECISION', error: 'Choose accept or reject.' };
+  }
+
+  var sheet = draftSheet_();
+  var draft = findDraft_(sheet, token);
+  if (!draft) return { ok: false, code: 'TOKEN', error: 'That payment attempt is not in the sheet.' };
+
+  if (draft.status === DRAFT.FINALISED) {
+    return { ok: true, already: true, registrationId: draft.registrationId, team: draft.teamName };
+  }
+  if ([DRAFT.UNVERIFIED, DRAFT.MISMATCH, DRAFT.UNPLACED].indexOf(draft.status) === -1) {
+    return { ok: false, code: 'STATUS', error: 'That attempt is not waiting for review.' };
+  }
+
+  if (decision === 'reject') {
+    if (!note) return { ok: false, code: 'NOTE', error: 'Say why the payment was rejected.' };
+    setDraftRow_(sheet, draft.row, { status: DRAFT.CANCELLED });
+    orgAudit_(actor, 'payment-rejected', draft.orderId || draft.paymentId || draft.token,
+      draft.teamName + ' · ' + note, 'rejected');
+    return { ok: true, state: 'REJECTED' };
+  }
+
+  if (!note) {
+    return { ok: false, code: 'NOTE', error: 'Say how you checked that the money arrived.' };
+  }
+
+  var amountPaise = Math.round((Number(draft.paidAmount) || Number(draft.fee)) * 100);
+  var provider = draft.provider || paymentProvider_();
+  var registered = finaliseVerifiedPayment_(draft, {
+    state: 'PAID',
+    manual: true,
+    provider: provider,
+    paymentId: draft.paymentId || draft.orderId || draft.token,
+    orderId: draft.orderId,
+    amount: amountPaise,
+    currency: draft.currency || CONFIG.PAYMENT_CURRENCY,
+    verificationLevel: draft.verification ? draft.verification : '',
+    acceptedBy: actor ? actor.id : 'organiser',
+    acceptedNote: note
+  });
+
+  if (!registered.ok && registered.code !== 'REVIEW') return registered;
+
+  orgAudit_(actor, 'payment-manual-accept', draft.orderId || draft.paymentId || draft.token,
+    draft.teamName + ' · ₹' + (amountPaise / 100) + ' · ' + note, 'accepted');
+
+  return {
+    ok: true,
+    state: registered.ok ? 'PAID' : 'REVIEW',
+    team: draft.teamName,
+    registrationId: registered.registrationId || '',
+    amount: amountPaise / 100,
+    error: registered.ok ? undefined : registered.error
+  };
 }
 
 function adminList_(payload) {
@@ -1283,6 +4345,124 @@ function adminSaveNote_(payload) {
   });
 }
 
+/**
+ * The only path to PAID. An organiser records the outcome after checking the
+ * money — never because a team typed a reference or showed a screenshot.
+ * Payment status and registration status stay independent: marking a team paid
+ * does not approve it, and approving a team does not mark it paid.
+ */
+function adminSetPayment_(payload, actor) {
+  var id = cleanText_(payload.id);
+  if (!/^[A-Za-z0-9_-]{10,44}$/.test(id)) {
+    return { ok: false, code: 'ID', error: 'Unknown registration.' };
+  }
+
+  var status = cleanText_(payload.paymentStatus).toUpperCase()
+    .replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
+
+  if (PAYMENT_STATUSES.indexOf(status) === -1) {
+    return { ok: false, code: 'PAYMENT', error: 'Unknown payment status.' };
+  }
+
+  // "Not selected" is where a row starts. Letting the dashboard write it back
+  // would quietly erase the record of a payment that was looked at.
+  if (status === PAY.NOT_SELECTED) {
+    return {
+      ok: false,
+      code: 'PAYMENT',
+      error: 'A recorded payment cannot be reset to "not selected". Use Pending if it was never collected.'
+    };
+  }
+
+  var methodWanted = cleanText_(payload.method);
+  var method = methodWanted ? normalisePaymentMethod_(methodWanted) : '';
+  if (methodWanted && !method) {
+    return { ok: false, code: 'METHOD', error: 'Payment method must be Online or Cash.' };
+  }
+
+  var note = cleanText_(payload.note);
+  if (note.length > 200) {
+    return { ok: false, code: 'NOTE', error: 'The payment note must be 200 characters or fewer.' };
+  }
+  if (hasMarkup_(note)) {
+    return { ok: false, code: 'NOTE', error: 'The payment note contains characters that are not allowed.' };
+  }
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(CONFIG.LOCK_TIMEOUT_MS)) {
+    return { ok: false, code: 'BUSY', error: 'The sheet is busy. Try again in a moment.' };
+  }
+
+  try {
+    var sheet = adminSheet_();
+    var rowNumber = findRowById_(sheet, id);
+    if (rowNumber === -1) {
+      return { ok: false, code: 'ID', error: 'That registration no longer exists.' };
+    }
+
+    var row = sheet.getRange(rowNumber, 1, 1, HEADERS.length).getValues()[0];
+    var current = paymentFromRow_(row);
+
+    // Two devices can act at once. The one holding an older view is told to
+    // reload instead of silently overwriting the other's decision.
+    var expectedRaw = cleanText_(payload.expectedPayment);
+    if (expectedRaw) {
+      var expected = normalisePaymentStatus_(expectedRaw, current.method);
+      if (current.status !== expected) {
+        return {
+          ok: false,
+          code: 'STALE',
+          error: 'This payment was changed somewhere else. Reload and check it again.',
+          record: recordFromRow_(rowNumber, row)
+        };
+      }
+    }
+
+    if (status === PAY.PAID && !current.method && !method) {
+      return {
+        ok: false,
+        code: 'METHOD',
+        error: 'Set the payment method to Online or Cash before marking it paid.'
+      };
+    }
+
+    sheet.getRange(rowNumber, COL.PAY_STATUS).setValue(status);
+    if (method) sheet.getRange(rowNumber, COL.METHOD).setValue(method);
+    if (note) sheet.getRange(rowNumber, COL.PAY_NOTE).setValue(note);
+    sheet.getRange(rowNumber, COL.PAY_AT).setValue(new Date());
+    sheet.getRange(rowNumber, COL.PAY_BY).setValue(actor ? actor.id : 'organiser');
+
+    // Keep the fee on the row truthful: a blank cell on a pre-fee row should
+    // read as the configured fee rather than as "zero rupees owed".
+    if (!current.feeRecorded) {
+      sheet.getRange(rowNumber, COL.FEE).setValue(CONFIG.TEAM_FEE);
+    }
+
+    refreshPaymentStyles_(sheet);
+
+    var after = sheet.getRange(rowNumber, 1, 1, HEADERS.length).getValues()[0];
+    var fresh = recordFromRow_(rowNumber, after);
+
+    orgAudit_(
+      actor,
+      'payment-status',
+      id,
+      current.status + ' -> ' + fresh.payment.status +
+        (method ? ' | method=' + fresh.payment.method : '') +
+        (note ? ' | ' + note : ''),
+      'ok'
+    );
+
+    return {
+      ok: true,
+      record: fresh,
+      counts: adminCounts_(readRecords_(sheet))
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (ignored) {}
+  }
+}
+
 function csvCell_(value) {
   var text = cleanText_(value);
   if (/[",\n\r]/.test(text)) {
@@ -1298,7 +4478,9 @@ function adminExport_(payload) {
   var lines = [[
     'Timestamp', 'Team Name', 'Department',
     'Player 1', 'Player 1 WhatsApp', 'Player 2', 'Player 2 WhatsApp',
-    'Player 3', 'Player 4', 'Status', 'Note', 'Record ID'
+    'Player 3', 'Player 4', 'Status', 'Note',
+    'Entry Fee', 'Payment Method', 'Payment Status', 'UTR / Reference',
+    'Payment Note', 'Payment Updated At', 'Payment Updated By', 'Record ID'
   ].map(csvCell_).join(',')];
 
   for (var i = 0; i < records.length; i++) {
@@ -1318,6 +4500,13 @@ function adminExport_(payload) {
       players[3],
       r.status,
       r.note,
+      r.payment.entryFee,
+      r.payment.method,
+      r.payment.status,
+      r.payment.utr,
+      r.payment.note,
+      r.payment.updatedAt,
+      r.payment.updatedBy,
       r.id
     ].map(csvCell_).join(','));
   }
@@ -1351,12 +4540,250 @@ function setupAdminKey() {
   return key;
 }
 
+/* ==================================================================
+   ORGANISER ACCOUNT SETUP
+   ------------------------------------------------------------------
+   There is no default PIN and no administrator password in this file.
+   The first Super Admin is created here, either from the sheet's
+   "Tournament" menu (which asks you to type the ID and PIN you want)
+   or by running setupSuperAdmin() from the editor, which generates a
+   strong random PIN and prints it once.
+   ================================================================== */
+
+/** A strong throwaway PIN, e.g. "KK4F-7M2A-QW9Z-3TXE". Printed once only. */
+function orgStrongPin_() {
+  var alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  var groups = [];
+
+  for (var group = 0; group < 4; group++) {
+    var piece = '';
+    for (var i = 0; i < 4; i++) {
+      var uuid = Utilities.getUuid().replace(/[^0-9a-f]/g, '');
+      piece += alphabet.charAt(parseInt(uuid.slice(0, 4), 16) % alphabet.length);
+    }
+    groups.push(piece);
+  }
+
+  return groups.join('-');
+}
+
+/**
+ * Creates the first Super Admin. Run from the Apps Script editor when you have
+ * no account yet, or from the sheet menu to type your own ID and PIN.
+ * Returns the public account; the PIN is only ever returned when this helper
+ * generated it, so it can be shown to you once and then never again.
+ */
+function setupSuperAdmin(organiserId, pin, name) {
+  var existing = orgCountSuperAdmins_(orgAccounts_());
+
+  if (existing > 0 && !(organiserId && pin)) {
+    var message = 'A Super Admin already exists (' + existing + ' active). Sign in with it, or run ' +
+      'createOrganiserAccount(id, pin, role) to add another account.';
+    console.log(message);
+    return { ok: false, code: 'EXISTS', error: message };
+  }
+
+  var generated = !pin;
+  var id = organiserId || 'admin';
+  var secret = pin || orgStrongPin_();
+
+  var created = orgCreateAccount_({
+    id: id,
+    name: name || id,
+    pin: secret,
+    role: ORG_ROLE.SUPER,
+    createdBy: 'setupSuperAdmin'
+  });
+
+  if (!created.ok) {
+    console.log('Could not create the Super Admin: ' + created.error);
+    return created;
+  }
+
+  orgAudit_({ id: 'setup', role: 'SUPER' }, 'account-create', created.account.id, 'first super admin', 'ok');
+
+  if (generated) {
+    console.log('Super Admin created. Write these down now - the PIN is not stored and cannot be shown again.');
+    console.log('Organiser ID: ' + id);
+    console.log('PIN: ' + secret);
+  } else {
+    console.log('Super Admin "' + id + '" created.');
+  }
+
+  return { ok: true, account: created.account, pin: generated ? secret : '', generated: generated };
+}
+
+/** Adds an account from the editor: createOrganiserAccount('ravi', 'pin1234'). */
+function createOrganiserAccount(organiserId, pin, role, name) {
+  var created = orgCreateAccount_({
+    id: organiserId,
+    name: name || organiserId,
+    pin: pin,
+    role: role === ORG_ROLE.SUPER ? ORG_ROLE.SUPER : ORG_ROLE.ORGANIZER,
+    createdBy: 'editor'
+  });
+
+  console.log(created.ok
+    ? 'Created organiser "' + created.account.id + '" with the ' + created.account.role + ' role.'
+    : 'Not created: ' + created.error);
+
+  return created;
+}
+
+/** Ends every session for an account from the editor. */
+function revokeOrganiserSessions(organiserId) {
+  var removed = orgRevokeAccountSessions_(organiserId);
+  console.log('Ended ' + removed + ' session(s) for "' + orgNormaliseId_(organiserId) + '".');
+  return removed;
+}
+
+/** Lists organiser accounts without printing anything secret. */
+function organiserStatus() {
+  var accounts = orgAccounts_();
+  if (!accounts.length) {
+    console.log('No organiser accounts yet. Run setupSuperAdmin() to create the first Super Admin.');
+    return { ok: true, accounts: [], superAdmins: 0 };
+  }
+
+  var lines = ['Organiser accounts (' + accounts.length + '):'];
+  for (var i = 0; i < accounts.length; i++) {
+    var account = accounts[i];
+    lines.push('  ' + account.id + ' - ' + account.role +
+      (account.enabled === false ? ' [DISABLED]' : '') +
+      (account.lastLogin ? ' last in ' + account.lastLogin : ' never signed in'));
+  }
+  lines.push('Active sessions: ' + orgSessionList_().length);
+  console.log(lines.join('\n'));
+
+  return { ok: true, accounts: accounts.map(orgPublicAccount_), superAdmins: orgCountSuperAdmins_(accounts) };
+}
+
 /** Confirms the key exists, without ever printing it. */
 function adminStatus() {
   var key = PropertiesService.getScriptProperties().getProperty(CONFIG.ADMIN_KEY_PROPERTY) || '';
   console.log(key.length >= 20
     ? 'Dashboard key is configured (' + key.length + ' characters).'
     : 'No dashboard key yet. Run setupAdminKey() first.');
+  console.log('Organiser accounts: ' + orgAccounts_().length + ', active sessions: ' + orgSessionList_().length + '.');
+}
+
+/* -------------------- sheet menu for organiser accounts -------------------- */
+
+/**
+ * These menu items ask for the ID and PIN in the spreadsheet's own dialog, so
+ * the first account can be created without ever putting a PIN in a file, a
+ * chat or a public page. The PIN is hashed immediately and never shown again.
+ */
+function menuCreateAccount() {
+  var ui = SpreadsheetApp.getUi();
+
+  var first = ui.prompt('Organiser account', 'Organiser ID (letters, numbers, dot, dash or underscore):', ui.ButtonSet.OK_CANCEL);
+  if (first.getSelectedButton() !== ui.Button.OK) return;
+  var id = orgNormaliseId_(first.getResponseText());
+
+  var second = ui.prompt('Organiser account',
+    'Personal PIN for "' + id + '" (' + ORG.PIN_MIN + '+ characters - letters and numbers are stronger than digits alone):',
+    ui.ButtonSet.OK_CANCEL);
+  if (second.getSelectedButton() !== ui.Button.OK) return;
+  var pin = second.getResponseText();
+
+  var roleAnswer = ui.prompt('Organiser account', 'Role: type SUPER or ORGANIZER.', ui.ButtonSet.OK_CANCEL);
+  if (roleAnswer.getSelectedButton() !== ui.Button.OK) return;
+  var role = cleanText_(roleAnswer.getResponseText()).toUpperCase() === 'SUPER' ? ORG_ROLE.SUPER : ORG_ROLE.ORGANIZER;
+
+  if (orgCountSuperAdmins_(orgAccounts_()) === 0) role = ORG_ROLE.SUPER;
+
+  var created = orgCreateAccount_({ id: id, name: id, pin: pin, role: role, createdBy: 'sheet-menu' });
+  orgAudit_({ id: 'sheet-menu', role: 'SUPER' }, 'account-create', id, created.ok ? role : created.error, created.ok ? 'ok' : 'refused');
+
+  showAlert_(created.ok ? 'Organiser created' : 'Not created', created.ok
+    ? '"' + created.account.id + '" can now sign in on the dashboard as ' + created.account.role +
+      '. The PIN is not stored - if it is lost, use "reset a PIN".'
+    : created.error);
+}
+
+function menuResetPin() {
+  var ui = SpreadsheetApp.getUi();
+
+  var first = ui.prompt('Reset a PIN', 'Organiser ID:', ui.ButtonSet.OK_CANCEL);
+  if (first.getSelectedButton() !== ui.Button.OK) return;
+  var id = orgNormaliseId_(first.getResponseText());
+
+  var second = ui.prompt('Reset a PIN', 'New PIN for "' + id + '":', ui.ButtonSet.OK_CANCEL);
+  if (second.getSelectedButton() !== ui.Button.OK) return;
+
+  var reset = orgUpdateAccount_(id, { pin: second.getResponseText() }, { id: 'sheet-menu', role: 'SUPER' });
+  orgAudit_({ id: 'sheet-menu', role: 'SUPER' }, 'account-reset-pin', id, reset.ok ? 'ok' : reset.error, reset.ok ? 'ok' : 'refused');
+
+  showAlert_(reset.ok ? 'PIN reset' : 'Not reset', reset.ok
+    ? 'The new PIN is active and ' + reset.sessionsRevoked + ' existing session(s) have ended.'
+    : reset.error);
+}
+
+function menuToggleAccount() {
+  var ui = SpreadsheetApp.getUi();
+
+  var first = ui.prompt('Enable or disable', 'Organiser ID:', ui.ButtonSet.OK_CANCEL);
+  if (first.getSelectedButton() !== ui.Button.OK) return;
+  var id = orgNormaliseId_(first.getResponseText());
+
+  var account = orgFindAccount_(id);
+  if (!account) { showAlert_('Unknown account', 'No organiser account called "' + id + '".'); return; }
+
+  var next = account.enabled === false;
+  var answer = ui.alert('Confirm', (next ? 'Enable' : 'Disable') + ' "' + id + '"?', ui.ButtonSet.YES_NO);
+  if (answer !== ui.Button.YES) return;
+
+  var updated = orgUpdateAccount_(id, { enabled: next }, { id: 'sheet-menu', role: 'SUPER' });
+  orgAudit_({ id: 'sheet-menu', role: 'SUPER' }, 'account-update', id, 'enabled=' + next + ' ' + (updated.ok ? 'ok' : updated.error), updated.ok ? 'ok' : 'refused');
+
+  showAlert_(updated.ok ? 'Account updated' : 'Not updated', updated.ok
+    ? id + ' is now ' + (next ? 'enabled' : 'disabled') + '. ' + updated.sessionsRevoked + ' session(s) ended.'
+    : updated.error);
+}
+
+function menuRevokeSessions() {
+  var ui = SpreadsheetApp.getUi();
+
+  var answer = ui.prompt('Sign out everywhere', 'Organiser ID (leave empty for every account):', ui.ButtonSet.OK_CANCEL);
+  if (answer.getSelectedButton() !== ui.Button.OK) return;
+
+  var id = orgNormaliseId_(answer.getResponseText());
+  var removed;
+
+  if (!id) {
+    removed = 0;
+    var accounts = orgAccounts_();
+    for (var i = 0; i < accounts.length; i++) removed += orgRevokeAccountSessions_(accounts[i].id);
+  } else {
+    removed = orgRevokeAccountSessions_(id);
+  }
+
+  orgAudit_({ id: 'sheet-menu', role: 'SUPER' }, 'account-revoke-sessions', id || 'all', 'ended=' + removed, 'ok');
+  showAlert_('Sessions ended', 'Ended ' + removed + ' session(s). Those devices must sign in again.');
+}
+
+function menuListAccounts() {
+  var accounts = orgAccounts_();
+
+  if (!accounts.length) {
+    showAlert_('No accounts yet', 'Use "Organiser accounts: create" to add the first Super Admin.');
+    return;
+  }
+
+  var sessions = orgSessionList_();
+  var lines = [];
+
+  for (var i = 0; i < accounts.length; i++) {
+    var account = accounts[i];
+    var mine = sessions.filter(function (session) { return session.organiser === account.id; });
+    lines.push(account.id + '  -  ' + account.role +
+      (account.enabled === false ? '  [DISABLED]' : '') +
+      '  -  ' + mine.length + ' session(s)' +
+      (account.lastLogin ? '  -  last in ' + account.lastLogin : '  -  never signed in'));
+  }
+
+  showAlert_('Organiser accounts (' + accounts.length + ')', lines.join('\n'));
 }
 
 /* ================================================================
@@ -1557,8 +4984,8 @@ function notifId_(a, b) {
 /* --------------------------- notification log --------------------------- */
 
 function notifSheet_() {
-  var spreadsheet = CONFIG.SHEET_ID
-    ? SpreadsheetApp.openById(CONFIG.SHEET_ID)
+  var spreadsheet = sheetId_()
+    ? SpreadsheetApp.openById(sheetId_())
     : SpreadsheetApp.getActiveSpreadsheet();
   if (!spreadsheet) throw new Error('No spreadsheet found for the notification log.');
 

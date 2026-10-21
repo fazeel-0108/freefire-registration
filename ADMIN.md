@@ -95,6 +95,12 @@ It is never sent anywhere except the Apps Script endpoint.
 
 ## 4. Authentication model — and its honest limitation
 
+> **Superseded.** Organiser IDs, personal PINs, roles, expiring sessions,
+> lockout, account management and an audit trail now exist. See
+> [ORGANISERS.md](ORGANISERS.md). The shared key described below is kept only as
+> a Super Admin recovery credential and should be deleted once every organiser
+> has an account.
+
 **What protects the data:** every admin call is `POST <web-app-url>?action=admin`
 with a JSON body. `adminHandle_()` verifies the key **before** reading a single
 cell, using a constant-time comparison against the value in Script Properties.
@@ -189,13 +195,47 @@ the "Registration open" pill once the new backend answers `/exec?action=stats`.
 - **Search** — team name, department, player name or record id.
 - **Filters** — status chips and a department list built from the data.
 - **Details drawer** — full roster with a WhatsApp link per player, status
-  buttons, an internal note, and *Copy WhatsApp message* (it copies text to your
-  clipboard; **nothing is sent automatically**).
+  buttons, an internal note, and *Copy WhatsApp message*. Approving a team also
+  opens WhatsApp with the approval message ready to send — see below.
 - **Reject** and other destructive actions ask for confirmation first.
+- **Payments to review** — holds every gateway payment this project refused to
+  register on its own (weak YouPI verification, wrong amount, event full at the
+  moment the money landed). *Accept* asks for a note saying how you checked the
+  money, then saves the team as `ONLINE`/`PAID` with your name on the row and a
+  `payment-manual-accept` audit entry. *Reject* asks for a reason and closes the
+  attempt without registering anyone. The panel shows which gateway is live and
+  — for YouPI — the verification level it requires.
 - **Export CSV** — respects the current status/department/search filters and
   includes status, note and record id.
 - **Auto-refresh** every 30 seconds while the tab is visible.
 - Rejected and waitlisted teams stay in the sheet. Nothing is ever deleted.
+
+### Approve opens WhatsApp with the message typed
+
+**Approve** does both steps in one tap:
+
+1. It saves `APPROVED` to the sheet and waits for the server to confirm the
+   write. Nothing opens before that confirmation.
+2. Only then it opens `wa.me` in a new tab for the **team leader** — player 1,
+   the contact column of the sheet — with the message already filled in:
+   leader name, team name in bold, department, registration id, and an honest
+   payment line (a team with pending cash is told the ₹100 is still due).
+3. You press **Send** in WhatsApp. The dashboard never claims the message was
+   sent or delivered: opening WhatsApp only pre-fills it.
+
+What happens in the awkward cases:
+
+| Situation | What the dashboard does |
+| --- | --- |
+| Leader's number missing or invalid | Asks which player should get the message, listing only usable numbers. Nothing is guessed. |
+| No usable number at all | Asks for confirmation, then saves the approval without a message. |
+| Save failed (offline, stale, server error) | The team stays unapproved, the reserved tab is closed, and an error is shown. |
+| Browser blocked the new tab | The approval is saved and *Open WhatsApp for …* appears under **Contact** with the same message. |
+| Already approved | The button is disabled; approving again sends nothing. |
+
+Numbers are normalised to `91` + 10 digits and must start 6–9. A number that
+fails that check is refused rather than repaired, so a typo can never open a
+conversation with a stranger.
 
 ### WhatsApp notifications panel
 
@@ -233,20 +273,39 @@ WHATSAPP.md for the templates, the webhook and the consent rules.
 ## 9. Tests performed automatically
 
 `node verify-apps-script.js` runs the real `apps-script.js` against a mocked
-Apps Script runtime: **261 checks, all passing**. They cover the registration
+Apps Script runtime: **606 checks, all passing**. They cover the registration
 contract (2–4 players, duplicate team, shared phone, department list, counters,
-cache invalidation, error containment) and the dashboard API (deny by default,
+cache invalidation, error containment), the dashboard API (deny by default,
 key setup, wrong key, lockout and its expiry, listing, counts, opaque ids,
 status change persistence, stale updates, unknown statuses, malformed ids,
 notes, markup rejection, note length, rejected teams leaving the public
 counters while keeping their row, CSV shape, filters, search, pagination,
-unknown/missing admin actions).
+unknown/missing admin actions), the fee in Settings, the whole verified online
+payment path for **both gateways** (Razorpay QR and YouPI hosted checkout:
+forged callbacks, wrong amount, wrong order, duplicate callbacks, cancel,
+expiry, weak verification held for review, organiser accept/reject), and the
+review queue itself.
+
+`node verify-approve.js` extracts the approval and WhatsApp helpers from the real
+`admin.js` and runs **54 checks** without a browser: Indian number
+normalisation (spacing, `+91`, leading zero, and every shape that must be
+refused), URL encoding of the message, the exact approval text and its payment
+line for each payment status, recipient ordering, and that the Approve button is
+wired to the save-then-open flow with the tab closed on failure.
 
 The browser flows were exercised in Chromium against a local mock that speaks the
 same JSON contract: the mobile submit → popup → Done path at 375/390 px and in
 landscape, the 2/3/4-player registrations, every validation message, the server
 error path, the gate, list, filters, drawer, approve, reject-with-confirmation,
 note save, CSV payload, sign-out, the rules page and its print button.
+
+For this release the approve flow was driven end to end in the same mock:
+approve → one status POST → `wa.me/91…` opened with the exact message — plus the
+missing-leader picker, the no-number confirmation, a simulated network failure
+(tab closed, team still unapproved, Approve re-enabled), an already-approved
+team (no second POST) and the blocked-popup fallback link. The embedded preview
+browser refuses popups, so the phrase *Open WhatsApp for …* path is what it
+shows; on a real phone or desktop Chrome the tab opens by itself.
 
 ## 10. Manual tests still required (they need the live account)
 
@@ -270,9 +329,15 @@ and your sheet:
 
 ## 11. Known limitations
 
-- Shared dashboard key instead of per-organiser Google-identity login (§4).
-- No audit trail of who changed a status or when.
-- No automatic WhatsApp or email messages; the dashboard only copies text.
+- No per-organiser **Google-identity** login; organisers sign in with their own
+  id and PIN, so the audit trail records an organiser id and a device string
+  rather than a verified email address. See [ORGANISERS.md](ORGANISERS.md).
+- The audit trail covers sign-ins, logouts, refused attempts and account
+  changes. It does **not** yet record which organiser changed a team's status.
+- WhatsApp is **click-to-chat**: Approve opens WhatsApp with the message
+  pre-filled and the organiser presses Send. There is no automatic sending, and
+  no delivery state is claimed. The Cloud API panel (WHATSAPP.md) is the only
+  automated path, and it is switched off until its credentials exist.
 - The CSV export returns every matching record in one response; fine for a
   campus event, not for tens of thousands of rows.
 - The dashboard lists at most 100 rows per request (`pageSize`), with pagination.
@@ -281,3 +346,59 @@ and your sheet:
 - Tournament dates, prizes, fees, scoring and penalties are **placeholders** on
   `rules.html`, marked `[Organizer: …]`. They must be filled in by the
   organisers; nothing invented is presented as official.
+
+---
+
+## 12. Payment status (fee is sheet data, ₹100 to start)
+
+The fee lives in the **Settings** tab (`entry_fee`) and is edited in the
+dashboard's *Tournament settings* panel. It is copied onto the row when a team
+registers, so a later price change never rewrites what an older team owed. A
+team of 2, 3 or 4 players all pay the same fee.
+
+| Team chose | Saved as | Who moves it to `PAID` |
+| --- | --- | --- |
+| **Online** (gateway) | `ONLINE` / **`PAID`** — written by the backend the moment the gateway reports a confirmed payment for that session, in INR, for the exact fee snapshot | Nobody. The gateway's API answer is the proof; the row carries the order id, payment id, paid amount, currency, verification time and provider. With **YouPI**, only a payment at the required verification level (default 2 = bank SMS + Gmail) counts. |
+| **Cash** | `CASH` / **`PENDING`** | You, once the notes are in your hand — in the sheet on your phone, or from the dashboard. |
+
+The gateway is chosen by the `payment_provider` Script Property: `youpi`
+(default) or `razorpay` as a fallback. The **Tournament settings** panel shows
+which one is live, whether it is configured, and — for YouPI — the verification
+level it requires. Until it is configured, Online is offered as unavailable and
+Cash still works.
+
+A registration that simply claims `ONLINE` is refused by the backend. There is
+no "I have paid" button anywhere on the site, and a typed UTR proves nothing.
+If a payment arrives for the wrong amount, or YouPI reports it below the
+required level, the row is **not** created. The attempt waits in
+**Payments to review** on the dashboard (and in **PaymentDrafts** in the sheet):
+
+| Reason shown | What it means |
+| --- | --- |
+| *Gateway could not verify strongly enough* | YouPI saw money but only through one observer. Check your bank/UPI app before accepting. |
+| *Amount or currency did not match the fee* | The team paid something other than the fee snapshot. Refund or ask them to pay the difference. |
+| *Paid, but the team could not be added* | The event filled up or the name was taken between opening the checkout and paying. |
+
+**Accept** asks for a note ("seen in UPI app, UTR …"), writes the team as
+`ONLINE`/`PAID` with your name and the note on the row, and adds a
+`payment-manual-accept` audit entry. Pressing it twice cannot add a second team.
+**Reject** asks for a reason, closes the attempt, and registers nobody.
+
+Online payment is only offered when the selected provider's credentials exist in
+Script Properties; until then the page says so and Cash still works. Setup for
+both gateways, the security model, the tests and the YouPI PG assessment are in
+[PAYMENTS.md](PAYMENTS.md).
+
+`upi-qr.png` (the original FamApp image) and `upi-pay-qr.png` (its scannable
+copy) are still in the repository as the organiser's own payment record, but the
+site no longer collects through them: a personal UPI QR has no API to ask
+whether the money arrived.
+
+**From the phone (Google Sheets app)** — open the `Registrations` tab, find the
+row, tap the **Payment Status** cell and pick `PAID` from the dropdown. The
+dashboard reads the sheet on every refresh, so the change appears there too.
+**From the dashboard** — Payments tab, filter *Cash pending*, press *Mark paid*,
+and confirm; it writes the same cell plus who did it and when.
+
+Approval is separate. A paid team is not approved, and an approved team is not
+paid. Rejecting a team never erases its payment row.
