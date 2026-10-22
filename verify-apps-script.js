@@ -2241,6 +2241,122 @@ check('the dashboard sees the same gateway',
   (() => { const s = adminCall({ action: 'settings-get', session: superSession });
     return s.ok === true && s.provider === 'YOUPI' && s.minVerification === 2; })(), 'settings-get');
 
+/* --- a timed-out create reuses the persisted token/order id --- */
+resetFetch();
+queueFetch({ throws: 'simulated timeout after request was sent' });
+const yTimedOut = yPost('payorder', validPayload('YouPI Timeout Retry'));
+check('a failed create leaves a persisted CREATING draft',
+  yTimedOut.ok === false && yTimedOut.code === 'PROVIDER' &&
+  (() => { const drafts = spreadsheet.getSheetByName('PaymentDrafts');
+    const rows = drafts.getRange(2, 1, drafts.getLastRow() - 1, sandbox.DRAFT_HEADERS.length).getValues();
+    return rows.some(row => row[3] === 'YouPI Timeout Retry' && row[12] === 'CREATING' && !!row[0]); })());
+
+const timeoutDrafts = spreadsheet.getSheetByName('PaymentDrafts');
+const timeoutRows = timeoutDrafts.getRange(2, 1, timeoutDrafts.getLastRow() - 1, sandbox.DRAFT_HEADERS.length).getValues();
+const timeoutDraft = timeoutRows.map((row, index) => ({ row, index }))
+  .find(item => item.row[3] === 'YouPI Timeout Retry');
+const timeoutToken = String(timeoutDraft.row[0]);
+const timeoutOrderId = 'QQSGP-' + timeoutToken.slice(0, 18).toUpperCase();
+resetFetch();
+yQueueEcho({
+  paymentId: 'pay_YOUPI_TIMEOUT_RETRY', amount: '100.00',
+  amountPaise: '10000', currency: 'INR', status: 'INITIATED',
+  checkoutUrl: 'http://127.0.0.1:7000/checkout/pay_YOUPI_TIMEOUT_RETRY'
+});
+const yRetried = yPost('payorder', validPayload('YouPI Timeout Retry'));
+const retriedDraft = yDraft(timeoutToken);
+check('retry reuses the original token and order id',
+  yRetried.ok === true && yRetried.token === timeoutToken &&
+  fetchCalls.length === 1 && JSON.parse(fetchCalls[0].options.payload).orderId === timeoutOrderId);
+check('successful retry updates the same draft to OPEN',
+  retriedDraft && String(retriedDraft.values[12]) === 'OPEN' &&
+  String(retriedDraft.values[9]) === timeoutOrderId &&
+  String(retriedDraft.values[13]) === 'pay_YOUPI_TIMEOUT_RETRY');
+check('the retry added no second draft row for the team',
+  (() => { const drafts = spreadsheet.getSheetByName('PaymentDrafts');
+    const rows = drafts.getRange(2, 1, drafts.getLastRow() - 1, sandbox.DRAFT_HEADERS.length).getValues();
+    return rows.filter(row => row[3] === 'YouPI Timeout Retry').length === 1; })());
+
+/* --- a second click while the checkout is live reuses it, silently --- */
+resetFetch();
+const ySecondClick = yPost('payorder', validPayload('YouPI Timeout Retry'));
+check('a second click reuses the open checkout without calling the gateway',
+  ySecondClick.ok === true && ySecondClick.resumed === true &&
+  ySecondClick.token === timeoutToken && fetchCalls.length === 0,
+  JSON.stringify(ySecondClick));
+
+/* --- a fee change never reorders an attempt already in flight --- */
+resetFetch();
+queueFetch({ throws: 'simulated timeout before the gateway answered' });
+const yFeeOpen = yPost('payorder', validPayload('YouPI Fee Snapshot'));
+const feeDrafts = spreadsheet.getSheetByName('PaymentDrafts');
+const feeRows = feeDrafts.getRange(2, 1, feeDrafts.getLastRow() - 1, sandbox.DRAFT_HEADERS.length).getValues();
+const feeToken = String(feeRows.find(row => row[3] === 'YouPI Fee Snapshot')[0]);
+check('the failed open still persisted the attempt at the old fee',
+  yFeeOpen.ok === false && !!feeToken &&
+  Number(feeRows.find(row => row[3] === 'YouPI Fee Snapshot')[7]) === 100);
+adminCall({ action: 'settings-set', session: superSession, fee: 250 });
+resetFetch();
+yQueueEcho({
+  paymentId: 'pay_YOUPI_FEE_SNAPSHOT', amount: '100.00',
+  amountPaise: '10000', currency: 'INR', status: 'INITIATED',
+  checkoutUrl: 'http://127.0.0.1:7000/checkout/pay_YOUPI_FEE_SNAPSHOT'
+});
+const yFeeRetry = yPost('payorder', validPayload('YouPI Fee Snapshot'));
+const feeRetryBody = JSON.parse(fetchCalls[0].options.payload);
+check('the retry still asks for the fee the team originally saw',
+  feeRetryBody.amount === '100.00' && yFeeRetry.ok === true && yFeeRetry.amount === 100 &&
+  yFeeRetry.token === feeToken,
+  JSON.stringify({ sent: feeRetryBody.amount, answered: yFeeRetry.amount }));
+adminCall({ action: 'settings-set', session: superSession, fee: 100 });
+
+/* --- the sheet failing is never reported as paid --- */
+resetFetch();
+yQueueEcho({
+  paymentId: 'pay_YOUPI_SHEET_DOWN', amount: '100.00',
+  amountPaise: '10000', currency: 'INR', status: 'INITIATED',
+  checkoutUrl: 'http://127.0.0.1:7000/checkout/pay_YOUPI_SHEET_DOWN'
+});
+const ySheetOpen = yPost('payorder', validPayload('YouPI Sheet Down'));
+const sheetDownDraft = yDraft(ySheetOpen.token);
+const realGetRange = sheet.getRange.bind(sheet);
+sheet.getRange = function (row, col, numRows, numCols) {
+  // Only the write of a NEW registration row fails; every read keeps working.
+  // "The target row is still empty" is what separates that write from any
+  // read of existing data, even when the sheet holds a single registration.
+  const target = sheet.grid.cells[row - 1] || [];
+  const writingNewRow = row === sheet.getLastRow() + 1 &&
+    target.length > 0 && target.every(value => value === '');
+  if (writingNewRow && numRows === 1 && numCols === sandbox.HEADERS.length) {
+    return {
+      setNumberFormat() { return this; },
+      setValues() { throw new Error('simulated sheet outage'); }
+    };
+  }
+  return realGetRange(row, col, numRows, numCols);
+};
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI_SHEET_DOWN', orderId: String(sheetDownDraft.values[9]),
+  amount: '100.00', amountPaise: '10000', currency: 'INR', status: 'SUCCESS', verificationLevel: 2
+});
+const ySheetDown = yPost('paystatus', { token: ySheetOpen.token });
+sheet.getRange = realGetRange;
+check('a sheet failure is reported as an error, never as paid',
+  ySheetDown.ok === false && ySheetDown.state === undefined, JSON.stringify(ySheetDown));
+check('the failed write registered no team', yRows('YouPI Sheet Down') === 0);
+
+// The money is not lost: the next poll registers the team exactly once.
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI_SHEET_DOWN', orderId: String(sheetDownDraft.values[9]),
+  amount: '100.00', amountPaise: '10000', currency: 'INR', status: 'SUCCESS', verificationLevel: 2
+});
+const ySheetRecovered = yPost('paystatus', { token: ySheetOpen.token });
+check('the next poll after the outage registers the team exactly once',
+  ySheetRecovered.ok === true && ySheetRecovered.state === 'PAID' && yRows('YouPI Sheet Down') === 1,
+  JSON.stringify(ySheetRecovered));
+
 /* --- opening a payment --- */
 resetFetch();
 yQueueEcho({

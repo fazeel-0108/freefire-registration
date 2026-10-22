@@ -25,7 +25,7 @@ team.
 ### Flow, end to end
 
 ```
-form ──► POST ?action=payorder   validate, snapshot fee, open a session, keep a draft
+form ──► POST ?action=payorder   validate, snapshot fee, persist a draft (CREATING), then open a session
                   │
                   ▼
         gateway UI shown, page polls ──► POST ?action=paystatus (token)
@@ -49,7 +49,7 @@ full of `"event": "SUCCESS"` registers nobody.
 | Route | Purpose |
 | --- | --- |
 | `?action=config` (GET) | live fee, currency, provider, whether online is configured, required verification level |
-| `?action=payorder` | validate form, snapshot fee, open a session, store a draft |
+| `?action=payorder` | validate form, snapshot fee, persist a draft, open a session; a retry reuses the same draft |
 | `?action=paystatus` | poll: ask the gateway, finalise when paid, report `PENDING` / `PAID` / `REVIEW` / `EXPIRED` / `CANCELLED` |
 | `?action=paycancel` | cancel the draft, best-effort close the session at the gateway |
 | `?action=paywebhook` | gateway callback (doorbell only) |
@@ -73,6 +73,10 @@ New tabs:
   than reshaped. An older tab is widened and its header row extended on first
   use, so nothing is inserted or moved.
 
+  A draft is written with status `CREATING` *before* the gateway is called and
+  flipped to `OPEN` once the session exists, so a create that times out is
+  retried with the same token and order id instead of minting a second order.
+
 `Audit` gains `payment-opened`, `payment-verified`, `payment-unverified`,
 `payment-mismatch`, `payment-cancelled`, `payment-no-slot`,
 `payment-manual-accept`, `payment-rejected`, `settings-fee`.
@@ -87,6 +91,12 @@ New tabs:
   `NEEDS REVIEW`; no team is registered until a human accepts them.
 - Duplicate callbacks and repeated polls return the same registration id; the
   finalise step runs under `LockService` and re-reads the draft first.
+- A create that times out leaves the `CREATING` draft in place: the next
+  attempt reuses the same token, so the deterministic order id makes YouPI
+  return the session it already opened rather than creating a competing one.
+  The retry sends the draft's own fee snapshot, never today's fee. Two clicks
+  arriving together converge on one draft, because the token is minted and
+  persisted under the script lock.
 - If the event filled up or the name was registered between opening the session
   and paying, the money is recorded (`PAID - NO SLOT`) and audited.
 - No secret reaches the browser: keys are read from Script Properties inside

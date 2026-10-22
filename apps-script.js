@@ -2599,6 +2599,7 @@ var DCOL = {
 
 var DRAFT = {
   OPEN: 'OPEN',
+  CREATING: 'CREATING',
   FINALISED: 'FINALISED',
   CANCELLED: 'CANCELLED',
   EXPIRED: 'EXPIRED',
@@ -2934,7 +2935,7 @@ function saveDraft_(draft) {
   var row = [
     draft.token, new Date(), draft.expiresAt, draft.teamName, draft.department,
     JSON.stringify(draft.members), draft.consent ? 'YES' : 'NO', draft.fee,
-    draft.currency, draft.orderId, '', '', DRAFT.OPEN,
+    draft.currency, draft.orderId || '', '', '', draft.status || DRAFT.OPEN,
     '', '', '', '', 'YOUPI', draft.checkoutUrl || '', ''
   ];
   var target = sheet.getLastRow() + 1;
@@ -2946,6 +2947,9 @@ function saveDraft_(draft) {
 
 function setDraftRow_(sheet, row, fields) {
   if (fields.status) sheet.getRange(row, DCOL.STATUS).setValue(fields.status);
+  if (fields.orderId !== undefined) sheet.getRange(row, DCOL.ORDER).setValue(fields.orderId);
+  if (fields.checkoutUrl !== undefined) sheet.getRange(row, DCOL.CHECKOUT).setValue(fields.checkoutUrl);
+  if (fields.provider !== undefined) sheet.getRange(row, DCOL.PROVIDER).setValue(fields.provider);
   if (fields.paymentId !== undefined) sheet.getRange(row, DCOL.PAYMENT).setValue(fields.paymentId);
   if (fields.paidAmount !== undefined) sheet.getRange(row, DCOL.PAID_AMOUNT).setValue(fields.paidAmount);
   if (fields.registrationId !== undefined) sheet.getRange(row, DCOL.REG).setValue(fields.registrationId);
@@ -2977,7 +2981,7 @@ function openDraftForTeam_(sheet, teamName) {
   var drafts = allDrafts_(sheet);
   for (var i = 0; i < drafts.length; i++) {
     var draft = drafts[i];
-    if (draft.status !== DRAFT.OPEN) continue;
+    if (draft.status !== DRAFT.OPEN && draft.status !== DRAFT.CREATING) continue;
     if (draftExpired_(draft)) continue;
     if (cleanText_(draft.teamName).toLowerCase() === target) return draft;
   }
@@ -2991,6 +2995,53 @@ function openDraftForTeam_(sheet, teamName) {
  * are kept in PaymentDrafts, and the page receives a token plus the image URL
  * of a single-use UPI QR for exactly that amount.
  */
+/**
+ * Answers a payorder request from an attempt that already exists.
+ *
+ * A draft that never received the gateway's answer (status CREATING, or an
+ * OPEN row still missing its ids) is retried with the SAME token: the order
+ * id is derived from that token, so YouPI returns the session it already
+ * opened instead of creating a competing one. The amount sent is the draft's
+ * own fee snapshot, so a later fee change cannot reprice an order that is
+ * already in flight.
+ */
+function resumeYoupiDraft_(draftSheet, open) {
+  // A previous request may have timed out after YouPI created the session
+  // but before the response reached Apps Script. Retry with the SAME token,
+  // so the deterministic orderId lets YouPI return the existing session.
+  if (open.status === DRAFT.CREATING || !open.orderId || !open.checkoutUrl) {
+    var resumedCreate = youpiCreatePayment_(open.token, open.teamName, open.fee, open.expiresAt);
+    if (!resumedCreate.ok) {
+      orgAudit_(PAY_ACTOR, 'payment-open-retry-failed', open.token,
+        'youpi create retry failed: ' + cleanText_(resumedCreate.error), 'failed');
+      return { ok: false, code: 'PROVIDER', error: 'The payment could not be started yet. Please retry shortly.' };
+    }
+    setDraftRow_(draftSheet, open.row, {
+      status: DRAFT.OPEN,
+      orderId: resumedCreate.orderId,
+      paymentId: resumedCreate.paymentId,
+      checkoutUrl: resumedCreate.checkoutUrl,
+      provider: 'YOUPI'
+    });
+    open.status = DRAFT.OPEN;
+    open.orderId = resumedCreate.orderId;
+    open.paymentId = resumedCreate.paymentId;
+    open.checkoutUrl = resumedCreate.checkoutUrl;
+    open.provider = 'YOUPI';
+  }
+  return {
+    ok: true,
+    resumed: true,
+    token: open.token,
+    amount: open.fee,
+    currency: open.currency || CONFIG.PAYMENT_CURRENCY,
+    provider: open.provider || 'YOUPI',
+    hosted: true,
+    checkoutUrl: open.checkoutUrl,
+    expiresAt: open.expiresAt instanceof Date ? open.expiresAt.toISOString() : ''
+  };
+}
+
 function publicPaymentOrder_(e) {
   if (!youpiConfigured_()) {
     return {
@@ -3039,19 +3090,12 @@ function publicPaymentOrder_(e) {
   // Resume an attempt that is still inside its window instead of opening a
   // second QR for the same team.
   var open = openDraftForTeam_(draftSheet, team.teamName);
-  if (open) {
-    return {
-      ok: true,
-      resumed: true,
-      token: open.token,
-      amount: open.fee,
-      currency: open.currency || CONFIG.PAYMENT_CURRENCY,
-      provider: open.provider || 'YOUPI',
-      hosted: true,
-      checkoutUrl: open.checkoutUrl,
-      expiresAt: open.expiresAt instanceof Date ? open.expiresAt.toISOString() : ''
-    };
-  }
+  if (open) return resumeYoupiDraft_(draftSheet, open);
+
+  var token = null;
+  var expires = null;
+  var draftRow = 0;
+  var raced = null;
 
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(CONFIG.LOCK_TIMEOUT_MS)) {
@@ -3066,44 +3110,64 @@ function publicPaymentOrder_(e) {
     if (hasTeamRegisteredToday_(sheet, team.teamName)) {
       return { ok: false, code: 'DUPLICATE', error: 'A team named "' + team.teamName + '" has already registered today.' };
     }
+
+    // The check above ran before this execution queued for the lock, so it is
+    // repeated here. Two clicks arriving together both see "no attempt yet";
+    // without this re-check each one would persist its own token and open a
+    // competing order for the same team. The network call stays outside the
+    // lock - only the one-writer decision is inside it.
+    raced = openDraftForTeam_(draftSheet, team.teamName);
+    if (!raced) {
+      token = newPaymentToken_();
+      expires = new Date(new Date().getTime() + CONFIG.PAYMENT_DRAFT_TTL_MINUTES * 60 * 1000);
+
+      // Persist the token and immutable fee/form snapshot BEFORE contacting
+      // YouPI. If the request times out after YouPI creates the order, the
+      // next attempt finds this CREATING draft and retries with the same
+      // deterministic orderId.
+      draftRow = saveDraft_({
+        token: token,
+        expiresAt: expires,
+        teamName: team.teamName,
+        department: team.department,
+        members: team.members,
+        consent: team.whatsappConsent === true,
+        fee: fee,
+        currency: CONFIG.PAYMENT_CURRENCY,
+        orderId: '',
+        checkoutUrl: '',
+        provider: 'YOUPI',
+        status: DRAFT.CREATING
+      });
+    }
   } finally {
     try { lock.releaseLock(); } catch (ignored) {}
   }
 
-  var token = newPaymentToken_();
-  var expires = new Date(new Date().getTime() + CONFIG.PAYMENT_DRAFT_TTL_MINUTES * 60 * 1000);
+  // The other request already owns this team's attempt: continue that one
+  // rather than minting a second token beside it.
+  if (raced) return resumeYoupiDraft_(draftSheet, raced);
 
   var created = youpiCreatePayment_(token, team.teamName, fee, expires);
   if (!created.ok) {
     orgAudit_(PAY_ACTOR, 'payment-open-failed', token,
-      'youpi create failed: ' + cleanText_(created.error), 'failed');
-    return { ok: false, code: 'PROVIDER', error: 'The payment could not be started. Please try again.' };
+      'youpi create failed; draft retained for idempotent retry: ' + cleanText_(created.error), 'failed');
+    return { ok: false, code: 'PROVIDER', error: 'The payment could not be started yet. Please retry shortly.' };
   }
   var orderId = created.orderId;
   var paymentId = created.paymentId;
   var checkoutUrl = created.checkoutUrl;
 
-  var draft = {
-    token: token,
-    expiresAt: expires,
-    teamName: team.teamName,
-    department: team.department,
-    members: team.members,
-    consent: team.whatsappConsent === true,
-    fee: fee,
-    currency: CONFIG.PAYMENT_CURRENCY,
+  // Store the provider identity only after a valid response. A retry after an
+  // ambiguous timeout reuses the persisted token/orderId rather than minting
+  // another session.
+  setDraftRow_(draftSheet, draftRow, {
+    status: DRAFT.OPEN,
     orderId: orderId,
+    paymentId: paymentId,
     checkoutUrl: checkoutUrl,
     provider: 'YOUPI'
-  };
-  var draftRow = saveDraft_(draft);
-
-  // A YouPI session is opened with the merchant key; its payment id exists
-  // from the start, so it belongs on the draft immediately. It is NOT a
-  // payment, and nothing is marked paid until status is SUCCESS.
-  if (paymentId) {
-    setDraftRow_(draftSheet, draftRow, { paymentId: paymentId });
-  }
+  });
 
   orgAudit_(PAY_ACTOR, 'payment-opened', orderId || paymentId,
     team.teamName + ' · ₹' + fee + ' ' + CONFIG.PAYMENT_CURRENCY + ' · YOUPI' +
