@@ -17,7 +17,10 @@
    the same Web App deployment. */
 const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_-E7L9mE7xGk_Fypf6tnTvAbG4wZu9idrycpawkakihtgKndDMknDLdZnt333T3y-/exec";
 
-const REQUEST_TIMEOUT_MS = 20000;
+/* Apps Script answers a cold request in 20-30 seconds. A shorter timeout used
+   to report "took too long" for a save that had actually gone through, which
+   invited the organiser to press the button a second time. */
+const REQUEST_TIMEOUT_MS = 45000;
 const AUTO_REFRESH_MS = 30000;
 const PAGE_SIZE = 25;
 const STATUSES = ["PENDING", "APPROVED", "REJECTED", "WAITLISTED"];
