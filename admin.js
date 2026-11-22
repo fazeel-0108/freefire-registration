@@ -2473,6 +2473,7 @@ const resultShare = el("resultShare");
 const leaderboardShare = el("leaderboardShare");
 const scheduleCopy = el("scheduleCopy");
 const scheduleShare = el("scheduleShare");
+const addRoomBtn = el("addRoomBtn");
 
 const MATCH_MAPS = ["Bermuda", "Purgatory", "Kalahari", "Alpine", "NeXTerra", "Solara", "Bermuda Remastered", "Purgatory Remastered"];
 
@@ -2616,6 +2617,9 @@ function renderRoomChart(match, results) {
       <td class="cell-team">${assignment ? escapeHtml(assignment.teamName) : '<span class="hint">Open slot</span>'}</td>
       <td>${result ? "#" + result.placement + " · " + result.kills + " kills · <b>" + result.total + " pts</b>" : "—"}</td>
       <td>${isQualified ? '<span class="badge badge-q">QUALIFIED</span>' : (result ? '<span class="badge">PLAYED</span>' : '<span class="badge">OPEN</span>')}</td>
+      <td class="cell-actions">${assignment
+        ? `<button class="btn btn-ghost btn-sm" type="button" data-remove-team="${escapeHtml(assignment.teamId)}" data-remove-match="${escapeHtml(match.id)}">Remove</button>`
+        : ""}</td>
     </tr>`;
   }
   roomChartRows.innerHTML = rows;
@@ -2787,13 +2791,15 @@ function renderTournament() {
     ? eligible.map((team) => `<option value="${escapeHtml(team.id)}">${escapeHtml(team.teamName)}</option>`).join("")
     : '<option value="">Assign an approved team first</option>';
 
-  matchSummaryEl.textContent = t.matches.length + " fixed matches · " + approved.length + " approved teams · 12-team rooms · top 6 qualify";
+  matchSummaryEl.textContent = t.matches.length + " rooms · " + approved.length + " approved teams · 12 slots per room · top 6 qualify";
   matchRowsEl.innerHTML = t.matches.map((m) => `<tr data-match="${m.id}">
     <td class="cell-team">${m.id}<small>${escapeHtml(stageText(m))}${m.map ? " · " + escapeHtml(m.map) : ""}</small></td>
     <td>${escapeHtml(m.scheduledLabel)}</td><td><span class="badge">${m.status}</span></td>
     <td>${m.hasRoom ? "Set" : "—"}<small>${m.roomReleased ? "Released" : escapeHtml(m.releaseLabel || "No release")}</small></td>
     <td>${m.teamCount}/12</td><td>${m.publishedCount}/${m.resultCount} published</td>
-    <td><button class="btn btn-ghost btn-sm" data-edit-match="${m.id}" type="button">Edit</button></td></tr>`).join("");
+    <td class="cell-actions"><button class="btn btn-ghost btn-sm" data-edit-match="${m.id}" type="button">Edit</button>${
+      m.removable ? `<button class="btn btn-ghost btn-sm" data-remove-room="${m.id}" type="button">Delete</button>` : ""
+    }</td></tr>`).join("");
 
   const slots = resultSlotMap(match);
   const standings = resultStandings(selectedMatch, t.results, resultTieBreakers());
@@ -2826,7 +2832,42 @@ async function loadTournament() {
   renderTournament();
 }
 
-matchRowsEl && matchRowsEl.addEventListener("click", (event) => {
+addRoomBtn && addRoomBtn.addEventListener("click", async () => {
+  addRoomBtn.disabled = true;
+  const result = await api("match-add", {});
+  addRoomBtn.disabled = false;
+  if (!result.ok) return toast(result.error, "error");
+  toast(result.message || "Room added.", "ok");
+  await loadTournament();
+  if (result.match && result.match.id) {
+    [matchSelect, assignMatch, resultMatch].forEach((select) => { if (select) select.value = result.match.id; });
+    renderTournament();
+  }
+});
+roomChartRows && roomChartRows.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-remove-team]");
+  if (!button) return;
+  const matchId = button.dataset.removeMatch;
+  const teamId = button.dataset.removeTeam;
+  const name = (button.closest("tr") && button.closest("tr").querySelector(".cell-team")
+    ? button.closest("tr").querySelector(".cell-team").textContent.trim() : "This team");
+  if (!confirm("Remove " + name + " from " + matchId + "? Their slot becomes free for another team.")) return;
+  const result = await api("match-unassign", { matchId, teamId });
+  if (!result.ok) return toast(result.error, "error");
+  toast(result.message || "Team removed.", "ok");
+  await loadTournament();
+});
+matchRowsEl && matchRowsEl.addEventListener("click", async (event) => {
+  const removeRoom = event.target.closest("[data-remove-room]");
+  if (removeRoom && state.tournament) {
+    const id = removeRoom.dataset.removeRoom;
+    if (!confirm("Delete room " + id + "? Only an empty room added from the dashboard can be deleted.")) return;
+    const removed = await api("match-remove", { matchId: id });
+    if (!removed.ok) return toast(removed.error, "error");
+    toast(removed.message || "Room deleted.", "ok");
+    await loadTournament();
+    return;
+  }
   const button = event.target.closest("[data-edit-match]");
   if (!button || !state.tournament) return;
   const selected = state.tournament.matches.find((m) => m.id === button.dataset.editMatch);
@@ -2881,7 +2922,7 @@ chartShareQualified && chartShareQualified.addEventListener("click", () => {
 chartCopyAll && chartCopyAll.addEventListener("click", () => {
   if (!state.tournament) return;
   const text = state.tournament.matches.map((match) => roomChartText(match, state.tournament.results)).join("\n\n————————————\n\n");
-  copyChart(text, "All six room charts copied.");
+  copyChart(text, "All room charts copied.");
 });
 scheduleCopy && scheduleCopy.addEventListener("click", () => {
   if (!state.tournament) return;

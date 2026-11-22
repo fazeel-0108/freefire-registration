@@ -1660,6 +1660,8 @@ var ORG_ACTION_PERMISSION = {
   'match-save': 'matches.manage',
   'match-assign': 'matches.manage',
   'match-unassign': 'matches.manage',
+  'match-add': 'matches.manage',
+  'match-remove': 'matches.manage',
   'result-save': 'results.manage',
   'result-approve': 'results.manage',
   'result-publish': 'results.manage',
@@ -4367,6 +4369,8 @@ function adminHandle_(e) {
   if (action === 'match-save') return adminMatchSave_(payload, auth.actor);
   if (action === 'match-assign') return adminMatchAssign_(payload, auth.actor);
   if (action === 'match-unassign') return adminMatchUnassign_(payload, auth.actor);
+  if (action === 'match-add') return adminMatchAdd_(payload, auth.actor);
+  if (action === 'match-remove') return adminMatchRemove_(payload, auth.actor);
   if (action === 'result-save') return adminResultSave_(payload, auth.actor);
   if (action === 'result-approve') return adminResultApprove_(payload, auth.actor);
   if (action === 'result-publish') return adminResultPublish_(payload, auth.actor);
@@ -6406,8 +6410,37 @@ var MATCH_STATUSES = ['SCHEDULED', 'LIVE', 'COMPLETED', 'CANCELLED'];
 var RESULT_STATUSES = ['DRAFT', 'APPROVED', 'PUBLISHED'];
 var MATCH_TEAM_STATES = ['ACTIVE', 'WITHDRAWN'];
 
+var MATCH_IDS_PROPERTY = 'match_ids';
+
+/**
+ * The qualifier rooms are fixed in CONFIG, but an organiser can add more rooms
+ * (M7, M8 …) from the dashboard. The extra ids are remembered in Script
+ * Properties so every later read, assignment and public page sees the same
+ * room list. Ids are always ordered by their number, never as strings.
+ */
 function tournamentMatchIds_() {
-  return (CONFIG.MATCH_IDS || ['M1', 'M2', 'M3', 'M4', 'M5', 'M6']).slice(0);
+  var base = (CONFIG.MATCH_IDS || ['M1', 'M2', 'M3', 'M4', 'M5', 'M6']).slice(0);
+  var extra = [];
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty(MATCH_IDS_PROPERTY) || '';
+    if (raw) {
+      var parsed = JSON.parse(raw);
+      if (parsed && parsed.length !== undefined) extra = parsed;
+    }
+  } catch (ignored) {
+    extra = [];
+  }
+  var ids = [];
+  var seen = {};
+  var all = base.concat(extra);
+  for (var i = 0; i < all.length; i++) {
+    var id = cleanText_(all[i]).toUpperCase();
+    if (!/^M[0-9]{1,3}$/.test(id) || seen[id]) continue;
+    seen[id] = true;
+    ids.push(id);
+  }
+  ids.sort(function (a, b) { return (Number(a.slice(1)) || 0) - (Number(b.slice(1)) || 0); });
+  return ids.length ? ids : ['M1'];
 }
 
 function normaliseMatchId_(value) {
@@ -6814,9 +6847,13 @@ function adminTournament_() {
       teamId: a.teamId, teamName: a.teamName, slot: a.slot, assignedAt: a.assignedAt
     });
   }
+  var fixedRooms = CONFIG.MATCH_IDS || ['M1', 'M2', 'M3', 'M4', 'M5', 'M6'];
   for (var m = 0; m < matches.length; m++) {
     matches[m].teams = byMatch[matches[m].id] || [];
     matches[m].teamCount = matches[m].teams.length;
+    // The six qualifier rooms are permanent; a room added from the dashboard
+    // can be deleted again while it is still empty.
+    matches[m].removable = fixedRooms.indexOf(matches[m].id) === -1;
     matches[m].resultCount = results.filter(function (r) { return r.matchId === matches[m].id; }).length;
     matches[m].publishedCount = results.filter(function (r) {
       return r.matchId === matches[m].id && r.status === 'PUBLISHED';
@@ -6839,7 +6876,7 @@ function adminTournament_() {
 
 function adminMatchSave_(payload, actor) {
   var matchId = normaliseMatchId_(payload.matchId);
-  if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose one of M1-M6.' };
+  if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose a match room.' };
 
   var map = cleanText_(payload.map).slice(0, 40);
   var status = normaliseMatchStatus_(payload.status);
@@ -6988,6 +7025,99 @@ function adminMatchUnassign_(payload, actor) {
   matchTeamSheet_().getRange(target.row, MATCH_TEAM_COL.STATE).setValue('WITHDRAWN');
   orgAudit_(actor, 'match-unassign', matchId + ':' + teamId, target.teamName + ' withdrawn', 'ok');
   return { ok: true, message: target.teamName + ' removed from ' + matchId + '.' };
+}
+
+/**
+ * Adds one more 12-slot room after the last existing room. The id itself is
+ * never taken from the browser: the next free number is worked out here, so a
+ * stale dashboard tab cannot create the same room twice.
+ */
+function adminMatchAdd_(payload, actor) {
+  var ids = tournamentMatchIds_();
+  if (ids.length >= 60) {
+    return { ok: false, code: 'LIMIT', error: 'That is already 60 rooms. Leave one unused before adding another.' };
+  }
+
+  var next = 1;
+  for (var i = 0; i < ids.length; i++) {
+    var no = Number(ids[i].slice(1)) || 0;
+    if (no >= next) next = no + 1;
+  }
+
+  var id = 'M' + next;
+  var stage = normaliseMatchStage_(payload.stage || 'QUALIFIER');
+  var room = cleanText_(payload.roomLabel).slice(0, 20);
+
+  try {
+    PropertiesService.getScriptProperties()
+      .setProperty(MATCH_IDS_PROPERTY, JSON.stringify(ids.concat([id])));
+  } catch (error) {
+    return { ok: false, code: 'STORE', error: 'The room list could not be saved. Try again.' };
+  }
+
+  // ensureTournamentSheets_ reads the list that was just saved, so the new
+  // Matches row (and the two other tabs, if this is the first run) appears now.
+  var sheet = matchSheet_();
+  var matches = readMatches_();
+  var fresh = null;
+  for (var m = 0; m < matches.length; m++) if (matches[m].id === id) fresh = matches[m];
+  if (!fresh) {
+    return { ok: false, code: 'MATCH', error: 'The new room row could not be created. Reload the dashboard.' };
+  }
+
+  var now = new Date();
+  sheet.getRange(fresh.row, MATCH_COL.STAGE).setValue(stage);
+  sheet.getRange(fresh.row, MATCH_COL.ROOM).setValue(room);
+  sheet.getRange(fresh.row, MATCH_COL.UPDATED).setValue(now);
+  sheet.getRange(fresh.row, MATCH_COL.UPDATED_BY).setValue(actor ? actor.id : 'organiser');
+
+  var all = readMatches_();
+  for (var a = 0; a < all.length; a++) if (all[a].id === id) fresh = all[a];
+  fresh.teams = [];
+  fresh.teamCount = 0;
+  fresh.resultCount = 0;
+  fresh.publishedCount = 0;
+
+  orgAudit_(actor, 'match-add', id, stage + (room ? ' · ' + room : ''), 'ok');
+  return { ok: true, match: fresh, message: id + ' added — a new 12-slot room.' };
+}
+
+/**
+ * Deletes a room that was added from the dashboard. The fixed qualifier rooms
+ * are never removed, and a room that already holds a team or a result is kept
+ * as evidence, so deleting can never erase tournament data.
+ */
+function adminMatchRemove_(payload, actor) {
+  var matchId = normaliseMatchId_(payload.matchId);
+  if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose a room.' };
+
+  var fixedRooms = CONFIG.MATCH_IDS || ['M1', 'M2', 'M3', 'M4', 'M5', 'M6'];
+  if (fixedRooms.indexOf(matchId) !== -1) {
+    return { ok: false, code: 'FIXED', error: 'The qualifier rooms ' + fixedRooms.join(', ') + ' cannot be deleted.' };
+  }
+
+  var teams = activeMatchTeamIds_(matchId);
+  if (teams.length) {
+    return { ok: false, code: 'IN_USE', error: 'Remove the teams from ' + matchId + ' before deleting the room.' };
+  }
+  var results = readResults_();
+  for (var i = 0; i < results.length; i++) {
+    if (results[i].matchId === matchId) {
+      return { ok: false, code: 'IN_USE', error: matchId + ' already has results, so it stays on the board.' };
+    }
+  }
+
+  var kept = [];
+  var ids = tournamentMatchIds_();
+  for (var k = 0; k < ids.length; k++) if (ids[k] !== matchId) kept.push(ids[k]);
+  try {
+    PropertiesService.getScriptProperties().setProperty(MATCH_IDS_PROPERTY, JSON.stringify(kept));
+  } catch (error) {
+    return { ok: false, code: 'STORE', error: 'The room list could not be saved. Try again.' };
+  }
+
+  orgAudit_(actor, 'match-remove', matchId, 'empty room deleted', 'ok');
+  return { ok: true, message: matchId + ' deleted. Its sheet row stays as a record.' };
 }
 
 function adminResultSave_(payload, actor) {

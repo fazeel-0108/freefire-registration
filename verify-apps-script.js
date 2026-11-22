@@ -3105,5 +3105,70 @@ check('manual UPI is accepted as PENDING, never PAID',
 check('manual UPI is the active default without gateway credentials',
   sandbox.publicConfig_().manualUpi === true && sandbox.publicConfig_().online === false);
 
+console.log('\n38. extra rooms can be added and a team removed from a room');
+const roomsBefore = sandbox.adminTournament_().matches.map(m => m.id).join(',');
+const addedRoom = adminCall({ action: 'match-add', session: superSession });
+check('the organiser can add a new room',
+  addedRoom.ok === true && addedRoom.match && addedRoom.match.id === 'M7', JSON.stringify(addedRoom));
+check('the new room sits after M6 on the board',
+  sandbox.adminTournament_().matches.map(m => m.id).join(',') === roomsBefore + ',M7',
+  sandbox.adminTournament_().matches.map(m => m.id).join(','));
+check('the new room starts empty and scheduled',
+  addedRoom.match.teamCount === 0 && addedRoom.match.status === 'SCHEDULED',
+  JSON.stringify({ teams: addedRoom.match.teamCount, status: addedRoom.match.status }));
+check('the public schedule lists the new room as well',
+  sandbox.publicSchedule_().matches.some(m => m.id === 'M7'));
+const secondRoom = adminCall({ action: 'match-add', session: superSession });
+check('a second add creates M8 instead of a duplicate M7',
+  secondRoom.ok === true && secondRoom.match.id === 'M8' &&
+  sandbox.adminTournament_().matches.map(m => m.id).join(',').slice(-5) === 'M7,M8',
+  JSON.stringify({ id: secondRoom.match && secondRoom.match.id }));
+const roomSaved = adminCall({
+  action: 'match-save', session: superSession, matchId: 'M7', map: 'Alpine',
+  scheduledAt: '2026-12-05T19:00', status: 'SCHEDULED', stage: 'KNOCKOUT 2'
+});
+check('a room added from the dashboard can be scheduled like any other',
+  roomSaved.ok === true && roomSaved.match.stage === 'KNOCKOUT 2' && roomSaved.match.map === 'Alpine',
+  JSON.stringify(roomSaved.match && { stage: roomSaved.match.stage, map: roomSaved.match.map }));
+
+const roomTeamCountBefore = sandbox.adminTournament_().matches[0].teams.length;
+const removedTeam = adminCall({
+  action: 'match-unassign', session: superSession, matchId: 'M1', teamId: approvedTeam.id
+});
+check('a team can be removed from a room', removedTeam.ok === true, JSON.stringify(removedTeam));
+check('the removed team leaves the room chart',
+  sandbox.adminTournament_().matches[0].teams.length === roomTeamCountBefore - 1 &&
+  !sandbox.adminTournament_().matches[0].teams.some(t => t.teamId === approvedTeam.id));
+check('removing a team keeps its published result for the record',
+  sandbox.publicResults_().results.some(r => r.teamId === approvedTeam.id));
+const reassignedTeam = adminCall({
+  action: 'match-assign', session: superSession, matchId: 'M1', teamId: approvedTeam.id
+});
+check('a removed team can be put back into the room',
+  reassignedTeam.ok === true &&
+  sandbox.adminTournament_().matches[0].teams.some(t => t.teamId === approvedTeam.id),
+  JSON.stringify(reassignedTeam));
+
+console.log('\n39. an empty added room can be deleted again');
+check('the board marks M8 as removable but not M1',
+  sandbox.adminTournament_().matches.filter(m => m.id === 'M8')[0].removable === true &&
+  sandbox.adminTournament_().matches.filter(m => m.id === 'M1')[0].removable === false);
+const fixedDelete = adminCall({ action: 'match-remove', session: superSession, matchId: 'M1' });
+check('a qualifier room cannot be deleted',
+  fixedDelete.ok === false && fixedDelete.code === 'FIXED', JSON.stringify(fixedDelete));
+const roomWithTeam = adminCall({ action: 'match-assign', session: superSession, matchId: 'M7', teamId: approvedTeam.id });
+const busyDelete = adminCall({ action: 'match-remove', session: superSession, matchId: 'M7' });
+check('a room that holds a team cannot be deleted',
+  roomWithTeam.ok === true && busyDelete.ok === false && busyDelete.code === 'IN_USE', JSON.stringify(busyDelete));
+adminCall({ action: 'match-unassign', session: superSession, matchId: 'M7', teamId: approvedTeam.id });
+const emptyDelete = adminCall({ action: 'match-remove', session: superSession, matchId: 'M8' });
+check('an empty added room can be deleted', emptyDelete.ok === true, JSON.stringify(emptyDelete));
+check('the deleted room leaves the board and the public schedule',
+  !sandbox.adminTournament_().matches.some(m => m.id === 'M8') &&
+  !sandbox.publicSchedule_().matches.some(m => m.id === 'M8'),
+  sandbox.adminTournament_().matches.map(m => m.id).join(','));
+check('the remaining added room is still there',
+  sandbox.adminTournament_().matches.some(m => m.id === 'M7'));
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail === 0 ? 0 : 1);

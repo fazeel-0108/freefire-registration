@@ -244,8 +244,11 @@
       <section class="panel" id="matches" aria-labelledby="matchesTitle">
         <div class="panel-head">
           <div>
-            <h2 id="matchesTitle">Matches M1–M6</h2>
+            <h2 id="matchesTitle">Matches and rooms</h2>
             <p id="matchSummary">Loading the tournament board…</p>
+          </div>
+          <div class="panel-tools">
+            <button class="btn btn-primary" id="addRoomBtn" type="button">Add room</button>
           </div>
         </div>
 
@@ -301,16 +304,16 @@
               <button class="btn btn-primary" id="chartCopy" type="button">Copy room chart</button>
               <button class="btn btn-primary" id="chartShare" type="button">Share room chart</button>
               <button class="btn btn-ghost" id="chartShareQualified" type="button">Share qualified teams</button>
-              <button class="btn btn-ghost" id="chartCopyAll" type="button">Copy all M1–M6</button>
+              <button class="btn btn-ghost" id="chartCopyAll" type="button">Copy all rooms</button>
             </div>
           </div>
           <div class="table-wrap">
             <table class="reg-table room-chart-table">
-              <thead><tr><th>Slot</th><th>Team</th><th>Result</th><th>Status</th></tr></thead>
+              <thead><tr><th>Slot</th><th>Team</th><th>Result</th><th>Status</th><th><span class="sr-only">Remove</span></th></tr></thead>
               <tbody id="roomChartRows"></tbody>
             </table>
           </div>
-          <p class="hint" id="roomChartHint">Each room holds 12 teams. The top 6 in the standings are marked QUALIFIED.</p>
+          <p class="hint" id="roomChartHint">Each room holds 12 teams. The top 6 in the standings are marked QUALIFIED. Use Remove on an occupied slot to take that team out of the room.</p>
         </div>
       </section>
 

@@ -269,7 +269,12 @@ textarea { resize: vertical; min-height: 84px; }
 }
 .chip:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
 
-.table-wrap { position: relative; min-height: 160px; }
+.table-wrap {
+  position: relative; min-height: 160px;
+  /* A 12-slot room chart is wider than a phone. Let it scroll sideways
+     instead of squeezing every column until nothing is readable. */
+  overflow-x: auto; -webkit-overflow-scrolling: touch;
+}
 
 .reg-table { width: 100%; border-collapse: collapse; }
 .reg-table th {
@@ -685,6 +690,7 @@ textarea.wa-input { resize: vertical; }
 .room-chart-head h3 { margin: 0 0 5px; font-size: 18px; }
 .room-chart-head p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .room-chart-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.room-chart-table { min-width: 620px; }
 .room-chart-table tr.chart-qualified { background: rgba(63,185,80,.08); }
 .room-chart-table tr.chart-qualified td:first-child { border-left: 2px solid var(--ok); }
 .badge-q { background: rgba(63,185,80,.16); color: #7EE2A0; border: 1px solid rgba(63,185,80,.35); }
