@@ -54,8 +54,8 @@ http://127.0.0.1:8788/__test/admin.html
 ```
 
 - Uses a **mock** Apps Script backend and a stand-in checkout at
-  `/__mock/gateway`. Every served page carries the `TEST MODE · mock backend ·
-  no real payments` badge.
+  `/__mock/gateway`. No floating `TEST MODE` pill is injected any more; the only
+  harness chrome on a served page is the small green `Local login:` chip.
 - Mock dashboard key (local only): `mock-dashboard-key-for-browser-tests`.
 - State is in memory: the fee, the draft map and any rows you create reset to the
   seed data when you restart the process. Restart it after editing the harness.

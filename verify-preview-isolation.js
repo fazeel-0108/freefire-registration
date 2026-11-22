@@ -120,8 +120,11 @@ async function main() {
       "the test dashboard contains no production backend URL");
 
     const testPage = await get("/__test/index.html");
-    check(testPage.status === 200 && /TEST MODE/i.test(testPage.text),
-      "the test page carries a visible TEST MODE label");
+    check(testPage.status === 200 && !/TEST MODE/i.test(testPage.text),
+      "the test page carries no floating TEST MODE pill");
+    const testPageLogin = await get("/__test/admin.html");
+    check(testPageLogin.status === 200 && /Local login:/i.test(testPageLogin.text),
+      "the test dashboard still shows the local login marker");
 
     const order = await post("/__mock/exec?action=payorder", {
       teamName: "Isolation Test",
