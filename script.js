@@ -32,10 +32,21 @@ const payOnlineHint = document.getElementById("payOnlineHint");
 const payStatus = document.getElementById("payStatus");
 const payRetryBtn = document.getElementById("payRetry");
 const payOnlineBack = document.getElementById("payOnlineBack");
+const payOnlineOff = document.getElementById("payOnlineOff");
 const payCashSubmit = document.getElementById("payCashSubmit");
 const payCashAmount = document.getElementById("payCashAmount");
 const payCashBack = document.getElementById("payCashBack");
 const payResult = document.getElementById("payResult");
+const payManualPanel = document.getElementById("payManualPanel");
+const payUpiQr = document.getElementById("payUpiQr");
+const payManualNote = document.getElementById("payManualNote");
+const payUtr = document.getElementById("payUtr");
+const payUpiSubmit = document.getElementById("payUpiSubmit");
+const payManualBack = document.getElementById("payManualBack");
+const payManualStatus = document.getElementById("payManualStatus");
+const scheduleGrid = document.getElementById("scheduleGrid");
+const publicLeaderboard = document.getElementById("publicLeaderboard");
+const publicResultRows = document.getElementById("publicResultRows");
 
 const departmentDropdown = document.getElementById("departmentDropdown");
 const departmentTrigger = document.getElementById("departmentTrigger");
@@ -301,6 +312,8 @@ let payPollCount = 0;
 let siteConfig = {
   fee: null,
   online: false,
+  manualUpi: false,
+  upiQrUrl: "",
   provider: "",
   hosted: false,
   label: "",
@@ -317,6 +330,7 @@ function resetOnlineVisuals() {
   if (payFrame) payFrame.removeAttribute("src");
   if (payGatewayLink) payGatewayLink.hidden = true;
   if (payGatewayOpen) payGatewayOpen.hidden = true;
+  if (payManualPanel) payManualPanel.hidden = true;
 }
 
 /**
@@ -344,6 +358,24 @@ function payPanel(name) {
   payChoice.hidden = name !== "choice";
   payOnlinePanel.hidden = name !== "online";
   payCashPanel.hidden = name !== "cash";
+}
+
+/**
+ * Online is offered only when the server says it can actually verify a
+ * payment. Otherwise the button is removed from the choice and the reason is
+ * printed there: a button that only refuses after being pressed reads like a
+ * broken page, and a payment button that never works reads like a promise.
+ * Cash stays available either way.
+ */
+function syncPaymentChoice() {
+  const online = siteConfig.online === true || siteConfig.manualUpi === true;
+  if (payOnlineBtn) payOnlineBtn.hidden = !online;
+  if (payOnlineOff) payOnlineOff.hidden = online;
+  if (payOnlineHint && online) {
+    payOnlineHint.textContent = siteConfig.manualUpi
+      ? "UPI transfer"
+      : (siteConfig.hosted ? (siteConfig.label || "Secure checkout") : "UPI QR");
+  }
 }
 
 function paySay(message, kind) {
@@ -516,6 +548,11 @@ async function startOnlinePayment() {
 
   resetOnlineVisuals();
   if (payRetryBtn) payRetryBtn.hidden = true;
+
+  if (siteConfig.manualUpi) {
+    startManualUpi();
+    return;
+  }
 
   if (!siteConfig.online) {
     setPayStatus(
@@ -736,6 +773,8 @@ async function loadConfig() {
     siteConfig = {
       fee: typeof data.fee === "number" ? data.fee : null,
       online: data.online === true,
+      manualUpi: data.manualUpi === true,
+      upiQrUrl: typeof data.upiQrUrl === "string" ? data.upiQrUrl : "",
       provider: data.provider || "",
       hosted: data.hosted === true,
       label: data.label || "",
@@ -744,12 +783,9 @@ async function loadConfig() {
     applyFee(data.fee);
 
     // The button says what will actually happen: a QR on this page, or the
-    // gateway's own secure checkout page.
-    if (payOnlineHint) {
-      payOnlineHint.textContent = siteConfig.hosted
-        ? (siteConfig.label || "Secure checkout")
-        : "UPI QR";
-    }
+    // gateway's own secure checkout page. When the server reports online as
+    // off, the button is hidden instead of refusing on click.
+    syncPaymentChoice();
   } catch (error) {
     console.warn("Fee/online configuration unavailable:", error.message);
   }
@@ -840,23 +876,17 @@ form.addEventListener("submit", async (event) => {
   const members = typedNames.slice(0, playerCount).map((name, index) => ({
     player: index + 1,
     name,
-    whatsapp: index < 2 ? phones[index].value.trim() : ""
+    whatsapp: index < 2 ? normalizePhoneInput(phones[index].value) : ""
   }));
 
   const badPhone = members.slice(0, 2).find(m => !/^\d{10}$/.test(m.whatsapp));
 
   if (badPhone) {
-    alert(`Please enter a valid 10-digit WhatsApp number for Player ${badPhone.player}.`);
+    alert(`Please enter a valid 10-digit WhatsApp number (or +91 followed by 10 digits) for Player ${badPhone.player}.`);
     phones[badPhone.player - 1]?.focus();
     return;
   }
 
-  // One shared number means the organisers can only reach one of the two.
-  if (members[0].whatsapp === members[1].whatsapp) {
-    alert("Player 1 and Player 2 cannot use the same WhatsApp number.");
-    phones[1].focus();
-    return;
-  }
 
   // The confirmation tick used to be enforced by the browser's own "required"
   // bubble — the one message on this form whose wording we do not control. The
@@ -891,7 +921,14 @@ form.addEventListener("submit", async (event) => {
 });
 
 function cleanPhone(value) {
-  return value.replace(/\D/g, "").slice(0, 10);
+  return value.replace(/\D/g, "").slice(0, 12);
+}
+
+/** Accepts 10 digits, +91XXXXXXXXXX or 91XXXXXXXXXX and returns 10 digits. */
+function normalizePhoneInput(value) {
+  let digits = String(value || "").replace(/\D/g, "");
+  if (digits.length === 12 && digits.slice(0, 2) === "91") digits = digits.slice(2);
+  return digits;
 }
 
 document.querySelectorAll(".member-phone").forEach(input => {
@@ -1028,3 +1065,168 @@ newRegistration.addEventListener("click", () => {
   success.classList.remove("show");
   window.scrollTo({ top: document.querySelector(".form-shell").offsetTop - 20, behavior: "smooth" });
 });
+
+/* ------------------------------------------------------------------
+   MANUAL UPI (organiser-verified)
+   The browser may submit a reference, but it can never mark the payment
+   paid. The row starts PENDING and only an organiser can change it.
+------------------------------------------------------------------ */
+function manualSay(message, kind) {
+  if (!payManualStatus) return;
+  payManualStatus.hidden = !message;
+  payManualStatus.textContent = message || "";
+  payManualStatus.classList.remove("is-waiting", "is-error", "is-ok");
+  if (kind) payManualStatus.classList.add("is-" + kind);
+}
+
+function startManualUpi() {
+  if (!payManualPanel) return;
+  resetOnlineVisuals();
+  payManualPanel.hidden = false;
+  payGateway.hidden = true;
+  const qr = siteConfig.upiQrUrl || "";
+  if (payUpiQr) {
+    payUpiQr.hidden = !qr;
+    if (qr) payUpiQr.src = qr;
+    else payUpiQr.removeAttribute("src");
+  }
+  if (payManualNote) {
+    payManualNote.textContent = qr
+      ? "Scan the organisers' UPI QR, pay the entry fee, then submit your reference. Your team is registered as Pending until an organiser verifies it."
+      : "The organisers have not published a QR image on this page. Ask an organiser for the official UPI QR, pay the entry fee, then submit your reference below. Never pay a number you were not given by the organisers.";
+  }
+  if (payUtr) payUtr.value = "";
+  if (payUpiSubmit) { payUpiSubmit.disabled = false; payUpiSubmit.textContent = "Submit for verification"; }
+  manualSay("", "");
+  setPayStatus("", "");
+  if (payOnlineBack) payOnlineBack.hidden = true;
+}
+
+async function completeManualUpi() {
+  if (pending.busy || pending.done || !pending.data) return;
+  const utr = payUtr ? payUtr.value.trim() : "";
+  if (utr && !/^[A-Za-z0-9._-]{4,40}$/.test(utr)) {
+    manualSay("The UPI reference should be 4–40 letters or digits.", "error");
+    return;
+  }
+
+  pending.busy = true;
+  const label = payUpiSubmit ? payUpiSubmit.textContent : "";
+  if (payUpiSubmit) { payUpiSubmit.disabled = true; payUpiSubmit.textContent = "Submitting…"; }
+  manualSay("", "");
+  try {
+    const result = await submitToAppsScript(Object.assign({}, pending.data, {
+      payment: { method: "UPI", utr: utr }
+    }));
+    if (!result || !result.ok) throw new Error(result && result.error ? result.error : "The server could not save your registration.");
+
+    pending.done = true;
+    payPanel("none");
+    if (regLabel) regLabel.textContent = "TEAM REGISTERED";
+    if (doneSuccess) doneSuccess.innerHTML = 'DONE <span aria-hidden="true">↗</span>';
+    modalTitle.textContent = "Registration Submitted!";
+    modalDescription.textContent = "Your team is registered. The UPI payment is Pending until an organiser verifies it.";
+    const fee = result.payment && result.payment.entryFee ? result.payment.entryFee : siteConfig.fee;
+    paySay("Your UPI reference is saved. The entry fee is " + (fee ? "₹" + fee : "the entry fee") + " and stays Pending until an organiser confirms the transfer.", "ok");
+    loadStats();
+    loadPublicBoards();
+  } catch (error) {
+    manualSay("We could not save that just now. " + error.message + " Nothing was lost — try again.", "error");
+    if (payUpiSubmit) { payUpiSubmit.disabled = false; payUpiSubmit.textContent = label; }
+  } finally {
+    pending.busy = false;
+  }
+}
+
+if (payUpiSubmit) payUpiSubmit.addEventListener("click", completeManualUpi);
+if (payManualBack) payManualBack.addEventListener("click", () => { payPanel("choice"); resetOnlineVisuals(); });
+if (payUtr) payUtr.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); completeManualUpi(); } });
+
+/* ------------------------------------------------------------------
+   PUBLIC SCHEDULE + PUBLISHED LEADERBOARD
+   Reads only ?action=schedule and ?action=results. Room credentials are
+   already release-filtered by the server; this page never receives them early.
+------------------------------------------------------------------ */
+function boardEscape(value) {
+  return String(value === null || value === undefined ? "" : value)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function renderSchedule(data) {
+  if (!scheduleGrid) return;
+  const matches = data && data.matches ? data.matches : [];
+  if (!matches.length) {
+    scheduleGrid.innerHTML = '<p class="board-empty">The schedule is not published yet.</p>';
+    return;
+  }
+  scheduleGrid.innerHTML = matches.map((match) => {
+    const room = match.room
+      ? '<div class="room-reveal"><span>ROOM ID</span><b>' + boardEscape(match.room.id || "—") + '</b><span>PASSWORD</span><b>' + boardEscape(match.room.password || "—") + '</b></div>'
+      : '<p class="room-locked">Room details release automatically at ' + boardEscape(match.releaseAt || "the published time") + '.</p>';
+    const stage = [match.stage || "QUALIFIER", match.roomLabel ? "ROOM " + match.roomLabel : ""].filter(Boolean).join(" · ");
+    return '<article class="schedule-card"><div class="schedule-top"><span class="match-id">' + boardEscape(match.id) + '</span><span class="status-chip">' + boardEscape(match.status) + '</span></div>' +
+      '<h3>' + boardEscape(match.map || "Map to be announced") + '</h3>' +
+      '<p class="schedule-stage">' + boardEscape(stage) + '</p>' +
+      '<p class="schedule-time">Scheduled at: ' + boardEscape(match.scheduledLabel) + '</p>' + room +
+      (match.resultsPublished ? '<a class="schedule-result-link" href="#results">Results published →</a>' : '') + '</article>';
+  }).join("");
+}
+
+function renderPublishedResults(data) {
+  const leaderboard = data && data.leaderboard ? data.leaderboard : [];
+  const results = data && data.results ? data.results : [];
+  if (publicLeaderboard) {
+    publicLeaderboard.innerHTML = leaderboard.length
+      ? leaderboard.map((row) => '<tr><td>' + row.rank + '</td><td>' + boardEscape(row.teamName) + '</td><td>' + (row.booyah || 0) + '</td><td>' + row.matches + '</td><td>' + (row.bestPlacement || "—") + '</td><td>' + row.kills + '</td><td><b>' + row.total + '</b></td></tr>').join("")
+      : '<tr><td colspan="7">No published standings yet.</td></tr>';
+  }
+  if (publicResultRows) {
+    publicResultRows.innerHTML = results.length
+      ? results.map((row) => '<tr><td>#' + (row.rank || row.placement) + '</td><td>' + boardEscape(row.matchId) + '</td><td>' + boardEscape(row.teamName) + '</td><td>' + row.placement + '</td><td>' + row.kills + '</td><td>' + row.total + '</td></tr>').join("")
+      : '<tr><td colspan="6">No published match results yet.</td></tr>';
+  }
+}
+
+let boardRefreshTimer = null;
+
+function queueBoardRefresh(schedule) {
+  if (boardRefreshTimer) clearTimeout(boardRefreshTimer);
+  const serverNow = Date.parse(schedule.serverNow || schedule.generatedAt || "") || Date.now();
+  let nextRelease = Infinity;
+  (schedule.matches || []).forEach((match) => {
+    const at = Date.parse(match.releaseAtIso || "");
+    if (at > serverNow && at < nextRelease) nextRelease = at;
+  });
+  // Refresh just after the next server-side release. If there is no future
+  // release, poll slowly so newly published results still appear on their own.
+  const delay = Number.isFinite(nextRelease)
+    ? Math.min(Math.max(nextRelease - serverNow + 1500, 1500), 2147483647)
+    : 300000;
+  boardRefreshTimer = setTimeout(loadPublicBoards, delay);
+}
+
+async function loadPublicBoards() {
+  if (!scheduleGrid && !publicLeaderboard) return;
+  if (boardRefreshTimer) { clearTimeout(boardRefreshTimer); boardRefreshTimer = null; }
+  try {
+    const schedule = await getAction("schedule");
+    if (schedule && schedule.ok) {
+      renderSchedule(schedule);
+      queueBoardRefresh(schedule);
+    } else if (!boardRefreshTimer) {
+      boardRefreshTimer = setTimeout(loadPublicBoards, 60000);
+    }
+  } catch (error) {
+    if (scheduleGrid) scheduleGrid.innerHTML = '<p class="board-empty">The schedule is unavailable right now.</p>';
+    if (!boardRefreshTimer) boardRefreshTimer = setTimeout(loadPublicBoards, 60000);
+  }
+  try {
+    const results = await getAction("results");
+    if (results && results.ok) renderPublishedResults(results);
+  } catch (error) {
+    if (publicLeaderboard) publicLeaderboard.innerHTML = '<tr><td colspan="5">Standings are unavailable right now.</td></tr>';
+  }
+}
+
+loadPublicBoards();

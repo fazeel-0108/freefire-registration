@@ -130,6 +130,12 @@ class Sheet {
   }
   getName() { return this.name; }
   getLastRow() { return this.grid.lastRow(); }
+  getLastColumn() {
+    for (let c = this.grid.cols - 1; c >= 0; c--) {
+      if (this.grid.cells.some(line => line[c] !== '' && line[c] !== null && line[c] !== undefined)) return c + 1;
+    }
+    return 0;
+  }
   getMaxRows() { return this.grid.rows; }
   getMaxColumns() { return this.grid.cols; }
   getRange(row, col, numRows, numCols) {
@@ -383,14 +389,20 @@ function stats() {
   return JSON.parse(sandbox.doGet({ parameter: { action: 'stats' } }).getContent());
 }
 
+let nextTestPhone = 8100000000;
+function uniqueTestPhone() {
+  nextTestPhone += 1;
+  return String(nextTestPhone);
+}
+
 function validPayload(teamName) {
   return {
     submittedAt: new Date().toISOString(),
     teamName: teamName,
     department: 'CSE — Computer Science Engineering',
     members: [
-      { player: 1, name: 'PHANTOM', whatsapp: '7075593104' },
-      { player: 2, name: 'FENZ', whatsapp: '9390159068' },
+      { player: 1, name: 'PHANTOM', whatsapp: uniqueTestPhone() },
+      { player: 2, name: 'FENZ', whatsapp: uniqueTestPhone() },
       { player: 3, name: 'QENZ', whatsapp: '' },
       { player: 4, name: 'DON', whatsapp: '' }
     ]
@@ -412,20 +424,22 @@ check('columnLetter_(7) is G', sandbox.columnLetter_(7) === 'G', sandbox.columnL
 check('columnLetter_(27) is AA', sandbox.columnLetter_(27) === 'AA', sandbox.columnLetter_(27));
 
 console.log('\n2. first registration');
-const first = post(validPayload('Shadow Squad'));
+const firstPayload = validPayload('Shadow Squad');
+const first = post(firstPayload);
 check('responds ok', first.ok === true, JSON.stringify(first));
 check('reports 1 team', first.teams === 1, JSON.stringify(first));
 check('reports 4 players', first.players === 4, JSON.stringify(first));
 check('row 1 is the header', sheet.grid.cells[0][1] === 'Team Name', sheet.grid.cells[0][1]);
 // The contract grew by Status and Note so the organiser dashboard can work on
 // the same rows the registrations already land in.
-check('header has the original columns', sandbox.HEADERS.length === 26 &&
+check('header has the original columns', sandbox.HEADERS.length === 27 &&
   sheet.grid.cells[0][8] === 'Player 4 Name' &&
   sheet.grid.cells[0][9] === 'Status' &&
   sheet.grid.cells[0][10] === 'Note' &&
   sheet.grid.cells[0][11] === 'WhatsApp Consent' &&
-  sheet.grid.cells[0][12] === 'Consent At',
-  JSON.stringify(sheet.grid.cells[0].slice(0, 20)));
+  sheet.grid.cells[0][12] === 'Consent At' &&
+  sheet.grid.cells[0][26] === 'Team ID',
+  JSON.stringify(sheet.grid.cells[0].slice(0, 27)));
 // The payment columns were appended, never inserted, so every older row keeps
 // its values in the same cells.
 check('payment columns are appended after the original ones',
@@ -449,7 +463,40 @@ check('consent defaults to NO when not given',
   JSON.stringify(sheet.grid.cells[1].slice(11, 13)));
 check('timestamp is a real Date', Object.prototype.toString.call(sheet.grid.cells[1][0]) === '[object Date]');
 check('team name stored', sheet.grid.cells[1][1] === 'Shadow Squad');
-check('phone 1 stored', String(sheet.grid.cells[1][4]) === '7075593104');
+check('phone 1 stored', String(sheet.grid.cells[1][4]) === firstPayload.members[0].whatsapp);
+check('a stable 22-character Team ID is stored',
+  /^QQSGP-[A-Za-z0-9_-]{16}$/.test(String(sheet.grid.cells[1][26])),
+  String(sheet.grid.cells[1][26]));
+const storedTeamId = String(sheet.grid.cells[1][26]);
+check('the row is found by its stored Team ID',
+  sandbox.findRowById_(sheet, storedTeamId) === 2);
+sheet.getRange(2, 2).setValue('Shadow Squad Edited');
+check('the Team ID survives a team-name edit',
+  sandbox.findRowById_(sheet, storedTeamId) === 2);
+sheet.getRange(2, 2).setValue('Shadow Squad');
+
+const idSheet = spreadsheet.insertSheet('Id Backfill');
+idSheet.insertColumnsAfter(idSheet.getMaxColumns(), 1);
+idSheet.getRange(1, 1, 1, sandbox.HEADERS.length).setValues([sandbox.HEADERS]);
+const backfillRow = new Array(sandbox.HEADERS.length).fill('');
+backfillRow[0] = new Date();
+backfillRow[1] = 'Backfill Team';
+backfillRow[2] = 'CSE — Computer Science Engineering';
+backfillRow[3] = 'A';
+backfillRow[4] = '9100000001';
+backfillRow[5] = 'B';
+backfillRow[6] = '9100000002';
+backfillRow[9] = 'PENDING';
+backfillRow[11] = 'NO';
+backfillRow[13] = 100;
+backfillRow[15] = 'NOT SELECTED';
+idSheet.getRange(2, 1, 1, sandbox.HEADERS.length).setValues([backfillRow]);
+check('a blank Team ID is backfilled once', sandbox.ensureTeamIds_(idSheet, true) === 1);
+check('the backfilled Team ID is 22 characters',
+  String(idSheet.grid.cells[1][26]).length === 22, String(idSheet.grid.cells[1][26]));
+check('a second backfill writes nothing', sandbox.ensureTeamIds_(idSheet, true) === 0);
+check('the legacy row exposes the stored Team ID',
+  sandbox.recordFromRow_(2, idSheet.grid.cells[1]).id === String(idSheet.grid.cells[1][26]));
 check('player 3 name stored', sheet.grid.cells[1][7] === 'QENZ');
 check('header formatted', sheet.calls.setValues > 0);
 check('frozen header row', sheet.frozenRows === 1);
@@ -547,11 +594,6 @@ const cases = [
   ['5 players', (() => {
     const p = validPayload('Xy');
     p.members = p.members.concat([{ player: 5, name: 'FIVE', whatsapp: '' }]);
-    return p;
-  })()],
-  ['the same number for both players', (() => {
-    const p = validPayload('Xy');
-    p.members[1].whatsapp = p.members[0].whatsapp;
     return p;
   })()],
   ['9-digit phone', (() => { const p = validPayload('Xy'); p.members[0].whatsapp = '707559310'; return p; })()],
@@ -888,13 +930,21 @@ rejects('a null player 1 phone', withMembers('Xy', function (p) { p.members[0].w
 rejects('a 9-digit phone', withMembers('Xy', function (p) { p.members[0].whatsapp = '707559310'; }), 'Player 1 WhatsApp number must be exactly 10 digits.');
 rejects('an 11-digit phone', withMembers('Xy', function (p) { p.members[0].whatsapp = '70755931045'; }), 'Player 1 WhatsApp number must be exactly 10 digits.');
 rejects('letters as a phone number', withMembers('Xy', function (p) { p.members[1].whatsapp = 'abcdefghij'; }), 'Player 2 WhatsApp number must be exactly 10 digits.');
-rejects('an international phone number', withMembers('Xy', function (p) { p.members[0].whatsapp = '+91 7075593104'; }), 'Player 1 WhatsApp number must be exactly 10 digits.');
+accepts('an international phone number', withMembers('International Phone', function (p) { p.members[0].whatsapp = '+91 7075593104'; }));
+check('the +91 form is stored as 10 digits',
+  String(matrix.getRange(rowOfTeam('International Phone'), 5).getValues()[0][0]) === '7075593104');
 rejects('a phone number with a leading zero', withMembers('Xy', function (p) { p.members[0].whatsapp = '07075593104'; }), 'Player 1 WhatsApp number must be exactly 10 digits.');
 rejects('an all-zero player 1 phone', withMembers('Xy', function (p) { p.members[0].whatsapp = '0000000000'; }), 'Player 1 WhatsApp number is not valid.');
 rejects('an all-zero player 2 phone', withMembers('Xy', function (p) { p.members[1].whatsapp = '0000000000'; }), 'Player 2 WhatsApp number is not valid.');
 rejects('a blank player 2 phone', withMembers('Xy', function (p) { p.members[1].whatsapp = ''; }), 'Player 2 WhatsApp number must be exactly 10 digits.');
 rejects('non-ASCII digits', withMembers('Xy', function (p) { p.members[0].whatsapp = '٧٠٧٥٥٩٣١٠٤'; }), 'Player 1 WhatsApp number must be exactly 10 digits.');
-rejects('the same phone number for both players', withMembers('Xy', function (p) { p.members[1].whatsapp = p.members[0].whatsapp; }), 'Player 1 and Player 2 cannot use the same WhatsApp number.');
+accepts('a household sharing the same phone number', withMembers('Household Phone', function (p) {
+  p.members[0].whatsapp = '9000000010';
+  p.members[1].whatsapp = '9000000010';
+}));
+check('the household number is stored for both players',
+  String(matrix.getRange(rowOfTeam('Household Phone'), 5).getValues()[0][0]) === '9000000010' &&
+  String(matrix.getRange(rowOfTeam('Household Phone'), 7).getValues()[0][0]) === '9000000010');
 // The digit check for each player runs before the shared-number comparison, so
 // two identically broken numbers report the digit fault, not the duplicate.
 rejects('two identical malformed phones', withMembers('Xy', function (p) {
@@ -902,16 +952,16 @@ rejects('two identical malformed phones', withMembers('Xy', function (p) {
   p.members[1].whatsapp = '111';
 }), 'Player 1 WhatsApp number must be exactly 10 digits.');
 
-accepts('a phone number written with a space', withMembers('Spaced Phone', function (p) { p.members[0].whatsapp = '7075 593104'; }));
+accepts('a phone number written with a space', withMembers('Spaced Phone', function (p) { p.members[0].whatsapp = '7075 593105'; }));
 check('the space is stripped before storing',
-  String(matrix.getRange(rowOfTeam('Spaced Phone'), 5).getValues()[0][0]) === '7075593104',
+  String(matrix.getRange(rowOfTeam('Spaced Phone'), 5).getValues()[0][0]) === '7075593105',
   String(matrix.getRange(rowOfTeam('Spaced Phone'), 5).getValues()[0][0]));
-accepts('a phone number written with dashes', withMembers('Dashed Phone', function (p) { p.members[0].whatsapp = '707-559-3104'; }));
+accepts('a phone number written with dashes', withMembers('Dashed Phone', function (p) { p.members[0].whatsapp = '707-559-3106'; }));
 check('the dashes are stripped before storing',
-  String(matrix.getRange(rowOfTeam('Dashed Phone'), 5).getValues()[0][0]) === '7075593104');
-accepts('a phone number sent as a JSON number', withMembers('Numeric Phone', function (p) { p.members[0].whatsapp = 7075593104; }));
+  String(matrix.getRange(rowOfTeam('Dashed Phone'), 5).getValues()[0][0]) === '7075593106');
+accepts('a phone number sent as a JSON number', withMembers('Numeric Phone', function (p) { p.members[0].whatsapp = 7075593107; }));
 check('a numeric phone is stored as digits',
-  String(matrix.getRange(rowOfTeam('Numeric Phone'), 5).getValues()[0][0]) === '7075593104');
+  String(matrix.getRange(rowOfTeam('Numeric Phone'), 5).getValues()[0][0]) === '7075593107');
 accepts('an all-zero-except-the-last phone', withMembers('Edge Phone', function (p) { p.members[0].whatsapp = '0000000001'; }));
 accepts('a 3-player squad that also sends a phone for player 3', (function () {
   const p = shortPayload('Ignored Phone', 3);
@@ -920,26 +970,34 @@ accepts('a 3-player squad that also sends a phone for player 3', (function () {
 })());
 check('a phone sent for player 3 is dropped, not written anywhere',
   JSON.stringify(matrix.getRange(rowOfTeam('Ignored Phone'), 1, 1, 9).getValues()[0]).indexOf('12345') === -1);
-accepts('team A using a number also used elsewhere', withMembers('Number A', function (p) { p.members[0].whatsapp = '9000000001'; }));
-accepts('team B reusing that same number', withMembers('Number B', function (p) { p.members[0].whatsapp = '9000000001'; }));
-check('a number shared across two teams is accepted by the validator (the sheet highlights it instead)',
-  rowOfTeam('Number A') !== -1 && rowOfTeam('Number B') !== -1);
+accepts('the first team using a leader number', withMembers('Number A', function (p) { p.members[0].whatsapp = '9000000001'; }));
+rejects('another team reusing that leader number', withMembers('Number B', function (p) { p.members[0].whatsapp = '9000000001'; }), 'This team leader mobile number is already used by another team.');
+check('the reused leader number created no second row', rowOfTeam('Number B') === -1);
 
-console.log('\n17. duplicate team names across days');
+accepts('a leader number written with +91', withMembers('Country Code Leader', function (p) { p.members[0].whatsapp = '+91 9000000002'; }));
+check('the +91 leader is stored as 10 digits',
+  String(matrix.getRange(rowOfTeam('Country Code Leader'), 5).getValues()[0][0]) === '9000000002');
+rejects('the same leader as plain 10 digits', withMembers('Country Code Leader Two', function (p) { p.members[0].whatsapp = '9000000002'; }), 'This team leader mobile number is already used by another team.');
+rejects('the same leader with a 91 prefix', withMembers('Country Code Leader Three', function (p) { p.members[0].whatsapp = '919000000002'; }), 'This team leader mobile number is already used by another team.');
+
+accepts('a team with a player 2 number', withMembers('Player Two Base', function (p) { p.members[0].whatsapp = '9000000003'; p.members[1].whatsapp = '9000000004'; }));
+rejects('another team reusing that player 2 number', withMembers('Player Two Reuse', function (p) { p.members[0].whatsapp = '9000000005'; p.members[1].whatsapp = '9000000004'; }), 'This player mobile number is already registered with another team.');
+
+console.log('\n17. duplicate team names are all-time');
 accepts('the first registration of a spaced name', validPayload('Space Squad'));
-rejects('the same name with doubled spaces', validPayload('Space   Squad'), 'already registered today');
-rejects('the same name in a different case', validPayload('SPACE SQUAD'), 'already registered today');
-rejects('the same name with padding', validPayload('  Space Squad  '), 'already registered today');
+rejects('the same name with doubled spaces', validPayload('Space   Squad'), 'This team name is already registered.');
+rejects('the same name in a different case', validPayload('SPACE SQUAD'), 'This team name is already registered.');
+rejects('the same name with padding', validPayload('  Space Squad  '), 'This team name is already registered.');
 
 accepts('a team used for the cross-day probe', validPayload('Yesterday Squad'));
 matrix.getRange(rowOfTeam('Yesterday Squad'), 1).setValues([[new Date(Date.now() - 26 * 3600 * 1000)]]);
-accepts('the same name on a later day', validPayload('Yesterday Squad'));
+rejects('the same name on a later day', validPayload('Yesterday Squad'), 'This team name is already registered.');
 
 accepts('a team used for the text-timestamp probe', validPayload('Text Stamp Squad'));
 matrix.getRange(rowOfTeam('Text Stamp Squad'), 1).setValues([['16 Oct 2026, 06:43 PM']]);
-accepts('the same name when its timestamp is stored as text (known gap)', validPayload('Text Stamp Squad'));
-check('a text timestamp defeats the same-day duplicate rule',
-  teamNamesInSheet().filter(function (n) { return n === 'Text Stamp Squad'; }).length === 2);
+rejects('the same name when its timestamp is stored as text', validPayload('Text Stamp Squad'), 'This team name is already registered.');
+check('a text timestamp no longer defeats the all-time rule',
+  teamNamesInSheet().filter(function (n) { return n === 'Text Stamp Squad'; }).length === 1);
 
 console.log('\n18. team cap and slots left');
 const uncappedStats = stats();
@@ -1104,7 +1162,7 @@ check('records carry an opaque id, not a row number',
 
 const target = list.records.filter(r => r.teamName === 'Shadow Squad')[0];
 check('the detail view exposes the roster',
-  target && target.players.length === 4 && target.players[0].whatsapp === '7075593104',
+  target && target.players.length === 4 && /^\d{10}$/.test(target.players[0].whatsapp),
   JSON.stringify(target && target.players));
 
 const approved = adminCall({ action: 'status', key: adminKey, id: target.id, status: 'APPROVED', expectedStatus: 'PENDING' });
@@ -1302,7 +1360,7 @@ check('posts to the configured phone number id',
 check('uses the approved template for approval',
   sentBody.type === 'template' && sentBody.template.name === 'qqsgp_team_approved',
   JSON.stringify(sentBody.template && sentBody.template.name));
-check('addresses the leader in E.164 form', sentBody.to === '917075593104', sentBody.to);
+check('addresses the leader in E.164 form', sentBody.to === '91' + recordFor('WA Consent').players[0].whatsapp, sentBody.to);
 check('passes leader, team and registration id in order',
   sentBody.template.components[0].parameters.length === 3 &&
   sentBody.template.components[0].parameters[0].text === 'PHANTOM' &&
@@ -2128,6 +2186,33 @@ check('nothing was sent to a provider that is not configured', fetchCalls.length
 check('the page is told online is off', publicConfig().online === false, JSON.stringify(publicConfig()));
 check('no draft and no row were created', countRows('Online Not Configured') === 0);
 
+const offlineSettings = adminCall({ action: 'settings-get', session: superSession });
+check('manual UPI mode needs no gateway properties',
+  offlineSettings.ok === true && offlineSettings.manualUpi === true &&
+  JSON.stringify(offlineSettings.missing) === JSON.stringify([]),
+  JSON.stringify(offlineSettings.missing));
+check('the dashboard returns property names only, never values',
+  JSON.stringify(offlineSettings).indexOf('00-0000-0000') === -1 &&
+  JSON.stringify(offlineSettings).indexOf('test_secret') === -1);
+
+/* A half-finished configuration is the most likely real-world state: a base URL
+   and merchant id pasted in, the webhook secret forgotten. It must stay off,
+   say exactly what is missing, and still open no order. */
+scriptProps.set('youpi_base_url', 'http://127.0.0.1:6100');
+scriptProps.set('youpi_merchant_id', '00000000-0000-0000-0000-000000000001');
+resetFetch();
+check('a merchant without its key is still offline', publicConfig().online === false);
+check('a partial gateway configuration still leaves manual UPI available',
+  JSON.stringify(adminCall({ action: 'settings-get', session: superSession }).missing) ===
+    JSON.stringify([]) && publicConfig().manualUpi === true);
+const partialOrder = postRoute('payorder', validPayload('Online Partial Config'));
+check('a partial configuration opens no order',
+  partialOrder.ok === false && partialOrder.code === 'PAYMENT_OFFLINE', JSON.stringify(partialOrder));
+check('a partial configuration calls no provider', fetchCalls.length === 0);
+check('a partial configuration writes no row', countRows('Online Partial Config') === 0);
+scriptProps.delete('youpi_base_url');
+scriptProps.delete('youpi_merchant_id');
+
 /* --- the fee is data, not a constant --- */
 const feeSet = adminCall({ action: 'settings-set', session: superSession, fee: 150 });
 check('an organiser can change the entry fee', feeSet.ok === true && feeSet.fee === 150, JSON.stringify(feeSet));
@@ -2146,7 +2231,7 @@ scriptProps.set('razorpay_key_id', 'rzp_test_KEY');
 scriptProps.set('razorpay_key_secret', 'test_secret_value');
 
 check('a Razorpay setting cannot switch online payment on',
-  publicConfig().online === false && publicConfig().provider === 'YOUPI', JSON.stringify(publicConfig()));
+  publicConfig().online === false && publicConfig().provider === 'MANUAL' && publicConfig().manualUpi === true, JSON.stringify(publicConfig()));
 
 const namedOnly = postRoute('payorder', validPayload('Online Razorpay Named'));
 check('a Razorpay-shaped configuration opens no payment',
@@ -2168,11 +2253,14 @@ resetFetch();
    36. YouPI PG as the provider
    ------------------------------------------------------------------
    The gateway here is a self-hosted YouPI instance. What matters is that
-   this project never treats "the checkout page opened" as payment: only a
-   merchant-authenticated GET that answers SUCCESS, for our order, for the
-   snapshotted fee, in INR, at the required verification level, may write a
-   row. The API shapes below are copied from YouPI's openapi.yaml and from
-   real answers captured from a local instance.
+   this project never treats "the checkout page opened" as payment, and it
+   never treats an observed bank alert as settlement. Only a
+   merchant-authenticated GET that answers RECONCILED with
+   settlementState RECONCILED, for our order, for the snapshotted fee, in INR,
+   at the required verification level, may write a row. OBSERVED_SUCCESS /
+   NOT_RECONCILED stays pending; SUCCESS is COD, not a settled UPI payment.
+   The API shapes below are copied from YouPI's openapi.yaml and from real
+   answers captured from a local instance.
    ================================================================== */
 
 console.log('\n36. YouPI PG provider');
@@ -2237,9 +2325,15 @@ check('the page is told the gateway is YouPI',
 check('the page is told the verification level this event requires',
   yCfg.minVerification === 2, JSON.stringify(yCfg));
 check('the merchant key never reaches the page', JSON.stringify(yCfg).indexOf(YOUPI_KEY) === -1);
+const configuredSettings = adminCall({ action: 'settings-get', session: superSession });
 check('the dashboard sees the same gateway',
-  (() => { const s = adminCall({ action: 'settings-get', session: superSession });
-    return s.ok === true && s.provider === 'YOUPI' && s.minVerification === 2; })(), 'settings-get');
+  configuredSettings.ok === true && configuredSettings.provider === 'YOUPI' &&
+  configuredSettings.minVerification === 2, 'settings-get');
+check('a full configuration reports nothing missing',
+  Array.isArray(configuredSettings.missing) && configuredSettings.missing.length === 0,
+  JSON.stringify(configuredSettings.missing));
+check('the merchant key is absent from settings-get',
+  JSON.stringify(configuredSettings).indexOf(YOUPI_KEY) === -1);
 
 /* --- a timed-out create reuses the persisted token/order id --- */
 resetFetch();
@@ -2338,7 +2432,8 @@ sheet.getRange = function (row, col, numRows, numCols) {
 resetFetch();
 yQueue({
   paymentId: 'pay_YOUPI_SHEET_DOWN', orderId: String(sheetDownDraft.values[9]),
-  amount: '100.00', amountPaise: '10000', currency: 'INR', status: 'SUCCESS', verificationLevel: 2
+  amount: '100.00', amountPaise: '10000', currency: 'INR', status: 'RECONCILED',
+  settlementState: 'RECONCILED', method: 'UPI', verificationLevel: 2
 });
 const ySheetDown = yPost('paystatus', { token: ySheetOpen.token });
 sheet.getRange = realGetRange;
@@ -2350,7 +2445,8 @@ check('the failed write registered no team', yRows('YouPI Sheet Down') === 0);
 resetFetch();
 yQueue({
   paymentId: 'pay_YOUPI_SHEET_DOWN', orderId: String(sheetDownDraft.values[9]),
-  amount: '100.00', amountPaise: '10000', currency: 'INR', status: 'SUCCESS', verificationLevel: 2
+  amount: '100.00', amountPaise: '10000', currency: 'INR', status: 'RECONCILED',
+  settlementState: 'RECONCILED', method: 'UPI', verificationLevel: 2
 });
 const ySheetRecovered = yPost('paystatus', { token: ySheetOpen.token });
 check('the next poll after the outage registers the team exactly once',
@@ -2377,6 +2473,10 @@ check('the merchant key is sent as X-Merchant-Key, never in the URL',
   fetchCalls[0].options.headers['X-Merchant-Key'] === YOUPI_KEY &&
   fetchCalls[0].options.headers['X-Merchant-Id'] === '00000000-0000-0000-0000-000000000001' &&
   fetchCalls[0].url.indexOf(YOUPI_KEY) === -1);
+check('the create carries a deterministic Idempotency-Key',
+  fetchCalls[0].options.headers['Idempotency-Key'] === String(yDraft(yOpened.token).values[9]) &&
+  fetchCalls[0].options.headers['Idempotency-Key'].indexOf('QQSGP-') === 0,
+  fetchCalls[0].options.headers['Idempotency-Key']);
 
 const yBody = JSON.parse(fetchCalls[0].options.payload);
 check('the amount is the snapshotted fee, in rupees with two decimals',
@@ -2411,6 +2511,19 @@ const yBadKey = yPost('payorder', validPayload('YouPI Bad Key'));
 check('a rejected merchant key is reported, not faked',
   yBadKey.ok === false && yBadKey.code === 'PROVIDER', JSON.stringify(yBadKey));
 check('nobody is registered when the gateway refuses', yRows('YouPI Bad Key') === 0);
+
+// A rotated API key invalidates the old webhook secret: YouPI answers 401
+// INVALID_MERCHANT_KEY before creating anything. The draft stays CREATING, so
+// fixing the Script Property and retrying reuses the same token.
+const badKeyDraft = (() => {
+  const drafts = spreadsheet.getSheetByName('PaymentDrafts');
+  if (!drafts || drafts.getLastRow() < 2) return null;
+  const rows = drafts.getRange(2, 1, drafts.getLastRow() - 1, sandbox.DRAFT_HEADERS.length).getValues();
+  return rows.find(row => row[3] === 'YouPI Bad Key') || null;
+})();
+check('invalid or rotated credentials leave only a retryable draft',
+  !!badKeyDraft && String(badKeyDraft[12]) === 'CREATING' && yRows('YouPI Bad Key') === 0,
+  JSON.stringify(badKeyDraft && badKeyDraft.slice(12, 14)));
 
 /* --- still waiting --- */
 resetFetch();
@@ -2452,7 +2565,8 @@ check('the forged body did not create a paid team', yRows('YouPI Squad') === 0);
 resetFetch();
 yQueue({
   paymentId: 'pay_YOUPI1', orderId: yBody.orderId, amount: '100.00', amountPaise: '10000',
-  currency: 'INR', status: 'SUCCESS', method: 'UPI', verificationLevel: 1,
+  currency: 'INR', status: 'RECONCILED', settlementState: 'RECONCILED',
+  method: 'UPI', verificationLevel: 1,
   verificationTag: 'SMS_ONLY', completedAt: new Date().toISOString()
 });
 const yWeak = yPost('paystatus', { token: yOpened.token });
@@ -2488,10 +2602,11 @@ const yShortOrder = JSON.parse(fetchCalls[0].options.payload).orderId;
 resetFetch();
 yQueue({
   paymentId: 'pay_YOUPI_SHORT', orderId: yShortOrder, amount: '50.00', amountPaise: '5000',
-  currency: 'INR', status: 'SUCCESS', verificationLevel: 2
+  currency: 'INR', status: 'RECONCILED', settlementState: 'RECONCILED',
+  method: 'UPI', verificationLevel: 2
 });
 const yShort = yPost('paystatus', { token: yShortOpen.token });
-check('a SUCCESS for the wrong amount is refused',
+check('a RECONCILED payment for the wrong amount is refused',
   yShort.state === 'REVIEW', JSON.stringify(yShort));
 check('the wrong amount registers no team', yRows('YouPI Short') === 0);
 
@@ -2507,22 +2622,132 @@ const yOtherOpen = yPost('payorder', validPayload('YouPI Wrong Order'));
 resetFetch();
 yQueue({
   paymentId: 'pay_YOUPI_OTHER', orderId: 'QQSGP-SOMEONE-ELSE', amount: '100.00', amountPaise: '10000',
-  currency: 'INR', status: 'SUCCESS', verificationLevel: 2
+  currency: 'INR', status: 'RECONCILED', settlementState: 'RECONCILED',
+  method: 'UPI', verificationLevel: 2
 });
 const yWrongOrder = yPost('paystatus', { token: yOtherOpen.token });
 check('a payment for another order is refused',
   yWrongOrder.state === 'REVIEW', JSON.stringify(yWrongOrder));
 check('another order registers nobody here', yRows('YouPI Wrong Order') === 0);
 
+/* --- the current contract: an observation is not settlement ---
+   YouPI reports a real UPI credit as OBSERVED_SUCCESS with settlementState
+   NOT_RECONCILED. It is money on the receiving account, not a reconciled
+   payment, so it must stay PENDING and register nobody. */
+resetFetch();
+yQueueEcho({
+  paymentId: 'pay_YOUPI_OBSERVED', amount: '100.00', amountPaise: '10000',
+  currency: 'INR', status: 'INITIATED',
+  checkoutUrl: 'http://127.0.0.1:7000/checkout/pay_YOUPI_OBSERVED'
+});
+const yObsOpen = yPost('payorder', validPayload('YouPI Observed'));
+const yObsDraft = yDraft(yObsOpen.token);
+
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI_OBSERVED', orderId: String(yObsDraft.values[9]),
+  amount: '100.00', amountPaise: '10000', currency: 'INR',
+  status: 'OBSERVED_SUCCESS', settlementState: 'NOT_RECONCILED',
+  method: 'UPI', verificationLevel: 2, verificationTag: 'DUAL_VERIFIED',
+  completedAt: new Date().toISOString()
+});
+const yObserved = yPost('paystatus', { token: yObsOpen.token });
+check('an observed level-2 credit stays PENDING, not PAID',
+  yObserved.ok === true && yObserved.state === 'PENDING' &&
+  yObserved.paymentStatus === 'OBSERVED_SUCCESS' && yObserved.awaitingReconciliation === true,
+  JSON.stringify(yObserved));
+check('an observed credit registers no team', yRows('YouPI Observed') === 0);
+check('the draft records the observation without finalising it',
+  String(yDraft(yObsOpen.token).values[12]) === 'OBSERVED - AWAITING RECONCILIATION',
+  String(yDraft(yObsOpen.token).values[12]));
+check('the observation is audited separately',
+  ((adminCall({ action: 'audit-list', session: superSession, pageSize: 100 }).entries || [])
+    .some(e => e.action === 'payment-observed')));
+
+const obsAuditBefore = (adminCall({ action: 'audit-list', session: superSession, pageSize: 100 }).entries || [])
+  .filter(e => e.action === 'payment-observed').length;
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI_OBSERVED', orderId: String(yObsDraft.values[9]),
+  amount: '100.00', amountPaise: '10000', currency: 'INR',
+  status: 'OBSERVED_SUCCESS', settlementState: 'NOT_RECONCILED',
+  method: 'UPI', verificationLevel: 2
+});
+const yObservedAgain = yPost('paystatus', { token: yObsOpen.token });
+check('polling the observation again is idempotent',
+  yObservedAgain.state === 'PENDING' && yRows('YouPI Observed') === 0,
+  JSON.stringify(yObservedAgain));
+check('a repeated observation adds no second audit entry',
+  (adminCall({ action: 'audit-list', session: superSession, pageSize: 100 }).entries || [])
+    .filter(e => e.action === 'payment-observed').length === obsAuditBefore);
+
+/* An inconsistent answer: a RECONCILED label without the matching
+   settlementState is not the documented shape and cannot become PAID. */
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI_OBSERVED', orderId: String(yObsDraft.values[9]),
+  amount: '100.00', amountPaise: '10000', currency: 'INR',
+  status: 'RECONCILED', settlementState: 'NOT_RECONCILED',
+  method: 'UPI', verificationLevel: 2
+});
+const yNotReconciled = yPost('paystatus', { token: yObsOpen.token });
+check('RECONCILED without settlementState RECONCILED stays PENDING',
+  yNotReconciled.state === 'PENDING' && yRows('YouPI Observed') === 0,
+  JSON.stringify(yNotReconciled));
+
+/* SUCCESS is now the COD / counter / manual outcome. */
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI_OBSERVED', orderId: String(yObsDraft.values[9]),
+  amount: '100.00', amountPaise: '10000', currency: 'INR',
+  status: 'SUCCESS', settlementState: 'NOT_BANK_SETTLEMENT',
+  method: 'UPI', verificationLevel: 2
+});
+const ySuccessOnly = yPost('paystatus', { token: yObsOpen.token });
+check('a bare SUCCESS never registers an online team',
+  ySuccessOnly.state === 'PENDING' && yRows('YouPI Observed') === 0,
+  JSON.stringify(ySuccessOnly));
+
+/* Delayed reconciliation: the checkout window has passed, the bank statement
+   catches up afterwards. The money is still recorded, exactly once. */
+const yObsFinal = yDraft(yObsOpen.token);
+yObsFinal.sheet.getRange(yObsFinal.row, sandbox.DCOL.EXPIRES)
+  .setValue(new Date(Date.now() - 60000));
+resetFetch();
+yQueue({
+  paymentId: 'pay_YOUPI_OBSERVED', orderId: String(yObsDraft.values[9]),
+  amount: '100.00', amountPaise: '10000', currency: 'INR',
+  status: 'RECONCILED', settlementState: 'RECONCILED', method: 'UPI',
+  verificationLevel: 2, verificationTag: 'DUAL_VERIFIED',
+  completedAt: new Date().toISOString()
+});
+const yLate = yPost('paystatus', { token: yObsOpen.token });
+check('a delayed reconciliation after the checkout window still registers the team',
+  yLate.ok === true && yLate.state === 'PAID' && yRows('YouPI Observed') === 1,
+  JSON.stringify(yLate));
+const yLateRow = sheetRowFor('YouPI Observed');
+check('the late-reconciled row is ONLINE / PAID at the snapshotted fee',
+  String(yLateRow[14]) === 'ONLINE' && String(yLateRow[15]) === 'PAID' && Number(yLateRow[13]) === 100,
+  JSON.stringify(yLateRow.slice(13, 16)));
+
+resetFetch();
+const yLateAgain = yPost('paystatus', { token: yObsOpen.token });
+check('replaying the reconciliation returns the same registration',
+  yLateAgain.ok === true && yLateAgain.state === 'PAID' &&
+  yLateAgain.registrationId === yLate.registrationId && fetchCalls.length === 0,
+  JSON.stringify(yLateAgain));
+check('replaying the reconciliation writes no second row', yRows('YouPI Observed') === 1);
+
 /* --- the real thing --- */
 resetFetch();
 yQueue({
   paymentId: 'pay_YOUPI1', orderId: yBody.orderId, amount: '100.00', amountPaise: '10000',
-  currency: 'INR', status: 'SUCCESS', method: 'UPI', verificationLevel: 2,
+  currency: 'INR', status: 'RECONCILED', settlementState: 'RECONCILED',
+  method: 'UPI', verificationLevel: 2,
   verificationTag: 'DUAL_VERIFIED', completedAt: new Date().toISOString()
 });
 const yPaid = yPost('paystatus', { token: yOpened.token });
-check('a SUCCESS at level 2 registers the team',
+check('a RECONCILED level-2 payment registers the team',
   yPaid.ok === true && yPaid.state === 'PAID' && yPaid.team === 'YouPI Squad', JSON.stringify(yPaid));
 check('exactly one row was written', yRows('YouPI Squad') === 1);
 
@@ -2546,7 +2771,8 @@ check('the draft is FINALISED with the registration id',
 resetFetch();
 yQueue({
   paymentId: 'pay_YOUPI1', orderId: yBody.orderId, amount: '100.00', amountPaise: '10000',
-  currency: 'INR', status: 'SUCCESS', verificationLevel: 2
+  currency: 'INR', status: 'RECONCILED', settlementState: 'RECONCILED',
+  method: 'UPI', verificationLevel: 2
 });
 const yDupe = yPost('paywebhook', {
   event: 'SUCCESS', paymentId: 'pay_YOUPI1', orderId: yBody.orderId,
@@ -2589,7 +2815,8 @@ const heldDraft = yDraft(yHeld.token);
 resetFetch();
 yQueue({
   paymentId: 'pay_YOUPI3', orderId: String(heldDraft.values[9]), amount: '100.00',
-  amountPaise: '10000', currency: 'INR', status: 'SUCCESS', verificationLevel: 1
+  amountPaise: '10000', currency: 'INR', status: 'RECONCILED',
+  settlementState: 'RECONCILED', method: 'UPI', verificationLevel: 1
 });
 const yHeldStatus = yPost('paystatus', { token: yHeld.token });
 check('a level-1 payment is held, not registered', yHeldStatus.state === 'REVIEW' && yRows('YouPI Held') === 0, JSON.stringify(yHeldStatus));
@@ -2639,7 +2866,8 @@ const rejectDraft = yDraft(yRejectOpen.token);
 resetFetch();
 yQueue({
   paymentId: 'pay_YOUPI4', orderId: String(rejectDraft.values[9]), amount: '100.00',
-  amountPaise: '10000', currency: 'INR', status: 'SUCCESS', verificationLevel: 1
+  amountPaise: '10000', currency: 'INR', status: 'RECONCILED',
+  settlementState: 'RECONCILED', method: 'UPI', verificationLevel: 1
 });
 yPost('paystatus', { token: yRejectOpen.token });
 const yRejected = adminCall({
@@ -2667,6 +2895,88 @@ check('a claim of online payment is refused under YouPI too',
   yClaim.ok === false, JSON.stringify(yClaim));
 check('that claim wrote no row', yRows('YouPI Claim') === 0);
 
+/* --- a reply that is not the owning merchant's view ---
+   YouPI returns verificationLevel to the owning merchant only. A redacted
+   answer (another merchant's session, or a changed provider) has no level at
+   all, and that must never be read as "level 0, needs review" — it is not
+   evidence that this account was paid. */
+function identityAttempt(team, paymentId, reply) {
+  resetFetch();
+  yQueueEcho({
+    paymentId, amount: '100.00', amountPaise: '10000', currency: 'INR',
+    status: 'INITIATED', checkoutUrl: 'http://127.0.0.1:7000/checkout/' + paymentId
+  });
+  const opened = yPost('payorder', validPayload(team));
+  const draft = yDraft(opened.token);
+  resetFetch();
+  yQueue(Object.assign({
+    paymentId, orderId: String(draft.values[9]), amount: '100.00',
+    amountPaise: '10000', currency: 'INR', status: 'RECONCILED',
+    settlementState: 'RECONCILED', method: 'UPI'
+  }, reply));
+  const result = yPost('paystatus', { token: opened.token });
+  return { opened, result, draft: yDraft(opened.token), rows: yRows(team) };
+}
+
+const idMissing = identityAttempt('YouPI No Level', 'pay_YOUPI_ID1', { method: 'UPI' });
+check('a RECONCILED answer with no verificationLevel is refused, not held as level 0',
+  idMissing.result.ok === true && idMissing.result.state === 'REVIEW' && idMissing.rows === 0,
+  JSON.stringify(idMissing.result));
+check('the attempt is marked IDENTITY MISMATCH, not a reviewable mismatch',
+  String(idMissing.draft.values[12]) === 'IDENTITY MISMATCH', String(idMissing.draft.values[12]));
+check('an identity mismatch never enters the organiser accept queue',
+  !((adminCall({ action: 'drafts-list', session: superSession }).drafts || [])
+    .some(d => d.token === idMissing.opened.token)));
+check('the refusal is audited as payment-identity',
+  ((adminCall({ action: 'audit-list', session: superSession, pageSize: 100 }).entries || [])
+    .some(e => e.action === 'payment-identity')));
+
+const idNull = identityAttempt('YouPI Null Level', 'pay_YOUPI_ID2', { verificationLevel: null });
+check('a null verificationLevel is an identity mismatch, not a payment',
+  idNull.result.state === 'REVIEW' && idNull.rows === 0 &&
+  String(idNull.draft.values[12]) === 'IDENTITY MISMATCH', JSON.stringify(idNull.result));
+
+const idEmpty = identityAttempt('YouPI Empty Level', 'pay_YOUPI_ID3', { verificationLevel: '' });
+check('an empty verificationLevel is an identity mismatch, not a payment',
+  idEmpty.result.state === 'REVIEW' && idEmpty.rows === 0 &&
+  String(idEmpty.draft.values[12]) === 'IDENTITY MISMATCH', JSON.stringify(idEmpty.result));
+
+// The redacted public view: ids, amount, currency, status, method — nothing else.
+const idRedacted = identityAttempt('YouPI Redacted', 'pay_YOUPI_ID4', { method: 'UPI' });
+check('a redacted non-owner reply cannot register a team',
+  idRedacted.result.state === 'REVIEW' && idRedacted.rows === 0, JSON.stringify(idRedacted.result));
+check('the redacted reply is closed, not queued for a human to approve',
+  String(idRedacted.draft.values[12]) === 'IDENTITY MISMATCH' &&
+  !((adminCall({ action: 'drafts-list', session: superSession }).drafts || [])
+    .some(d => d.token === idRedacted.opened.token)));
+
+// Repeated polls must not turn the same refusal into anything else.
+resetFetch();
+yQueue({ paymentId: 'pay_YOUPI_ID4', orderId: String(idRedacted.draft.values[9]),
+  amount: '100.00', amountPaise: '10000', currency: 'INR', status: 'RECONCILED',
+  settlementState: 'RECONCILED', method: 'UPI' });
+const idRedactedAgain = yPost('paystatus', { token: idRedacted.opened.token });
+check('polling an identity mismatch again still registers nobody',
+  idRedactedAgain.state === 'REVIEW' && yRows('YouPI Redacted') === 0, JSON.stringify(idRedactedAgain));
+
+// Control: the legitimate owner reply, with a level, still registers once.
+resetFetch();
+yQueueEcho({
+  paymentId: 'pay_YOUPI_ID_OK', amount: '100.00', amountPaise: '10000',
+  currency: 'INR', status: 'INITIATED',
+  checkoutUrl: 'http://127.0.0.1:7000/checkout/pay_YOUPI_ID_OK'
+});
+const idOkOpen = yPost('payorder', validPayload('YouPI Identity Control'));
+const idOkDraft = yDraft(idOkOpen.token);
+resetFetch();
+yQueue({ paymentId: 'pay_YOUPI_ID_OK', orderId: String(idOkDraft.values[9]),
+  amount: '100.00', amountPaise: '10000', currency: 'INR', status: 'RECONCILED',
+  settlementState: 'RECONCILED', method: 'UPI', verificationLevel: 2 });
+const idOk = yPost('paystatus', { token: idOkOpen.token });
+check('a genuine level-2 reply still registers exactly once after the identity checks',
+  idOk.ok === true && idOk.state === 'PAID' && yRows('YouPI Identity Control') === 1,
+  JSON.stringify(idOk));
+
 /* Put the deployment back the way the rest of the repository describes it. */
 scriptProps.delete('payment_provider');
 scriptProps.delete('youpi_base_url');
@@ -2677,5 +2987,123 @@ resetFetch();
 }
 
 /* ORG_TESTS */
+console.log('\n37. tournament board, scoring and publication');
+
+const tournament0 = sandbox.adminTournament_();
+check('exactly six fixed matches exist',
+  tournament0.ok === true && tournament0.matches.length === 6 &&
+  tournament0.matches.map(m => m.id).join(',') === 'M1,M2,M3,M4,M5,M6',
+  JSON.stringify(tournament0.matches && tournament0.matches.map(m => m.id)));
+check('default scoring is 12 placement points and 1 kill point',
+  tournament0.placementPoints[0] === 12 && tournament0.killPoints === 1,
+  JSON.stringify({ p: tournament0.placementPoints, k: tournament0.killPoints }));
+sandbox.CONFIG.MAX_TEAMS = 60;
+check('the default active-team cap is 60', sandbox.maxTeams_() === 60, String(sandbox.maxTeams_()));
+sandbox.CONFIG.MAX_TEAMS = 0;
+
+let approvedTeam = (tournament0.teams || []).filter(t => t.status === 'APPROVED')[0];
+if (!approvedTeam) {
+  const candidate = (tournament0.teams || [])[0];
+  adminCall({ action: 'status', session: superSession, id: candidate.id, status: 'APPROVED' });
+  approvedTeam = sandbox.adminTeams_().teams.filter(t => t.id === candidate.id)[0];
+}
+check('an approved team is available for match assignment', !!approvedTeam, JSON.stringify(approvedTeam));
+
+const matchSaved = adminCall({
+  action: 'match-save', session: superSession, matchId: 'M1', map: 'Bermuda',
+  stage: 'QUALIFIER', roomLabel: 'Room A',
+  scheduledAt: '2026-12-01T18:30', status: 'SCHEDULED',
+  roomId: 'ROOM-1', roomPassword: 'secret-pass',
+  releaseAt: '2026-12-01T18:00', notes: 'Test lobby'
+});
+check('an organiser can schedule a match and its room', matchSaved.ok === true && matchSaved.match.id === 'M1', JSON.stringify(matchSaved));
+check('a 12-team room keeps its stage and room label',
+  sandbox.MATCH_ROOM_SIZE === 12 && matchSaved.match.stage === 'QUALIFIER' && matchSaved.match.room === 'Room A',
+  JSON.stringify({ size: sandbox.MATCH_ROOM_SIZE, stage: matchSaved.match.stage, room: matchSaved.match.room }));
+check('the public schedule carries the stage and room label',
+  sandbox.publicSchedule_().matches[0].stage === 'QUALIFIER' && sandbox.publicSchedule_().matches[0].roomLabel === 'Room A',
+  JSON.stringify(sandbox.publicSchedule_().matches[0]));
+check('the schedule notification is recorded once',
+  (sandbox.adminTournament_().matches[0].scheduledAt || '').indexOf('2026-12-01') === 0);
+check('scheduled times are labelled as IST',
+  / IST$/.test(matchSaved.match.scheduledLabel), matchSaved.match.scheduledLabel);
+check('the default tie-breakers are total, kills, best placement',
+  sandbox.tieBreakers_().join(',') === 'total,kills,placement', sandbox.tieBreakers_().join(','));
+const beforeRelease = sandbox.publicSchedule_().matches.filter(m => m.id === 'M1')[0];
+check('the public schedule withholds the room before release',
+  beforeRelease.room === null && beforeRelease.roomReleased === false, JSON.stringify(beforeRelease));
+check('the public schedule exposes a server timestamp and release instant',
+  typeof beforeRelease.releaseAtIso === 'string' && beforeRelease.releaseAtIso.length > 0 &&
+  typeof sandbox.publicSchedule_().serverNow === 'string', JSON.stringify(beforeRelease));
+check('the admin board can see the room credentials',
+  sandbox.adminTournament_().matches[0].roomPassword === 'secret-pass');
+
+const slotThirteen = adminCall({ action: 'match-assign', session: superSession, matchId: 'M2', teamId: approvedTeam.id, slot: 13 });
+check('a room refuses a slot outside 1 to 12',
+  slotThirteen.ok === false && slotThirteen.code === 'SLOT', JSON.stringify(slotThirteen));
+const assigned = adminCall({ action: 'match-assign', session: superSession, matchId: 'M1', teamId: approvedTeam.id });
+check('an approved team can be assigned to M1', assigned.ok === true, JSON.stringify(assigned));
+check('the assignment appears on the match',
+  sandbox.adminTournament_().matches[0].teams.some(t => t.teamId === approvedTeam.id));
+
+const placementThirteen = adminCall({
+  action: 'result-save', session: superSession, matchId: 'M1',
+  teamId: approvedTeam.id, placement: 13, kills: 0
+});
+check('a room refuses a placement outside 1 to 12',
+  placementThirteen.ok === false && placementThirteen.code === 'PLACEMENT', JSON.stringify(placementThirteen));
+const resultDraft = adminCall({
+  action: 'result-save', session: superSession, matchId: 'M1',
+  teamId: approvedTeam.id, placement: 1, kills: 5
+});
+check('a draft result is scored automatically',
+  resultDraft.ok === true && resultDraft.result.total === 17 &&
+  resultDraft.result.placementPoints === 12 && resultDraft.result.killPoints === 5,
+  JSON.stringify(resultDraft.result));
+const earlyPublish = adminCall({ action: 'result-publish', session: superSession, matchId: 'M1' });
+check('a draft cannot be published before approval', earlyPublish.ok === false && earlyPublish.code === 'DRAFTS', JSON.stringify(earlyPublish));
+check('no draft leaked into the public results', sandbox.publicResults_().results.length === 0);
+
+const approvedResults = adminCall({ action: 'result-approve', session: superSession, matchId: 'M1' });
+check('all draft results can be approved', approvedResults.ok === true && approvedResults.approved === 1, JSON.stringify(approvedResults));
+const published = adminCall({ action: 'result-publish', session: superSession, matchId: 'M1' });
+check('approved results can be published', published.ok === true && published.published === 1, JSON.stringify(published));
+const publicAfter = sandbox.publicResults_();
+check('published results appear publicly',
+  publicAfter.results.length === 1 && publicAfter.results[0].teamName === approvedTeam.teamName);
+check('published per-room results carry an automatic rank',
+  publicAfter.results[0].rank === 1, JSON.stringify(publicAfter.results[0]));
+check('the published leaderboard ranks the winner first',
+  publicAfter.leaderboard.length === 1 && publicAfter.leaderboard[0].rank === 1 && publicAfter.leaderboard[0].total === 17);
+
+const tieSaved = adminCall({
+  action: 'settings-set', session: superSession, fee: 100,
+  tieBreakers: 'total,placement,kills'
+});
+check('the organiser can change the tie-breaker order',
+  tieSaved.ok === true && sandbox.tieBreakers_().join(',') === 'total,placement,kills',
+  JSON.stringify(tieSaved));
+adminCall({ action: 'settings-set', session: superSession, fee: 100, tieBreakers: 'total,kills,placement' });
+
+const released = adminCall({
+  action: 'match-save', session: superSession, matchId: 'M1', map: 'Bermuda',
+  scheduledAt: '2026-12-01T18:30', status: 'SCHEDULED',
+  roomId: 'ROOM-1', roomPassword: 'secret-pass',
+  releaseAt: '2020-01-01T00:00', notes: 'Released test lobby'
+});
+check('a release time can be changed after scheduling', released.ok === true, JSON.stringify(released));
+const afterRelease = sandbox.publicSchedule_().matches.filter(m => m.id === 'M1')[0];
+check('the public schedule reveals room details only after release',
+  afterRelease.room && afterRelease.room.id === 'ROOM-1' && afterRelease.room.password === 'secret-pass',
+  JSON.stringify(afterRelease));
+
+const upiChoice = sandbox.validatePaymentChoice_({ method: 'UPI', utr: 'ABC12345' });
+check('manual UPI is accepted as PENDING, never PAID',
+  upiChoice.ok === true && upiChoice.value.method === 'UPI' &&
+  upiChoice.value.status === 'PENDING' && upiChoice.value.utr === 'ABC12345',
+  JSON.stringify(upiChoice));
+check('manual UPI is the active default without gateway credentials',
+  sandbox.publicConfig_().manualUpi === true && sandbox.publicConfig_().online === false);
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail === 0 ? 0 : 1);

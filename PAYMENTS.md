@@ -1,4 +1,15 @@
-# PAYMENTS — ₹ entry fee, verified online
+# PAYMENTS — ₹ entry fee, UPI / cash
+
+> **Active default (current release):** organiser-verified **manual UPI** and
+> **cash**. A team pays by UPI or hands cash to an organiser; the row starts
+> `PENDING`; only an organiser can mark it `PAID` after seeing the money. A UTR
+> typed by a team is saved as a reference, never as proof. The UPI ID itself is
+> not returned by the API; set the optional `upi_qr_url` Script Property to a
+> public image path if the official QR should appear on the site.
+>
+> Set `payment_mode=manual` to force this path. With no YouPI merchant
+> properties, manual mode is selected automatically. The YouPI section below is
+> retained for historical review and is dormant in the default deployment.
 
 Two methods, never mixed, and one gateway in front: **YouPI PG**, self-hosted
 by the organiser. It is the only online gateway in this codebase — there is no
@@ -14,7 +25,7 @@ Last reviewed: 21 October 2026.
 
 | Team chooses | What happens | Row written |
 | --- | --- | --- |
-| **Online** | The server opens a YouPI session for the live fee. The page embeds YouPI's own hosted checkout. The server polls YouPI with the merchant key; only a payment it reports as `SUCCESS`, in INR, for the exact snapshotted fee, against the session it opened, at the required verification level, writes the row. | `ONLINE` / `PAID` + order id, payment id, paid amount, currency, verified time, provider |
+| **Online** | The server opens a YouPI session for the live fee. The page embeds YouPI's own hosted checkout. The server polls YouPI with the merchant key; only a payment it reports as `RECONCILED` with `settlementState: RECONCILED`, in INR, for the exact snapshotted fee, against the session it opened, at the required verification level, writes the row. An observed credit (`OBSERVED_SUCCESS` / `NOT_RECONCILED`) is recorded but never registers a team. | `ONLINE` / `PAID` + order id, payment id, paid amount, currency, verified time, provider |
 | **Cash** | The row is written immediately and stays `PENDING` until an organiser has the notes in hand and marks it paid. | `CASH` / `PENDING` |
 
 There is no "I have paid" button anywhere. A registration that claims
@@ -32,7 +43,10 @@ form ──► POST ?action=payorder   validate, snapshot fee, persist a draft (
                                               │
                                     GET the session back WITH the merchant key
                                               │
-                 status = SUCCESS + exact order + exact amount + INR
+                 OBSERVED_SUCCESS / NOT_RECONCILED ──► draft OBSERVED, stays PENDING
+                                              │
+                 status = RECONCILED + settlementState RECONCILED
+                 + exact order + exact amount + INR
                  (+ YouPI verification level >= configured minimum)
                                               ▼
                                 one row written under a script lock
@@ -78,7 +92,7 @@ New tabs:
   retried with the same token and order id instead of minting a second order.
 
 `Audit` gains `payment-opened`, `payment-verified`, `payment-unverified`,
-`payment-mismatch`, `payment-cancelled`, `payment-no-slot`,
+`payment-identity`, `payment-mismatch`, `payment-cancelled`, `payment-no-slot`,
 `payment-manual-accept`, `payment-rejected`, `settings-fee`.
 
 ### Guardrails
@@ -87,8 +101,23 @@ New tabs:
   changing the fee later never rewrites an existing registration.
 - Amount, currency and order id must all match, or the attempt is held as
   `MISMATCH` for an organiser instead of registering a team.
+- YouPI returns `verificationLevel` only to the owning merchant, and returns no
+  `merchantId` at all. A reply without a level is therefore not this account's
+  proof: it closes the attempt as `IDENTITY MISMATCH`, is audited as
+  `payment-identity`, and is deliberately kept OUT of the organiser review
+  queue, so a payment that reached another account can never be accepted by
+  hand.
 - YouPI payments below the configured verification level are held as
   `NEEDS REVIEW`; no team is registered until a human accepts them.
+- An `OBSERVED_SUCCESS` / `NOT_RECONCILED` reply is money an observer saw, not
+  settlement. The draft becomes `OBSERVED - AWAITING RECONCILIATION`, the audit
+  gains `payment-observed`, the page stays on `PENDING`, nobody is registered,
+  and that team cannot open a second checkout while it is outstanding. A later
+  `RECONCILED` reply finalises the same draft — even after the checkout window.
+- `SUCCESS` is not a payable UPI outcome in the current contract: it means COD,
+  counter or manual confirmation. Only `RECONCILED` with
+  `settlementState: RECONCILED`, at the required verification level, can
+  register a team.
 - Duplicate callbacks and repeated polls return the same registration id; the
   finalise step runs under `LockService` and re-reads the draft first.
 - A create that times out leaves the `CREATING` draft in place: the next
@@ -119,6 +148,23 @@ Until those properties exist, the page says *"Online payment is not switched
 on yet"* and **Cash still works**. It never pretends to verify a payment it
 cannot verify.
 
+### Why the online button is missing
+
+The button is not a separate feature flag: it appears only when
+`?action=config` answers `online:true`, which happens only when all three of
+`youpi_base_url`, `youpi_merchant_id` and `youpi_merchant_key` are present and
+the base URL starts with `http://` or `https://`. That is a server decision, so
+no frontend change can bring the option back while it is false, and the cash
+path stays available either way.
+
+To see the exact cause without exposing a value, open the dashboard: its
+settings line lists the missing property **names** (from `settings-get`'s
+`missing` array). `POST ?action=payorder` answers
+`{"ok":false,"code":"PAYMENT_OFFLINE"}` in the same state, and writes no draft
+and no row. After adding or correcting a property, redeploy a **new version**
+of the web app; an existing deployment keeps reading its old properties until
+then.
+
 Razorpay settings left over from an older deployment are ignored: a
 `payment_provider` or `razorpay_key_*` property cannot switch anything on, and
 the backend has no code that could create a Razorpay order. Delete those
@@ -146,8 +192,10 @@ YouPI is not a hosted service. You run it, so you also run the infrastructure:
    `youpi_merchant_id`, `youpi_merchant_key`
    (optionally `youpi_min_verification_level`).
 6. **Redeploy the web app** and run one ₹1 test payment end to end: the
-   checkout must appear inside the panel, the row must appear only after
-   YouPI answers `SUCCESS` with level ≥ the configured minimum.
+   checkout must appear inside the panel, and the row must appear only after
+   YouPI answers `RECONCILED` with `settlementState: RECONCILED`, for that
+   order and amount, at level ≥ the configured minimum. An observed credit
+   stays pending until it is reconciled against the bank statement.
 
 Two more things the organiser must accept:
 
@@ -164,7 +212,7 @@ Two more things the organiser must accept:
 
 ## 3. Verified by tests
 
-`node verify-apps-script.js` — **556 checks**, including:
+`node verify-apps-script.js` — **599 checks**, including:
 
 - section 35 (no second gateway): a leftover `payment_provider=razorpay` and
   Razorpay keys leave online payment off, open no session, call no gateway,
@@ -179,23 +227,42 @@ Two more things the organiser must accept:
   `/checkout/{id}/cancel`; organiser accept needs a note, writes one row,
   records who accepted and why, and is idempotent; reject saves nobody; the
   required level is read from Script Properties; cash stays `PENDING`; an
-  `ONLINE` claim is still refused.
+  `ONLINE` claim is still refused; `OBSERVED_SUCCESS` stays `PENDING` and
+  registers nobody; `RECONCILED` without `settlementState: RECONCILED` stays
+  `PENDING`; a bare `SUCCESS` never pays an online team; delayed reconciliation
+  after the checkout window still registers once; replaying it returns the same
+  registration; a rotated/invalid merchant key leaves a retryable draft and no
+  row.
 
-`node verify-approve.js` — **54 checks**; the WhatsApp approval message quotes
-the fee stored on the row, not a constant.
+`node verify-approve.js` — **80 checks**; the WhatsApp approval and rejection
+messages quote the fee stored on the row, not a constant, and the recovery-key
+permission list includes `pay.update`.
 
 **Live gateway contract** — YouPI PG V2 was cloned, installed on Node 24 and
 run locally (`payment-api` on :6100, SQLite). The exact requests this adapter
-sends were replayed against it:
+sends were replayed against it, and re-checked on 23 October 2026. Staging
+resources, the checkout-portal check and the remaining account-level blockers
+are recorded in [STAGING.md](STAGING.md):
 
 | Call | Result |
 | --- | --- |
-| `POST /api/v1/payments` with `X-Merchant-Key`, amount `100.00` | `201` with `paymentId`, `orderId` echo, `amountPaise 10000`, `currency INR`, `checkoutUrl` |
+| `POST /api/v1/payments` with `X-Merchant-Key` and `Idempotency-Key`, amount `100.00` | `201` with `paymentId`, `orderId` echo, `amountPaise 10000`, `currency INR`, `checkoutUrl` |
 | `GET /api/v1/payments/{id}` with `X-Merchant-Key` | `200` with `status`, plus `verificationLevel`, `verificationTag`, `internalStatus` |
 | Same GET **without** the key | `200` but **no** verification fields — a leaked session id cannot read them |
 | Same POST with a wrong key | `401 INVALID_MERCHANT_KEY` |
 | `POST /api/v1/checkout/{id}/cancel` | `200 CANCELLED`, and the next status read says `CANCELLED` |
-| A session seeded `SUCCESS` with level 2 | owner view returns `SUCCESS`, `verificationLevel 2`, `DUAL_VERIFIED` — the evidence the adapter requires |
+| A session seeded `SUCCESS` with level 2 | owner view returns `SUCCESS`, `verificationLevel 2`, `DUAL_VERIFIED` — historical: this was the evidence required before 4 November 2026. The current requirement is `RECONCILED` + `settlementState: RECONCILED` |
+
+On 23 October 2026 the adapter functions themselves (`youpiCreatePayment_`,
+`verifyYoupiPayment_`, `youpiCall_`) were run against that local instance, not
+only raw curl calls: create returned `ok:true` with a `₹100.00` INR session and
+checkout URL; a fresh session read `PENDING` / `INITIATED`; cancel read
+`CANCELLED`. A deliberately synthetic two-channel test (YouPI test mode, one
+SMS and one Gmail observation, both for the exact amount, session set ACTIVE in
+the local staging database) drove `verifyYoupiPayment_` to `PAID`,
+`verificationLevel 2`, tag `Dual Verification (SMS_GATEWAY + Gmail)`. Test mode
+was then disabled. **That was a simulator, not a bank payment**, and no
+tournament row was written from it. See [STAGING.md](STAGING.md).
 
 **Browser** (preview harness): the hosted checkout is framed, there is no
 submit button; the stand-in gateway click is
@@ -222,7 +289,8 @@ commit `90eecd5`).
 
 - `POST /api/v1/payments` → `paymentId`, `checkoutUrl`, amount echo
 - `GET /api/v1/payments/{id}` → status, and for the owning merchant
-  `verificationLevel` (0 unverified, 1 SMS observed, 2 SMS + Gmail)
+  `verificationLevel` (0 unverified, 1 one observer — SMS **or** Gmail,
+  2 two independent observers — SMS + Gmail)
 - `POST /api/v1/checkout/{id}/cancel`
 - HMAC-SHA256 webhooks (`X-Gateway-Signature: sha256=…`), test mode and a
   simulator for synthetic bank messages
@@ -249,6 +317,24 @@ Only if you accept all of this:
 | Does the 0% fee apply to me? | It means **no aggregator fee**: money moves P2P into your own UPI account. It is not a verified 0% for a college event — you still carry bank risk, reconciliation work and compliance responsibility, and the project's README asks experimenters to keep usage to **20 or fewer payment attempts per day per receiving account**. |
 | Can it run where this site runs? | No. GitHub Pages + Apps Script cannot host a Node monolith, SQLite, an Android observer or a Gmail poller. You need a separate host and a phone with the receiving SIM. |
 | Is the licence sorted? | Not by the repository. Ask the maintainers in writing before a real event. |
+
+Gmail is supported only as one observer channel. A Gmail-only confirmation is
+level 1; the adapter defaults to requiring level 2, so a Gmail-only alert is
+held for an organiser instead of registering a team. YouPI also rejects senders
+outside its bank-alert domain allowlist (`INVALID_EMAIL_DOMAIN`), so a
+FamPay/FamApp notification from its own domain cannot be used as proof unless
+the bank itself sends the alert to that Gmail inbox.
+
+**Contract updated 4 November 2026.** The adapter follows the clone at commit
+`405327c`: a payable online payment is `RECONCILED` with
+`settlementState: "RECONCILED"`, at the required verification level, for our
+order and amount. `OBSERVED_SUCCESS` / `NOT_RECONCILED` becomes
+`OBSERVED - AWAITING RECONCILIATION` and never registers a team; `SUCCESS` is
+COD/counter. The merchant key is the merchant **API key** — YouPI verifies it
+against `merchants.api_key_hash`, which equals the webhook secret only until an
+API key is rotated; after that a 401 `INVALID_MERCHANT_KEY` leaves the attempt
+pending and retryable. See
+[PAYMENT-ARCHITECTURE.md](PAYMENT-ARCHITECTURE.md).
 
 So: **integrated, but off until configured**, and set to require level 2. If
 any of the setup above is missing, online stays dark and cash keeps working.

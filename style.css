@@ -24,6 +24,10 @@
 }
 
 * { box-sizing: border-box; }
+/* The UA rule for [hidden] loses to any author `display` (the pay buttons set
+   display:flex), which silently paints elements meant to be gone. Keep one
+   authoritative rule here, as admin.css already does. */
+[hidden] { display: none !important; }
 html { scroll-behavior: smooth; }
 body {
   margin: 0;
@@ -799,7 +803,10 @@ footer {
 
 .pay-choice-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* auto-fit, not 1fr 1fr: when online is switched off that button is hidden,
+     and the remaining cash button should take the whole row instead of leaving
+     an empty half. */
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1002,3 +1009,39 @@ footer {
 }
 
 .pay-choice-note b { color: #FFE7A8; }
+
+/* Public tournament board */
+.public-board {
+  margin: 28px auto; padding: 28px; max-width: 1180px;
+  border: 1px solid rgba(255,255,255,.10); border-radius: 22px;
+  background: rgba(12,16,22,.72);
+}
+.public-board-lead { color: var(--muted, #9aa3af); max-width: 720px; margin: 0 0 18px; line-height: 1.6; }
+.schedule-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 14px; }
+.schedule-card { padding: 18px; border: 1px solid rgba(255,255,255,.10); border-radius: 16px; background: rgba(255,255,255,.03); }
+.schedule-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.match-id { font-family: "Space Grotesk", sans-serif; font-weight: 700; color: var(--lime, #b8ff39); letter-spacing: .06em; }
+.status-chip { font-size: 10px; letter-spacing: .08em; padding: 5px 8px; border-radius: 999px; border: 1px solid rgba(255,255,255,.16); color: #cbd5e1; }
+.schedule-card h3 { margin: 12px 0 4px; font-size: 19px; }
+.schedule-stage { margin: 0 0 4px; color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+.schedule-time { margin: 0 0 12px; color: #cbd5e1; font-size: 13px; }
+.room-locked { margin: 0; padding: 10px; border-radius: 10px; background: rgba(255,255,255,.04); color: #9aa3af; font-size: 12px; }
+.room-reveal { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; padding: 10px; border-radius: 10px; background: rgba(184,255,57,.07); border: 1px solid rgba(184,255,57,.22); }
+.room-reveal span { font-size: 10px; letter-spacing: .08em; color: #9aa3af; }
+.room-reveal b { font-family: "Space Grotesk", sans-serif; letter-spacing: .04em; }
+.schedule-result-link { display: inline-block; margin-top: 12px; color: var(--lime, #b8ff39); font-size: 12px; text-decoration: none; }
+.board-empty { color: #9aa3af; margin: 0; }
+.public-table { margin-top: 18px; overflow-x: auto; }
+.public-table table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.public-table th, .public-table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid rgba(255,255,255,.08); }
+.public-table th { color: #9aa3af; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+.public-table td:first-child { color: var(--lime, #b8ff39); font-weight: 700; }
+.pay-manual { display: grid; gap: 12px; padding: 4px 0; }
+.pay-manual-copy, .pay-manual-note { margin: 0; color: #cbd5e1; font-size: 13px; line-height: 1.6; }
+.pay-manual-note { color: #9aa3af; font-size: 12px; }
+.pay-upi-qr { width: min(240px, 100%); margin: 0 auto; border-radius: 14px; background: #fff; padding: 8px; }
+@media (max-width: 900px) { .schedule-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+@media (max-width: 620px) {
+  .public-board { padding: 18px; margin: 18px 0; border-radius: 16px; }
+  .schedule-grid { grid-template-columns: 1fr; }
+}

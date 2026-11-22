@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QQSGP · YouPI payment readiness</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#161a21; --panel2:#1d222b; --line:#2a313d;
+    --ink:#e8ecf2; --muted:#9aa6b6; --dim:#6f7b8b;
+    --ok:#3ddc97; --warn:#ffc857; --bad:#ff6b6b; --info:#6cb6ff; --lime:#b8ff39;
+  }
+  @media (prefers-color-scheme: light){
+    :root{--bg:#f6f7f9;--panel:#fff;--panel2:#f0f2f6;--line:#dfe3ea;--ink:#141a22;--muted:#5a6675;--dim:#7b8794;--ok:#0f7a4d;--warn:#8a5b00;--bad:#b3261e;--info:#0b5fa5;}
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
+  .wrap{max-width:980px;margin:0 auto;padding:36px 22px 70px}
+  header{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:26px}
+  .eyebrow{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);margin:0 0 8px}
+  h1{font-size:30px;line-height:1.2;margin:0 0 10px}
+  h1 span{color:var(--lime)}
+  header p{margin:0;color:var(--muted);max-width:70ch}
+  .verdict{display:flex;gap:14px;align-items:flex-start;border:1px solid #5a3a1f;background:linear-gradient(180deg,rgba(255,200,87,.10),rgba(255,200,87,.03));border-radius:12px;padding:16px 18px;margin:22px 0 30px}
+  @media (prefers-color-scheme: light){.verdict{border-color:#e6c98a;background:#fff8e6}}
+  .verdict strong{display:block;margin-bottom:4px}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--warn);margin-top:8px;flex:0 0 auto}
+  section{margin:0 0 30px}
+  h2{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin:0 0 12px;font-weight:600}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px}
+  .card + .card{margin-top:12px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;vertical-align:top;padding:10px 10px 10px 0;border-bottom:1px solid var(--line)}
+  th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);font-weight:600}
+  tr:last-child td{border-bottom:none}
+  code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 6px}
+  pre{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow:auto;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  ul{margin:8px 0 0;padding-left:20px}
+  li{margin:6px 0}
+  .tag{display:inline-block;font-size:11px;letter-spacing:.06em;text-transform:uppercase;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+  .tag.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,transparent)}
+  .tag.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,transparent)}
+  .tag.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,transparent)}
+  .tag.info{color:var(--info);border-color:color-mix(in srgb,var(--info) 45%,transparent)}
+  .check{list-style:none;padding:0;margin:0}
+  .check li{display:flex;gap:12px;align-items:flex-start;padding:11px 0;border-bottom:1px solid var(--line)}
+  .check li:last-child{border-bottom:none}
+  .check input{margin:4px 0 0;width:17px;height:17px;accent-color:#7a9e1f;flex:0 0 auto}
+  .check label{cursor:pointer}
+  .check small{display:block;color:var(--muted);font-size:13px;margin-top:2px}
+  .check input:checked + label{text-decoration:line-through;color:var(--dim)}
+  .muted{color:var(--muted)}
+  .dim{color:var(--dim);font-size:13px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media (max-width:760px){.grid{grid-template-columns:1fr}}
+  .kv{display:flex;justify-content:space-between;gap:16px;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
+  .kv:last-child{border-bottom:none}
+  .kv span:first-child{color:var(--muted)}
+  .kv span:last-child{text-align:right;font-variant-numeric:tabular-nums}
+  footer{margin-top:34px;padding-top:16px;border-top:1px solid var(--line);color:var(--dim);font-size:13px}
+  .banner{display:flex;gap:10px;align-items:center;font-size:13px;color:var(--muted);background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:22px}
+  a{color:var(--info)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="eyebrow">QQSGP Free Fire Championship · payment readiness</p>
+  <h1>YouPI online payments: <span>what is proven, what is not</span></h1>
+  <p>Audit of 22 Oct 2026, 12:00 IST. This page is the checklist you asked for: what I verified myself, what only you can obtain, the isolated test plan, the exact Script Property formats, and the one code gap worth closing before real money.</p>
+</header>
+
+<div class="banner">
+  <span class="tag info">current state</span>
+  <span>Live deployment reports <code>online:false</code> · fee ₹100 · 1 cash registration · 0 payment drafts · 0 audit rows. Nothing was changed in this stage.</span>
+</div>
+
+<div class="verdict">
+  <span class="dot"></span>
+  <div>
+    <strong>Online payments are still off, and YouPI is not certified for real-money use.</strong>
+    <span class="muted">Its own README calls it an experimental research project, “not a certified, bank-approved, NPCI-approved, audited, or production-ready payment gateway”, and asks that it never be the sole source of truth for a payment. Passing tests does not change that. Treat acceptance of real fees as a decision you make, on your account, after the checks below.</span>
+  </div>
+</div>
+
+<section>
+  <h2>1 · What I verified (no changes made)</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Check</th><th>Result</th><th>Evidence</th></tr></thead>
+      <tbody>
+        <tr><td>Online payment enabled on the live deployment?</td><td><span class="tag bad">No</span></td><td><code>?action=config</code> → <code>"online":false</code> at 06:39, 06:44 and 06:53 UTC</td></tr>
+        <tr><td>YouPI properties present?</td><td><span class="tag bad">None</span></td><td>7 Script Properties; no <code>youpi_base_url</code>, <code>youpi_merchant_id</code>, <code>youpi_merchant_key</code></td></tr>
+        <tr><td>Can a browser open a payment anyway?</td><td><span class="tag ok">Refused</span></td><td>live <code>payorder</code> → <code>PAYMENT_OFFLINE</code>, no draft written</td></tr>
+        <tr><td>Forged gateway callback</td><td><span class="tag ok">Ignored</span></td><td>live <code>paywebhook</code> with fake SUCCESS → <code>{"ok":true,"ignored":true}</code>, no row, no audit</td></tr>
+        <tr><td>Order / amount / currency checks</td><td><span class="tag ok">In code</span></td><td>mismatch → <code>MISMATCH</code>, team not registered</td></tr>
+        <tr><td>Registration exactly once</td><td><span class="tag ok">In code + mock</span></td><td>lock + re-read draft; 3 repeated polls returned one registration id</td></tr>
+        <tr><td>Fee snapshot while checkout is open</td><td><span class="tag ok">Mock proof</span></td><td>opened ₹100, fee changed to ₹120, settled and verified at ₹100</td></tr>
+        <tr><td>Cancel closes the attempt</td><td><span class="tag ok">Mock proof</span></td><td>team count unchanged after cancel</td></tr>
+        <tr><td>Project test suite</td><td><span class="tag ok">566 passed</span></td><td><code>node verify-apps-script.js</code>, 0 failed</td></tr>
+        <tr><td>Live YouPI merchant, UPI account, observer</td><td><span class="tag bad">Not verified</span></td><td>nothing configured to inspect</td></tr>
+        <tr><td>Real ₹1 / ₹100 payment end to end</td><td><span class="tag bad">Not attempted</span></td><td>deliberate: no real money was charged</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>2 · YouPI suitability — what its own repository says</h2>
+  <div class="grid">
+    <div class="card">
+      <h3 style="margin:0 0 8px;font-size:15px">Red flags you should weigh</h3>
+      <ul>
+        <li><strong>Experimental by declaration.</strong> README: research/learning only, no warranty, “not for critical payments”.</li>
+        <li><strong>No compliance claim.</strong> “Using this software does not itself authorise you to operate a payment aggregator” — RBI/NPCI/bank rules are your responsibility.</li>
+        <li><strong>Conservative project limit:</strong> ≤ 20 payment attempts per day per receiving account for experiments.</li>
+        <li><strong>Verification is observational</strong> — bank SMS on a phone + Gmail alert, not a bank API. Level 2 means both agreed, not that a bank certified it.</li>
+        <li><strong>Licence is ambiguous.</strong> README points to a <code>LICENSE</code> file that does not exist; <code>package.json</code> says <code>"license": "Commercial"</code>.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 style="margin:0 0 8px;font-size:15px">What is actually strong in it</h3>
+      <ul>
+        <li>Money moves directly to your UPI account; no aggregator holds funds.</li>
+        <li>Merchant-private data needs <code>X-Merchant-Key</code>; anonymous callers get a redacted view.</li>
+        <li><code>verificationLevel</code> is only returned to the owning merchant, so an unauthenticated read cannot fake “level 2”.</li>
+        <li>Developer/test endpoints are refused when <code>NODE_ENV=production</code> unless <code>YOUPI_ALLOW_DEV_TOOLS=true</code>.</li>
+        <li>Our server holds sub-level payments for an organiser instead of registering the team.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>3 · Isolated sandbox — yes, but not by flipping test mode on production</h2>
+  <div class="card">
+    <p style="margin-top:0">YouPI’s test tooling is real: <code>POST /api/v1/admin/dev/test-mode</code> (10-minute window, disables auto-banning for that merchant, audited) and <code>POST /api/v1/checkout/:id/simulate-observation</code> (injects a synthetic SMS into the real verification pipeline).</p>
+    <p><strong>Do not use either on the gateway that will take real money.</strong> Two consequences matter:</p>
+    <ul>
+      <li>Test mode turns off auto-banning for the merchant for ten minutes — a security control, disabled by design.</li>
+      <li><code>simulate-observation</code> can settle <em>live</em> sessions. It is gated by the admin token, but enabling it on production means one leaked admin token can mark payments paid.</li>
+    </ul>
+    <p>Safe isolation instead:</p>
+    <ul>
+      <li><strong>Separate YouPI instance</strong> — own database, own ports, <code>NODE_ENV=development</code>, no bank observers attached, a throwaway merchant with an unused test VPA. Nothing it does can reach the production ledger.</li>
+      <li><strong>Separate Apps Script project</strong> — a copy of the code with its own Script Properties, pointing at the test instance.</li>
+      <li><strong>Separate sheet</strong> — a copy of the production sheet, never the production file.</li>
+      <li><strong>Direct API calls</strong> — do not repoint the public site at the test deployment; call the staging <code>/exec</code> from a local page.</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <h2>4 · The four properties, exact format</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Property</th><th>Expected value</th><th>Why it must look like that</th></tr></thead>
+      <tbody>
+        <tr><td><code>youpi_base_url</code></td><td><code>https://pay.example.org</code> — public HTTPS origin, no trailing slash, no path</td><td>must match <code>/^https?:\/\/[^\s]+$/</code>; trailing slashes are stripped; Google’s servers must reach it, so <code>localhost</code> will not work</td></tr>
+        <tr><td><code>youpi_merchant_id</code></td><td>the merchant UUID from YouPI’s merchant admin, sent as <code>X-Merchant-Id</code></td><td>YouPI looks the merchant up by this id; a wrong id cannot settle into your account</td></tr>
+        <tr><td><code>youpi_merchant_key</code></td><td>that merchant’s <strong>webhook secret</strong>, sent as <code>X-Merchant-Key</code></td><td>YouPI validates it with a constant-time compare; it also unlocks the owner-only <code>verificationLevel</code></td></tr>
+        <tr><td><code>youpi_min_verification_level</code></td><td><code>2</code> (default), <code>1</code>, or <code>0</code></td><td>anything invalid or missing falls back to 2; lowering it lets a single observation register a team</td></tr>
+      </tbody>
+    </table>
+    <p class="dim" style="margin-bottom:0">No credential is printed here, and none was invented. Type the values only into Project Settings → Script Properties.</p>
+  </div>
+</section>
+
+<section>
+  <h2>5 · The merchant-identity gap — and the smallest safe fix</h2>
+  <div class="card">
+    <p style="margin-top:0"><strong>What the gap is.</strong> YouPI never returns <code>merchantId</code> in a payment response — not in <code>CreatePaymentResponse</code> and not in <code>PaymentDetailsResponse</code>. So “compare the merchant in the response” cannot be implemented as written. Identity is currently established only by the credentials we send.</p>
+    <p><strong>How it can bite.</strong> A non-owner read returns a redacted view with no <code>verificationLevel</code>. Our code does <code>Number(session.verificationLevel) || 0</code>, which turns “not ours / not owner” into level 0 → status <code>NEEDS REVIEW</code>. A team is not registered automatically, which is safe — but an organiser could later accept it by hand on a payment that never reached our account.</p>
+    <p><strong>Smallest safe fix</strong> (3 lines, in <code>verifyYoupiPayment_</code>, no schema or deployment change): treat a missing owner-only field as a failed identity check rather than as “level 0”.</p>
+<pre>var level = session.verificationLevel;
+if (level === undefined || level === null || level === '') {
+  // No owner-only field: this response is not the owning merchant's view.
+  return { state: 'MISMATCH', reason: 'identity', provider: 'YOUPI',
+           paymentId: cleanText_(session.paymentId) || draft.paymentId };
+}</pre>
+    <p class="dim" style="margin-bottom:0">Existing tests already return <code>verificationLevel</code> on every SUCCESS reply, so this is compatible with the 566-test suite. A stronger optional step is also checking that <code>session.metadata.token</code> equals the draft token — YouPI returns <code>metadata</code> only to the owner — but that needs the test harness to echo metadata and is a slightly larger change. I have not applied either; code is untouched.</p>
+  </div>
+</section>
+
+<section>
+  <h2>6 · What you must obtain</h2>
+  <div class="card">
+    <ul class="check" id="obtain">
+      <li><input type="checkbox" id="o1"><label for="o1">Written permission / licence terms from YouPI’s maintainer
+        <small>README points at a missing LICENSE; package.json says “Commercial”. Ask explicitly whether a college event may use it with real fees.</small></label></li>
+      <li><input type="checkbox" id="o2"><label for="o2">A merchant bound to the department’s real UPI account
+        <small>Not a personal wallet, not a resold account, not the old <code>merchant@upi</code> placeholder.</small></label></li>
+      <li><input type="checkbox" id="o3"><label for="o3">The merchant UUID and that merchant’s webhook secret
+        <small>From YouPI’s merchant admin. Never paste them into chat or the repo.</small></label></li>
+      <li><input type="checkbox" id="o4"><label for="o4">The public HTTPS origin of the instance Google will call
+        <small>Must be reachable from the internet; localhost is not.</small></label></li>
+      <li><input type="checkbox" id="o5"><label for="o5">Observer health check: SMS device and Gmail both reporting
+        <small>Level 2 needs both. Without them every payment lands in NEEDS REVIEW.</small></label></li>
+      <li><input type="checkbox" id="o6"><label for="o6">Bank/UPI terms confirmation for collecting student fees this way
+        <small>YouPI itself says compliance is yours; a single department event may be fine, but confirm.</small></label></li>
+      <li><input type="checkbox" id="o7"><label for="o7">YouPI admin token (only if we run the isolated test)
+        <small>Needed for test-mode and simulate-observation on the <em>test</em> instance.</small></label></li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <h2>7 · Safe test plan (when you say go)</h2>
+  <div class="card">
+    <ul class="check" id="plan">
+      <li><input type="checkbox" id="p1"><label for="p1">Stand up a second YouPI instance
+        <small>Own DB and ports, <code>NODE_ENV=development</code>, no real observers, throwaway merchant.</small></label></li>
+      <li><input type="checkbox" id="p2"><label for="p2">Copy the Apps Script project and a copy of the sheet
+        <small>Staging only; production properties and sheet untouched.</small></label></li>
+      <li><input type="checkbox" id="p3"><label for="p3">Create a session on staging, pay nothing, inject one simulated SMS
+        <small>Expect <code>verificationLevel 1</code> → held as NEEDS REVIEW, not registered. That is the correct fail-safe.</small></label></li>
+      <li><input type="checkbox" id="p4"><label for="p4">Inject SMS + Gmail, expect level 2 → exactly one row
+        <small>Then repeat the poll three times and the webhook twice; the team count must not move.</small></label></li>
+      <li><input type="checkbox" id="p5"><label for="p5">Wrong amount, wrong currency, wrong order id
+        <small>Each must end as MISMATCH with no registration.</small></label></li>
+      <li><input type="checkbox" id="p6"><label for="p6">Cancel, expire, and close the checkout
+        <small>No row, no PAID, no notification.</small></label></li>
+      <li><input type="checkbox" id="p7"><label for="p7">Change the fee mid-session
+        <small>Row must carry the snapshotted fee.</small></label></li>
+      <li><input type="checkbox" id="p8"><label for="p8">Only then: production keys, one real ₹100 payment by you
+        <small>Refund it to yourself afterwards; reconcile against the bank statement, not against the gateway.</small></label></li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <h2>8 · Still blocked</h2>
+  <div class="card">
+    <div class="kv"><span>Live merchant / UPI legitimacy</span><span><span class="tag bad">blocked</span> nothing configured</span></div>
+    <div class="kv"><span>Live checkout page</span><span><span class="tag bad">blocked</span> no session can be opened</span></div>
+    <div class="kv"><span>Live webhook from YouPI</span><span><span class="tag bad">blocked</span> no merchant, no callback</span></div>
+    <div class="kv"><span>Organiser dashboard screens</span><span><span class="tag warn">needs PIN</span> sheet side verified</span></div>
+    <div class="kv"><span>Real-money behaviour</span><span><span class="tag bad">not tested</span> deliberately</span></div>
+  </div>
+</section>
+
+<footer>
+  Generated 22 Oct 2026 · sources: live <code>/exec</code> responses, production sheet read-only export, project test suite, and the YouPI repository (<code>README.md</code>, <code>docs/CONFIGURATION.md</code>, <code>docs/MERCHANT_INTEGRATION.md</code>, <code>apps/payment-api/src/auth-guard.js</code>, <code>routes/payments.routes.js</code>, <code>openapi.yaml</code>). No Script Property, deployment, fee or registration was changed.
+</footer>
+
+</div>
+<script>
+  // Tick state is local to this page only; nothing is sent anywhere.
+  document.querySelectorAll('input[type="checkbox"]').forEach(function (box) {
+    var key = 'qqsgp-youpi-audit-' + box.id;
+    try { if (localStorage.getItem(key) === '1') box.checked = true; } catch (e) {}
+    box.addEventListener('change', function () {
+      try { localStorage.setItem(key, box.checked ? '1' : '0'); } catch (e) {}
+    });
+  });
+</script>
+</body>
+</html>

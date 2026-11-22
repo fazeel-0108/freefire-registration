@@ -34,8 +34,14 @@ const KEY_ACTOR = "qqsgp_org_actor";
 
 /* Mirrors ORG_PERMISSIONS.SUPER on the server. Only used to decide which panel
    to show; the server enforces the real thing. */
+/* Must match ORG_PERMISSIONS.SUPER in apps-script.js. Payment and settings
+   permissions were missing here, so the break-glass key could see a payment
+   row but the browser refused to let it mark cash received — even though the
+   server would have allowed the same Super Admin. */
 const SUPER_PERMISSIONS = [
-  "records.view", "records.update", "records.export", "wa.view", "wa.send",
+  "records.view", "records.update", "records.export",
+  "pay.view", "pay.update",
+  "wa.view", "wa.send",
   "accounts.manage", "sessions.manage", "audit.view"
 ];
 
@@ -462,6 +468,45 @@ function approvalMessage(record, recipientName) {
   ].join("\n");
 }
 
+/**
+ * Where a rejected team is told to ask questions. This is the same WhatsApp
+ * number the public pages publish (index.html and rules.html, "Organizer
+ * contact"), copied here because a message that says "contact the organisers"
+ * without saying how is not an answer. Change all three together.
+ */
+const ORGANISER_CONTACT_WA = "917075593104";
+
+/**
+ * The rejection message. Polite, honest about what happened, and it points at a
+ * contact that actually exists on the public site. It never claims a refund, a
+ * reason or a next round that nobody decided, and it is prepared for the
+ * organiser to send — nothing here sends anything.
+ */
+function rejectionMessage(record, recipientName) {
+  const team = record.teamName || "your team";
+  const leader = recipientName || ((record.players || [])[0] || {}).name || "team";
+
+  return [
+    "Hello " + leader + ",",
+    "",
+    "Thank you for registering *" + team + "* for the QQSGP Free Fire Tournament.",
+    "After reviewing the entries, we are sorry to say that we cannot offer your team a slot this time.",
+    "",
+    "🏆 Team: " + team,
+    "🏫 Department: " + (record.department || "Not recorded"),
+    "🆔 Registration ID: " + record.id,
+    "",
+    paymentStatusLine(record.payment),
+    "",
+    "If you have a question about this decision, please message the organising team on WhatsApp:",
+    "https://wa.me/" + ORGANISER_CONTACT_WA,
+    "",
+    "We hope to see your squad at a future event.",
+    "",
+    "— QQSGP Free Fire Tournament Organizing Team"
+  ].join("\n");
+}
+
 /* ------------------------------ sign in ------------------------------- */
 
 function showGateError(message) {
@@ -511,6 +556,7 @@ async function enterDashboard(remember) {
      queue has to be read here too: a payment that arrived while the page was
      closed must not look like "Nothing waiting" until the next refresh. */
   loadReview();
+  loadTournament();
   refreshBtn.focus();
   // The log and the account panel are separate reads, so a slow provider can
   // never hold up the registrations table.
@@ -741,6 +787,7 @@ async function load(options) {
     loadSettings();
   }
   loadReview();
+  loadTournament();
 
   /* Keep the open drawer in step with fresh data; close it if the record
      was changed by someone else and no longer exists in the list. */
@@ -981,6 +1028,9 @@ function fillDrawer(record) {
   if (record.status === "APPROVED" && leader.number) {
     drawerContactHint.textContent = "Approved. Approve again is not possible — use Open WhatsApp to send the message to " +
       leader.name + " (+" + leader.number + ") if it was not sent.";
+  } else if (record.status === "REJECTED" && leader.number) {
+    drawerContactHint.textContent = "Rejected. Use Open WhatsApp to send " + leader.name + " (+" + leader.number +
+      ") the rejection message, which points at the organisers' WhatsApp for questions.";
   } else if (!usable.length) {
     drawerContactHint.textContent = "No usable WhatsApp number is stored for this team. Approve still works, but no message can be opened.";
   } else if (leader.number) {
@@ -1085,9 +1135,15 @@ function changeStatus(nextStatus) {
     replaceRecord(result.record);
     if (result.counts) state.counts = result.counts;
     renderStats();
+    /* A rejection gets a message of its own, prepared before the drawer is
+       painted so its "Open WhatsApp" link is already there if a popup was
+       blocked. Nothing is sent from here — the organiser presses Send. */
+    if (result.record.status === "REJECTED") offerRejection(result.record);
     fillDrawer(result.record);
     renderRowsOnly();
-    toast(record.teamName + " is now " + result.record.status + ".", "ok");
+    if (result.record.status !== "REJECTED") {
+      toast(record.teamName + " is now " + result.record.status + ".", "ok");
+    }
     // The status change may have produced a WhatsApp message (or a skipped
     // row when there was no consent); refresh the log to show the real result.
     waLoadLog(true);
@@ -1104,6 +1160,39 @@ function changeStatus(nextStatus) {
   }
 
   apply();
+}
+
+/**
+ * Prepares the rejection message once the rejection is saved. It is never sent
+ * from here: wa.me opens WhatsApp with the text ready and the organiser presses
+ * Send. A missing or unusable number is said plainly — the rejection itself
+ * still stands, and no message is claimed to have gone anywhere.
+ */
+function offerRejection(record) {
+  const recipient = waRecipients(record).filter((who) => who.number)[0] || null;
+
+  if (!recipient) {
+    state.pendingWa = null;
+    toast(record.teamName + " rejected. No usable WhatsApp number is stored, so no message could be prepared — reach the team another way.", "error");
+    return;
+  }
+
+  const url = waUrl(recipient.raw, rejectionMessage(record, recipient.name));
+  state.pendingWa = { id: record.id, url: url, name: recipient.name };
+
+  let tab = null;
+  try {
+    tab = window.open(url, "_blank");
+  } catch (ignored) {
+    tab = null;
+  }
+
+  if (tab && tab !== window) {
+    toast(record.teamName + " rejected. WhatsApp is open with the message — press Send.", "ok");
+  } else {
+    toast(record.teamName + " rejected. The browser blocked the new tab — tap “Open WhatsApp for " +
+      recipient.name + "” in Contact.", "error");
+  }
 }
 
 /* -------------------- approve → save → WhatsApp -------------------- */
@@ -1423,10 +1512,13 @@ copyMessageBtn.addEventListener("click", async () => {
     return;
   }
 
-  /* An approved team gets exactly the message the Approve flow would open,
-     so copying by hand and opening WhatsApp cannot say different things. */
+  /* An approved or rejected team gets exactly the message that flow would
+     open, so copying by hand and opening WhatsApp cannot say different
+     things. Every other status keeps the neutral status note. */
   const message = record.status === "APPROVED"
     ? approvalMessage(record, leader.name)
+    : record.status === "REJECTED"
+    ? rejectionMessage(record, leader.name)
     : [
         "QQSGP Free Fire Championship — " + record.teamName,
         "",
@@ -1468,7 +1560,10 @@ async function loadSettings() {
           (result.provider === "YOUPI"
             ? " · hosted checkout · needs verification level " + result.minVerification
             : "")
-        : "not configured yet");
+        : "not configured yet" +
+          (Array.isArray(result.missing) && result.missing.length
+            ? " — missing Script Properties: " + result.missing.join(", ")
+            : ""));
   }
 }
 
@@ -2328,3 +2423,558 @@ if (waRows) {
   waPreviewBtn.addEventListener("click", waPreview);
   waSendBtn.addEventListener("click", waSend);
 }
+
+/* ==================================================================
+   TOURNAMENT BOARD (M1-M6, assignments, scoring, publication)
+   ================================================================== */
+const matchForm = el("matchForm");
+const matchSelect = el("matchSelect");
+const matchMap = el("matchMap");
+const matchWhen = el("matchWhen");
+const matchStatus = el("matchStatus");
+const matchRoomId = el("matchRoomId");
+const matchPassword = el("matchPassword");
+const matchRelease = el("matchRelease");
+const matchNotes = el("matchNotes");
+const matchRowsEl = el("matchRows");
+const matchSummaryEl = el("matchSummary");
+const assignMatch = el("assignMatch");
+const assignTeam = el("assignTeam");
+const assignSlot = el("assignSlot");
+const assignBtn = el("assignBtn");
+const resultForm = el("resultForm");
+const resultMatch = el("resultMatch");
+const resultTeam = el("resultTeam");
+const resultPlacement = el("resultPlacement");
+const resultKills = el("resultKills");
+const resultNotes = el("resultNotes");
+const resultRowsEl = el("resultRows");
+const resultSummaryEl = el("resultSummary");
+const leaderboardRows = el("leaderboardRows");
+const tournamentRefresh = el("tournamentRefresh");
+const exportExcel = el("exportExcel");
+const maxTeamsInput = el("maxTeamsInput");
+const killPointsInput = el("killPointsInput");
+const placementPointsInput = el("placementPointsInput");
+const tieBreakersInput = el("tieBreakersInput");
+const scoringSave = el("scoringSave");
+const matchStage = el("matchStage");
+const matchRoomLabel = el("matchRoomLabel");
+const roomChartRows = el("roomChartRows");
+const roomChartTitle = el("roomChartTitle");
+const roomChartMeta = el("roomChartMeta");
+const roomChartHint = el("roomChartHint");
+const chartCopy = el("chartCopy");
+const chartShare = el("chartShare");
+const chartShareQualified = el("chartShareQualified");
+const chartCopyAll = el("chartCopyAll");
+const resultCopy = el("resultCopy");
+const resultShare = el("resultShare");
+const leaderboardShare = el("leaderboardShare");
+const scheduleCopy = el("scheduleCopy");
+const scheduleShare = el("scheduleShare");
+
+const MATCH_MAPS = ["Bermuda", "Purgatory", "Kalahari", "Alpine", "NeXTerra", "Solara", "Bermuda Remastered", "Purgatory Remastered"];
+
+function localInput(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  // The form always speaks IST, even when the organiser opens it abroad.
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+    }).formatToParts(d);
+    const get = (type) => (parts.find((part) => part.type === type) || {}).value || "";
+    return get("year") + "-" + get("month") + "-" + get("day") + "T" + get("hour") + ":" + get("minute");
+  } catch (ignored) {
+    const p = (n) => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+}
+
+function fillMapOptions(matches) {
+  const values = MATCH_MAPS.slice();
+  (matches || []).forEach((m) => { if (m.map && values.indexOf(m.map) === -1) values.push(m.map); });
+  const current = matchMap.value;
+  matchMap.innerHTML = values.map((map) => `<option value="${escapeHtml(map)}">${escapeHtml(map)}</option>`).join("");
+  matchMap.value = values.indexOf(current) === -1 ? values[0] : current;
+}
+
+function setSelectValue(select, value) {
+  const text = value || "";
+  if (text && !Array.from(select.options).some((option) => option.value === text)) {
+    const option = document.createElement("option");
+    option.value = text;
+    option.textContent = text;
+    select.appendChild(option);
+  }
+  select.value = text;
+}
+
+function stageText(match) {
+  return [match.stage || "QUALIFIER", roomShareName(match)].filter(Boolean).join(" · ");
+}
+
+function stageShareName(stage) {
+  const value = String(stage || "QUALIFIER").toUpperCase();
+  if (value === "KNOCKOUT 1") return "KNOCKOUT STAGE 1";
+  if (value === "KNOCKOUT 2") return "KNOCKOUT STAGE 2";
+  if (value === "GRAND FINAL") return "GRAND FINAL";
+  return "QUALIFIER";
+}
+
+function roomShareName(match) {
+  const room = String((match && match.room) || "").trim();
+  if (!room) return "";
+  return /^room\b/i.test(room) ? room.toUpperCase() : "ROOM " + room.toUpperCase();
+}
+
+function matchShareTitle(match) {
+  return [stageShareName(match && match.stage), roomShareName(match)].filter(Boolean).join(" — ");
+}
+
+function shareWhatsApp(text, emptyMessage) {
+  if (!text) return toast(emptyMessage || "There is nothing to share yet.", "error");
+  const link = document.createElement("a");
+  link.href = "https://wa.me/?text=" + encodeURIComponent(text);
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.click();
+}
+
+function publishedTournamentResults() {
+  return ((state.tournament && state.tournament.results) || []).filter((r) => r.status === "PUBLISHED");
+}
+
+function resultTieBreakers() {
+  const configured = state.tournament && state.tournament.tieBreakers;
+  return Array.isArray(configured) && configured.length === 3
+    ? configured
+    : ["total", "kills", "placement"];
+}
+
+function resultStandings(matchId, results, tieBreakers) {
+  const order = Array.isArray(tieBreakers) && tieBreakers.length === 3
+    ? tieBreakers
+    : resultTieBreakers();
+  return (results || []).filter((r) => r.matchId === matchId).sort((a, b) => {
+    for (const key of order) {
+      let diff = 0;
+      if (key === "total") diff = (Number(b.total) || 0) - (Number(a.total) || 0);
+      else if (key === "kills") diff = (Number(b.kills) || 0) - (Number(a.kills) || 0);
+      else diff = (Number(a.placement) || 999) - (Number(b.placement) || 999);
+      if (diff) return diff;
+    }
+    return String(a.teamName || "").localeCompare(String(b.teamName || ""));
+  });
+}
+
+function resultSlotMap(match) {
+  const map = {};
+  ((match && match.teams) || []).forEach((assignment) => { map[assignment.teamId] = assignment.slot; });
+  return map;
+}
+
+function fillMatchForm(match) {
+  if (!match) return;
+  matchSelect.value = match.id;
+  setSelectValue(matchMap, match.map || "Bermuda");
+  setSelectValue(matchStage, match.stage || "QUALIFIER");
+  matchRoomLabel.value = match.room || "";
+  matchWhen.value = localInput(match.scheduledAt);
+  matchStatus.value = match.status || "SCHEDULED";
+  matchRoomId.value = match.roomId || "";
+  matchPassword.value = match.roomPassword || "";
+  matchRelease.value = localInput(match.releaseAt);
+  matchNotes.value = match.notes || "";
+  matchForm.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function renderRoomChart(match, results) {
+  if (!match || !roomChartRows) return;
+  const standings = resultStandings(match.id, results, resultTieBreakers());
+  const qualified = standings.length >= 6 ? new Set(standings.slice(0, 6).map((r) => r.teamId)) : new Set();
+  const bySlot = {};
+  (match.teams || []).forEach((assignment) => { bySlot[assignment.slot] = assignment; });
+  const resultByTeam = {};
+  standings.forEach((r) => { resultByTeam[r.teamId] = r; });
+
+  roomChartTitle.textContent = match.id + " · " + stageText(match);
+  const meta = [match.map || "Map TBD", match.scheduledLabel || "Not scheduled", match.status];
+  if (match.hasRoom) meta.push(match.roomReleased ? "Room released" : "Room at " + (match.releaseLabel || "TBA"));
+  roomChartMeta.textContent = meta.join(" · ");
+
+  let rows = "";
+  for (let slot = 1; slot <= 12; slot++) {
+    const assignment = bySlot[slot];
+    const result = assignment ? resultByTeam[assignment.teamId] : null;
+    const isQualified = assignment && qualified.has(assignment.teamId);
+    rows += `<tr class="${isQualified ? "chart-qualified" : ""}">
+      <td><b>${slot}</b></td>
+      <td class="cell-team">${assignment ? escapeHtml(assignment.teamName) : '<span class="hint">Open slot</span>'}</td>
+      <td>${result ? "#" + result.placement + " · " + result.kills + " kills · <b>" + result.total + " pts</b>" : "—"}</td>
+      <td>${isQualified ? '<span class="badge badge-q">QUALIFIED</span>' : (result ? '<span class="badge">PLAYED</span>' : '<span class="badge">OPEN</span>')}</td>
+    </tr>`;
+  }
+  roomChartRows.innerHTML = rows;
+  roomChartHint.textContent = standings.length >= 6
+    ? "Top 6 in the standings are marked QUALIFIED for the next stage."
+    : "Enter at least 6 results to mark the top 6 qualifiers. Each room holds 12 teams.";
+}
+
+function padChartCell(value, width, alignRight) {
+  const text = value == null ? "" : String(value);
+  if (text.length >= width) return text;
+  const fill = new Array(width - text.length + 1).join(" ");
+  return alignRight ? fill + text : text + fill;
+}
+
+/* WhatsApp renders a proportional font, so columns only stay readable when every
+   cell is padded to the width of its widest entry and numbers are right-aligned. */
+function chartTableText(headers, rows, rightFrom) {
+  const widths = headers.map((header, index) =>
+    Math.max(header.length, ...rows.map((row) => String(row[index] == null ? "" : row[index]).length))
+  );
+  return [headers].concat(rows).map((row) => row.map((cell, index) => {
+    const padded = padChartCell(cell, widths[index], index >= rightFrom);
+    return index === row.length - 1 ? padded.replace(/\s+$/, "") : padded;
+  }).join("  ")).join("\n");
+}
+
+function roomChartText(match, results) {
+  if (!match) return "";
+  const lines = ["QQSGP FREE FIRE TOURNAMENT", "", matchShareTitle(match), ""];
+  lines.push("Map: " + (match.map || "TBD"));
+  lines.push("Scheduled at: " + (match.scheduledLabel || "Not scheduled"));
+  if (match.hasRoom && match.roomReleased && (match.roomId || match.roomPassword)) {
+    lines.push("Room ID: " + (match.roomId || "—"));
+    lines.push("Password: " + (match.roomPassword || "—"));
+  } else if (match.hasRoom) {
+    lines.push("Room ID & password: release at " + (match.releaseLabel || "TBA"));
+  } else {
+    lines.push("Room ID & password: not set yet");
+  }
+  lines.push("");
+  const bySlot = {};
+  (match.teams || []).forEach((assignment) => { bySlot[assignment.slot] = assignment; });
+  const resultByTeam = {};
+  resultStandings(match.id, results, resultTieBreakers()).forEach((row) => { resultByTeam[row.teamId] = row; });
+  const rows = [];
+  for (let slot = 1; slot <= 12; slot++) {
+    const assignment = bySlot[slot];
+    const player = assignment ? resultByTeam[assignment.teamId] : null;
+    rows.push([
+      "#" + String(slot).padStart(2, "0") + ".",
+      assignment ? assignment.teamName : "TBD",
+      player ? (Number(player.placement) === 1 ? 1 : 0) : "-",
+      player ? 1 : "-",
+      player ? player.placement : "-",
+      player ? player.kills : "-",
+      player ? player.total : "-"
+    ]);
+  }
+  lines.push(chartTableText(
+    ["RANK", "TEAM", "BOOYAH", "MATCHES", "POS", "ELIMS", "PTS"],
+    rows,
+    2
+  ));
+  lines.push("", "Only the top 6 teams qualify for the next stage.", "Best of luck, everyone!");
+  return lines.join("\n");
+}
+
+function scheduleShareText(matches) {
+  const list = matches || [];
+  if (!list.length) return "";
+  const lines = ["QQSGP FREE FIRE TOURNAMENT", "", "MATCH SCHEDULE", ""];
+  list.forEach((match) => {
+    lines.push(match.id + " — " + matchShareTitle(match));
+    lines.push("Map: " + (match.map || "TBD"));
+    lines.push("Scheduled at: " + (match.scheduledLabel || "Not scheduled"));
+    lines.push("Status: " + (match.status || "SCHEDULED"));
+    if (match.hasRoom && match.roomReleased && (match.roomId || match.roomPassword)) {
+      lines.push("Room ID: " + (match.roomId || "—"));
+      lines.push("Password: " + (match.roomPassword || "—"));
+    } else if (match.hasRoom) {
+      lines.push("Room details: release at " + (match.releaseLabel || "TBA"));
+    } else {
+      lines.push("Room details: not set yet");
+    }
+    lines.push("");
+  });
+  return lines.join("\n").trim();
+}
+
+function resultChartText(match, results, tieBreakers) {
+  if (!match) return "";
+  const standings = resultStandings(match.id, results, tieBreakers);
+  if (!standings.length) return "";
+  const qualified = standings.length >= 6 ? new Set(standings.slice(0, 6).map((r) => r.teamId)) : new Set();
+  const slots = resultSlotMap(match);
+  const lines = ["QQSGP FREE FIRE TOURNAMENT", "", "RESULT — " + match.id + " — " + matchShareTitle(match), ""];
+  standings.forEach((r, index) => {
+    lines.push(String(index + 1).padStart(2, "0") + ". " + r.teamName +
+      " (slot " + (slots[r.teamId] || "?") + ") — Placement " + r.placement +
+      " · Kills " + r.kills + " · " + r.total + " pts" +
+      (qualified.size ? (qualified.has(r.teamId) ? " · QUALIFIED" : " · ELIMINATED") : ""));
+  });
+  lines.push("", "Only the top 6 teams qualify for the next stage.");
+  return lines.join("\n");
+}
+
+function qualifiedTeamsText(match, results, tieBreakers) {
+  if (!match) return "";
+  const standings = resultStandings(match.id, results, tieBreakers).slice(0, 6);
+  if (standings.length < 6) return "";
+  const slots = resultSlotMap(match);
+  const lines = ["QQSGP FREE FIRE TOURNAMENT", "", "QUALIFIED TEAMS — " + matchShareTitle(match), ""];
+  standings.forEach((r, index) => {
+    lines.push(String(index + 1).padStart(2, "0") + ". " + r.teamName +
+      (slots[r.teamId] ? " (slot " + slots[r.teamId] + ")" : "") +
+      " — " + r.total + " pts");
+  });
+  lines.push("", "Only the top 6 teams qualify for the next stage.", "Best of luck, everyone!");
+  return lines.join("\n");
+}
+
+function leaderboardShareText(board) {
+  const rows = board || [];
+  if (!rows.length) return "";
+  const lines = ["QQSGP FREE FIRE TOURNAMENT", "", "OVERALL LEADERBOARD", ""];
+  rows.forEach((row) => {
+    lines.push(String(row.rank).padStart(2, "0") + ". " + row.teamName +
+      " — " + row.total + " pts · " + row.kills + " kills · " + row.matches + " match" + (row.matches === 1 ? "" : "es"));
+  });
+  return lines.join("\n");
+}
+
+function resultAndLeaderboardText(match, results, board, tieBreakers) {
+  return [resultChartText(match, results, tieBreakers), leaderboardShareText(board)].filter(Boolean).join("\n\n");
+}
+
+async function copyChart(text, okMessage) {
+  if (!text) return toast("There is no chart to copy yet.", "error");
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(okMessage || "Chart copied. Paste it into WhatsApp.", "ok");
+  } catch (ignored) {
+    toast("This browser blocked the clipboard.", "error");
+  }
+}
+
+function renderTournament() {
+  const t = state.tournament;
+  if (!t) return;
+  const ids = t.matches.map((m) => m.id);
+  fillMapOptions(t.matches);
+  const keep = (select, html) => {
+    const current = select.value;
+    select.innerHTML = html;
+    if (current) select.value = current;
+  };
+  keep(matchSelect, ids.map((id) => `<option>${id}</option>`).join(""));
+  keep(assignMatch, ids.map((id) => `<option>${id}</option>`).join(""));
+  keep(resultMatch, ids.map((id) => `<option>${id}</option>`).join(""));
+  const approved = (Array.isArray(t.teams) ? t.teams : []).filter((team) => team.status === "APPROVED");
+  assignTeam.innerHTML = approved.length
+    ? approved.map((team) => `<option value="${escapeHtml(team.id)}">${escapeHtml(team.teamName)}</option>`).join("")
+    : '<option value="">No approved teams yet</option>';
+  const selectedMatch = resultMatch.value || ids[0];
+  const match = t.matches.find((m) => m.id === selectedMatch);
+  const eligible = match ? approved.filter((team) => match.teams.some((a) => a.teamId === team.id)) : [];
+  resultTeam.innerHTML = eligible.length
+    ? eligible.map((team) => `<option value="${escapeHtml(team.id)}">${escapeHtml(team.teamName)}</option>`).join("")
+    : '<option value="">Assign an approved team first</option>';
+
+  matchSummaryEl.textContent = t.matches.length + " fixed matches · " + approved.length + " approved teams · 12-team rooms · top 6 qualify";
+  matchRowsEl.innerHTML = t.matches.map((m) => `<tr data-match="${m.id}">
+    <td class="cell-team">${m.id}<small>${escapeHtml(stageText(m))}${m.map ? " · " + escapeHtml(m.map) : ""}</small></td>
+    <td>${escapeHtml(m.scheduledLabel)}</td><td><span class="badge">${m.status}</span></td>
+    <td>${m.hasRoom ? "Set" : "—"}<small>${m.roomReleased ? "Released" : escapeHtml(m.releaseLabel || "No release")}</small></td>
+    <td>${m.teamCount}/12</td><td>${m.publishedCount}/${m.resultCount} published</td>
+    <td><button class="btn btn-ghost btn-sm" data-edit-match="${m.id}" type="button">Edit</button></td></tr>`).join("");
+
+  const slots = resultSlotMap(match);
+  const standings = resultStandings(selectedMatch, t.results, resultTieBreakers());
+  const qualified = standings.length >= 6 ? new Set(standings.slice(0, 6).map((r) => r.teamId)) : new Set();
+  resultRowsEl.innerHTML = standings.length ? standings.map((r, index) => `<tr>
+    <td>#${index + 1}</td><td>${slots[r.teamId] || "—"}</td><td class="cell-team">${escapeHtml(r.teamName)}</td><td>${r.placement}</td><td>${r.kills}</td>
+    <td>${r.placementPoints}</td><td>${r.killPoints}</td><td><b>${r.total}</b></td>
+    <td>${qualified.size ? (qualified.has(r.teamId) ? "QUALIFIED" : "ELIMINATED") : "—"}</td><td>${r.status}</td></tr>`).join("")
+    : `<tr><td colspan="10">No results entered for ${selectedMatch} yet.</td></tr>`;
+  leaderboardRows.innerHTML = t.leaderboard.length ? t.leaderboard.slice(0, 20).map((row) => `<tr><td>${row.rank}</td><td class="cell-team">${escapeHtml(row.teamName)}</td><td>${row.matches}</td><td>${row.kills}</td><td><b>${row.total}</b></td></tr>`).join("")
+    : '<tr><td colspan="5">The leaderboard appears after results are entered.</td></tr>';
+  maxTeamsInput.value = t.maxTeams;
+  killPointsInput.value = t.killPoints;
+  placementPointsInput.value = (t.placementPoints || []).join(",");
+  if (tieBreakersInput) setSelectValue(tieBreakersInput, (t.tieBreakers || ["total", "kills", "placement"]).join(","));
+  renderRoomChart(t.matches.find((m) => m.id === (matchSelect.value || ids[0])), t.results);
+  if (!matchWhen.value) fillMatchForm(t.matches[0]);
+}
+
+async function loadTournament() {
+  if (!matchRowsEl) return;
+  const result = await api("tournament");
+  if (!result.ok) {
+    matchSummaryEl.textContent = result.error || "The tournament board could not be read.";
+    assignTeam.innerHTML = '<option value="">Teams unavailable — refresh</option>';
+    resultTeam.innerHTML = '<option value="">Teams unavailable — refresh</option>';
+    return;
+  }
+  state.tournament = result;
+  renderTournament();
+}
+
+matchRowsEl && matchRowsEl.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-edit-match]");
+  if (!button || !state.tournament) return;
+  const selected = state.tournament.matches.find((m) => m.id === button.dataset.editMatch);
+  fillMatchForm(selected);
+  if (assignMatch) assignMatch.value = selected.id;
+  if (resultMatch) resultMatch.value = selected.id;
+  renderTournament();
+});
+matchSelect && matchSelect.addEventListener("change", () => { resultMatch.value = matchSelect.value; renderTournament(); });
+resultMatch && resultMatch.addEventListener("change", () => { matchSelect.value = resultMatch.value; renderTournament(); });
+assignMatch && assignMatch.addEventListener("change", () => {
+  matchSelect.value = assignMatch.value;
+  resultMatch.value = assignMatch.value;
+  renderTournament();
+});
+tournamentRefresh && tournamentRefresh.addEventListener("click", () => { load(); loadTournament(); });
+matchForm && matchForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const result = await api("match-save", {
+    matchId: matchSelect.value, map: matchMap.value, stage: matchStage.value, roomLabel: matchRoomLabel.value,
+    scheduledAt: matchWhen.value, status: matchStatus.value, roomId: matchRoomId.value,
+    roomPassword: matchPassword.value, releaseAt: matchRelease.value, notes: matchNotes.value
+  });
+  if (!result.ok) return toast(result.error, "error");
+  toast(result.message || "Match saved.", "ok");
+  await loadTournament();
+});
+assignBtn && assignBtn.addEventListener("click", async () => {
+  const result = await api("match-assign", { matchId: assignMatch.value, teamId: assignTeam.value, slot: assignSlot.value });
+  if (!result.ok) return toast(result.error, "error");
+  toast(result.message || "Team assigned.", "ok");
+  assignSlot.value = "";
+  await loadTournament();
+});
+chartCopy && chartCopy.addEventListener("click", () => {
+  if (!state.tournament) return;
+  const match = state.tournament.matches.find((m) => m.id === matchSelect.value);
+  copyChart(roomChartText(match, state.tournament.results), "Room chart copied. Paste it into WhatsApp.");
+});
+chartShare && chartShare.addEventListener("click", () => {
+  if (!state.tournament) return;
+  const match = state.tournament.matches.find((m) => m.id === matchSelect.value);
+  shareWhatsApp(roomChartText(match, state.tournament.results), "There is no room chart to share yet.");
+});
+chartShareQualified && chartShareQualified.addEventListener("click", () => {
+  if (!state.tournament) return;
+  const match = state.tournament.matches.find((m) => m.id === matchSelect.value);
+  const text = qualifiedTeamsText(match, publishedTournamentResults(), resultTieBreakers());
+  if (!text) return toast("Publish at least 6 results for this room before sharing qualifiers.", "error");
+  shareWhatsApp(text);
+});
+chartCopyAll && chartCopyAll.addEventListener("click", () => {
+  if (!state.tournament) return;
+  const text = state.tournament.matches.map((match) => roomChartText(match, state.tournament.results)).join("\n\n————————————\n\n");
+  copyChart(text, "All six room charts copied.");
+});
+scheduleCopy && scheduleCopy.addEventListener("click", () => {
+  if (!state.tournament) return;
+  copyChart(scheduleShareText(state.tournament.matches), "Match schedule copied.");
+});
+scheduleShare && scheduleShare.addEventListener("click", () => {
+  if (!state.tournament) return;
+  shareWhatsApp(scheduleShareText(state.tournament.matches), "There is no schedule to share yet.");
+});
+resultCopy && resultCopy.addEventListener("click", () => {
+  if (!state.tournament) return;
+  const match = state.tournament.matches.find((m) => m.id === resultMatch.value);
+  const text = resultChartText(match, publishedTournamentResults(), resultTieBreakers());
+  if (!text) return toast("Publish this room's results before copying them.", "error");
+  copyChart(text, "Published result chart copied.");
+});
+resultShare && resultShare.addEventListener("click", () => {
+  if (!state.tournament) return;
+  const match = state.tournament.matches.find((m) => m.id === resultMatch.value);
+  const text = resultAndLeaderboardText(match, publishedTournamentResults(),
+    state.tournament.publishedLeaderboard || [], resultTieBreakers());
+  if (!text) return toast("Publish this room's results before sharing them.", "error");
+  shareWhatsApp(text);
+});
+leaderboardShare && leaderboardShare.addEventListener("click", () => {
+  if (!state.tournament) return;
+  const text = leaderboardShareText(state.tournament.publishedLeaderboard || []);
+  if (!text) return toast("Publish results before sharing the leaderboard.", "error");
+  shareWhatsApp(text);
+});
+resultForm && resultForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const result = await api("result-save", {
+    matchId: resultMatch.value, teamId: resultTeam.value,
+    placement: resultPlacement.value, kills: resultKills.value, notes: resultNotes.value
+  });
+  if (!result.ok) return toast(result.error, "error");
+  toast(result.message || "Result saved.", "ok");
+  const keepMatch = resultMatch.value;
+  resultForm.reset();
+  resultMatch.value = keepMatch;
+  await loadTournament();
+});
+el("resultApprove") && el("resultApprove").addEventListener("click", async () => {
+  const result = await api("result-approve", { matchId: resultMatch.value });
+  if (!result.ok) return toast(result.error, "error");
+  toast(result.message || "Approved.", "ok");
+  await loadTournament();
+});
+el("resultPublish") && el("resultPublish").addEventListener("click", async () => {
+  if (!confirm("Publish these results to the public leaderboard?")) return;
+  const result = await api("result-publish", { matchId: resultMatch.value });
+  if (!result.ok) return toast(result.error, "error");
+  toast(result.message || "Published.", "ok");
+  await loadTournament();
+});
+el("resultUnpublish") && el("resultUnpublish").addEventListener("click", async () => {
+  const result = await api("result-unpublish", { matchId: resultMatch.value });
+  if (!result.ok) return toast(result.error, "error");
+  toast(result.message || "Unpublished.", "ok");
+
+  await loadTournament();
+});
+scoringSave && scoringSave.addEventListener("click", async () => {
+  const result = await api("settings-set", {
+    fee: feeInput.value, maxTeams: maxTeamsInput.value,
+    killPoints: killPointsInput.value, placementPoints: placementPointsInput.value,
+    tieBreakers: tieBreakersInput ? tieBreakersInput.value : "total,kills,placement"
+  });
+  if (!result.ok) return toast(result.error, "error");
+  toast("Tournament settings saved.", "ok");
+  loadSettings();
+  await loadTournament();
+});
+downloadExport = async function (dataset) {
+  const result = await api("export", { dataset: dataset || "registrations", status: state.status, department: state.department, q: state.query });
+  if (!result.ok) return toast(result.error, "error");
+  const blob = new Blob([result.csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url; link.download = result.filename || "qqsgp-export.csv";
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  toast(result.total + " row(s) exported.", "ok");
+};
+exportExcel && exportExcel.addEventListener("click", async () => {
+  const result = await api("export", { dataset: "registrations", format: "xlsx" });
+  if (!result.ok) return toast(result.error, "error");
+  const bytes = Uint8Array.from(atob(result.excel), (c) => c.charCodeAt(0));
+  const blob = new Blob([bytes], { type: result.mime || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a"); link.href = url; link.download = result.filename || "qqsgp.xlsx";
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  toast("Excel workbook exported.", "ok");
+});

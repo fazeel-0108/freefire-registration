@@ -40,6 +40,8 @@
     <nav class="topnav" aria-label="Sections">
       <div class="event-pill"><span class="live-dot"></span> TOURNAMENT REGISTRATION</div>
       <a href="rules.html">Rules</a>
+      <a href="#schedule">Schedule</a>
+      <a href="#results">Results</a>
       <a class="nav-dashboard" href="admin.html">Dashboard</a>
       <a class="nav-register" href="#register">Register</a>
     </nav>
@@ -92,6 +94,37 @@
         <strong id="statPlayers">—</strong>
         <span class="stat-note">2 to 4 per team</span>
       </article>
+    </section>
+
+    <!-- ===================== PUBLIC SCHEDULE ===================== -->
+    <section class="public-board" id="schedule" aria-labelledby="scheduleTitle">
+      <div class="section-heading">
+        <div class="number">M</div>
+        <div><p>TOURNAMENT BOARD</p><h2 id="scheduleTitle">Match schedule</h2></div>
+      </div>
+      <p class="public-board-lead">Six matches, M1–M6. All times are Asia/Kolkata (IST). Room ID and password appear here automatically only after the organisers' server-side release time.</p>
+      <div class="schedule-grid" id="scheduleGrid" aria-live="polite"><p class="board-empty">Loading the schedule…</p></div>
+    </section>
+
+    <!-- ===================== PUBLIC RESULTS ===================== -->
+    <section class="public-board" id="results" aria-labelledby="resultsTitle">
+      <div class="section-heading">
+        <div class="number">R</div>
+        <div><p>PUBLISHED STANDINGS</p><h2 id="resultsTitle">Leaderboard</h2></div>
+      </div>
+      <p class="public-board-lead">Only results approved and published by the organisers are shown. Draft scores stay private.</p>
+      <div class="table-wrap public-table">
+        <table>
+          <thead><tr><th>#</th><th>Team</th><th>Booyah</th><th>Matches</th><th>Position</th><th>Eliminations</th><th>Points</th></tr></thead>
+          <tbody id="publicLeaderboard"><tr><td colspan="7">Loading standings…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="table-wrap public-table">
+        <table>
+          <thead><tr><th>#</th><th>Match</th><th>Team</th><th>Position</th><th>Eliminations</th><th>Points</th></tr></thead>
+          <tbody id="publicResultRows"><tr><td colspan="6">No published match results yet.</td></tr></tbody>
+        </table>
+      </div>
     </section>
 
     <!-- ============================ ABOUT ============================ -->
@@ -203,7 +236,7 @@
               </label>
               <label class="field">
                 <span>WhatsApp number <em>*</em></span>
-                <input class="member-phone" type="tel" inputmode="numeric" maxlength="10" placeholder="e.g. 9876543210">
+                <input class="member-phone" type="tel" inputmode="numeric" maxlength="13" placeholder="e.g. 9876543210 or +919876543210">
               </label>
             </div>
           </article>
@@ -223,7 +256,7 @@
               </label>
               <label class="field">
                 <span>WhatsApp number <em>*</em></span>
-                <input class="member-phone" type="tel" inputmode="numeric" maxlength="10" placeholder="e.g. 9876543210">
+                <input class="member-phone" type="tel" inputmode="numeric" maxlength="13" placeholder="e.g. 9876543210 or +919876543210">
               </label>
             </div>
           </article>
@@ -387,13 +420,20 @@
                 pending; online is saved only once the gateway confirms your payment.
               </p>
               <div class="pay-choice-row">
-                <button type="button" class="pay-btn pay-btn-primary" id="payOnlineBtn">
+                <button type="button" class="pay-btn pay-btn-primary" id="payOnlineBtn" hidden>
                   Pay online<span id="payOnlineHint">UPI QR</span>
                 </button>
                 <button type="button" class="pay-btn" id="payCashBtn">
                   Pay cash<span>to an organiser</span>
                 </button>
               </div>
+              <!-- Shown only while the backend reports online payment as off.
+                   The button above is hidden then, so nobody is offered a
+                   payment the server would refuse. -->
+              <p class="pay-choice-note pay-online-off" id="payOnlineOff" hidden>
+                Online payment is not switched on for this event yet. Register
+                with cash below — an organiser will collect the entry fee at the venue.
+              </p>
             </div>
 
             <!-- Online payment. The only thing on this panel is the gateway's
@@ -415,6 +455,18 @@
                    target="_blank" rel="noopener noreferrer">
                   Payment page not loading? Open it in a new tab ↗
                 </a>
+              </div>
+              <div class="pay-manual" id="payManualPanel" hidden>
+                <p class="pay-manual-copy">Pay the entry fee by UPI, then submit the reference below. Your team is registered immediately as <b>Pending</b>; an organiser marks it <b>Paid</b> after checking the transfer.</p>
+                <img class="pay-upi-qr" id="payUpiQr" alt="UPI payment QR code" hidden>
+                <p class="pay-manual-note" id="payManualNote">Ask an organiser for the UPI QR if it is not shown here. Never send money to a number you were not given by the organisers.</p>
+                <label class="field">
+                  <span>UPI transaction reference (optional)</span>
+                  <input id="payUtr" type="text" maxlength="40" autocomplete="off" placeholder="e.g. 123456789012">
+                </label>
+                <button class="pay-submit" id="payUpiSubmit" type="button">Submit for verification</button>
+                <button class="pay-back" id="payManualBack" type="button">Back</button>
+                <p class="pay-status" id="payManualStatus" role="status" aria-live="polite"></p>
               </div>
               <p class="pay-status" id="payStatus" role="status" aria-live="polite"></p>
               <button type="button" class="pay-submit pay-retry" id="payRetry" hidden>Try again</button>

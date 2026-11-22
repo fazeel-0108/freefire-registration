@@ -11,10 +11,13 @@ against a mocked provider (see §9). **No message has been sent from your accoun
 — the credentials below do not exist yet, so the module is switched off and
 every attempt is refused rather than faked.
 
-**Approving a team does not depend on any of this.** The dashboard's *Approve*
-button saves the status and then opens WhatsApp click-to-chat with the approval
-message already typed, addressed to the team leader's number — you just press
-Send. That is manual messaging, needs no Meta account, and is what runs today.
+**Approving or rejecting a team does not depend on any of this.** The
+dashboard's *Approve* button saves the status and then opens WhatsApp
+click-to-chat with the approval message already typed, addressed to the team
+leader's number — you just press Send. *Reject* does the same with a polite
+rejection message that points the team at the organisers' published WhatsApp
+number (`https://wa.me/917075593104`, the "Organizer contact" link on the public
+site). That is manual messaging, needs no Meta account, and is what runs today.
 The Cloud API described below is the optional fully-automated upgrade.
 
 ---
@@ -25,7 +28,8 @@ The Cloud API described below is the optional fully-automated upgrade.
 | --- | --- |
 | A team submits the form | Saves the row with `PENDING`, plus the WhatsApp consent answer and its timestamp. Sends nothing (unless you switch on the optional receipt). |
 | You approve | Saves the status **first**, then opens WhatsApp with the message pre-filled (`wa.me`, click-to-chat). You press Send. Nothing is sent by the server. |
-| You reject / waitlist | Saves the status **first**. With the Cloud API on, that also creates one notification row and submits one template message; a notification failure never changes the status. |
+| You reject | Saves the status **first**, then opens WhatsApp with the rejection message pre-filled (`wa.me`, click-to-chat) for the first player with a usable number. A team with no usable number is rejected without a message, and the dashboard says so rather than guessing a number. With the Cloud API on, the save also creates one notification row and submits one template message; a notification failure never changes the status. |
+| You waitlist | Saves the status **first**. With the Cloud API on, that also creates one notification row and submits one template message; a notification failure never changes the status. |
 | Meta accepts the message | State `SENT` — "accepted by the provider". Not "delivered". |
 | Meta reports delivery | Webhook moves the row to `DELIVERED`, then `READ`. Late or repeated events never move it backwards. |
 | Meta rejects it | `FAILED` with the provider's reason, and a **Retry** button. |

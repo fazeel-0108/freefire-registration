@@ -104,6 +104,15 @@
     </header>
 
     <main class="page">
+      <nav class="dash-nav" aria-label="Dashboard sections">
+        <a href="#registrations">Registrations</a>
+        <a href="#matches">Matches</a>
+        <a href="#results">Results</a>
+        <a href="#settings">Settings</a>
+        <a href="#whatsapp">WhatsApp</a>
+        <button class="btn btn-ghost btn-sm" id="tournamentRefresh" type="button">Refresh tournament</button>
+        <button class="btn btn-ghost btn-sm" id="exportExcel" type="button">Export Excel</button>
+      </nav>
       <section class="stats-grid" aria-label="Overview">
         <article class="stat-card">
           <p>Teams</p>
@@ -228,6 +237,135 @@
             <button class="btn btn-ghost" id="prevBtn" type="button">Previous</button>
             <button class="btn btn-ghost" id="nextBtn" type="button">Next</button>
           </div>
+        </div>
+      </section>
+
+      <!-- ====================== MATCHES (M1-M6) ====================== -->
+      <section class="panel" id="matches" aria-labelledby="matchesTitle">
+        <div class="panel-head">
+          <div>
+            <h2 id="matchesTitle">Matches M1–M6</h2>
+            <p id="matchSummary">Loading the tournament board…</p>
+          </div>
+        </div>
+
+        <form class="tournament-form" id="matchForm">
+          <label class="field"><span>Match</span><select id="matchSelect">
+            <option>M1</option><option>M2</option><option>M3</option><option>M4</option><option>M5</option><option>M6</option>
+          </select></label>
+          <label class="field"><span>Map</span><select id="matchMap">
+            <option>Bermuda</option><option>Purgatory</option><option>Kalahari</option><option>Alpine</option><option>NeXTerra</option><option>Solara</option><option>Bermuda Remastered</option><option>Purgatory Remastered</option>
+          </select></label>
+          <label class="field"><span>Stage</span><select id="matchStage">
+            <option>QUALIFIER</option><option>KNOCKOUT 1</option><option>KNOCKOUT 2</option><option>GRAND FINAL</option>
+          </select></label>
+          <label class="field"><span>Room label</span><input id="matchRoomLabel" type="text" maxlength="20" placeholder="A / B / Lobby 1"></label>
+          <label class="field"><span>Scheduled at</span><input id="matchWhen" type="datetime-local"></label>
+          <label class="field"><span>Status</span><select id="matchStatus"><option>SCHEDULED</option><option>LIVE</option><option>COMPLETED</option><option>CANCELLED</option></select></label>
+          <label class="field"><span>Room ID</span><input id="matchRoomId" type="text" maxlength="40" autocomplete="off"></label>
+          <label class="field"><span>Room password</span><input id="matchPassword" type="text" maxlength="40" autocomplete="off"></label>
+          <label class="field"><span>Release at</span><input id="matchRelease" type="datetime-local"></label>
+          <label class="field wide"><span>Notes</span><input id="matchNotes" type="text" maxlength="500" placeholder="Reporting instructions, map, lobby…"></label>
+          <div class="form-actions"><button class="btn btn-primary" id="matchSave" type="submit">Save match</button></div>
+        </form>
+        <p class="hint">All times are Asia/Kolkata (IST). <b>Scheduled at</b> is when the match starts; <b>Release at</b> is when the Room ID and password become visible on the public website. Credentials remain hidden until that server-side release time. Saving a schedule, reschedule or released room queues the matching WhatsApp event only for opted-in teams.</p>
+
+        <div class="result-actions">
+          <button class="btn btn-ghost" id="scheduleCopy" type="button">Copy match schedule</button>
+          <button class="btn btn-primary" id="scheduleShare" type="button">Share match schedule</button>
+        </div>
+
+        <div class="table-wrap">
+          <table class="reg-table">
+            <thead><tr><th>Match</th><th>Schedule</th><th>Status</th><th>Room</th><th>Teams</th><th>Results</th><th><span class="sr-only">Edit</span></th></tr></thead>
+            <tbody id="matchRows"></tbody>
+          </table>
+        </div>
+
+        <div class="assign-bar">
+          <label class="field"><span>Assign approved team</span><select id="assignMatch">
+            <option>M1</option><option>M2</option><option>M3</option><option>M4</option><option>M5</option><option>M6</option>
+          </select></label>
+          <label class="field"><span>Team</span><select id="assignTeam"><option value="" selected>Loading approved teams…</option></select></label>
+          <label class="field"><span>Slot (1–12)</span><input id="assignSlot" type="number" min="1" max="12" inputmode="numeric"></label>
+          <button class="btn btn-primary" id="assignBtn" type="button">Assign team</button>
+        </div>
+
+        <div class="room-chart" id="roomChartPanel">
+          <div class="room-chart-head">
+            <div>
+              <h3 id="roomChartTitle">12-slot room chart</h3>
+              <p id="roomChartMeta">Select a match to build its room chart.</p>
+            </div>
+            <div class="room-chart-actions">
+              <button class="btn btn-primary" id="chartCopy" type="button">Copy room chart</button>
+              <button class="btn btn-primary" id="chartShare" type="button">Share room chart</button>
+              <button class="btn btn-ghost" id="chartShareQualified" type="button">Share qualified teams</button>
+              <button class="btn btn-ghost" id="chartCopyAll" type="button">Copy all M1–M6</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="reg-table room-chart-table">
+              <thead><tr><th>Slot</th><th>Team</th><th>Result</th><th>Status</th></tr></thead>
+              <tbody id="roomChartRows"></tbody>
+            </table>
+          </div>
+          <p class="hint" id="roomChartHint">Each room holds 12 teams. The top 6 in the standings are marked QUALIFIED.</p>
+        </div>
+      </section>
+
+      <!-- ======================== RESULTS ======================== -->
+      <section class="panel" id="results" aria-labelledby="resultsTitle">
+        <div class="panel-head">
+          <div><h2 id="resultsTitle">Scoring and results</h2><p id="resultSummary">Draft results stay private until approved and published.</p></div>
+        </div>
+
+        <form class="tournament-form" id="resultForm">
+          <label class="field"><span>Match</span><select id="resultMatch">
+            <option>M1</option><option>M2</option><option>M3</option><option>M4</option><option>M5</option><option>M6</option>
+          </select></label>
+          <label class="field"><span>Team</span><select id="resultTeam"><option value="" selected>Loading approved teams…</option></select></label>
+          <label class="field"><span>Placement (1–12)</span><input id="resultPlacement" type="number" min="1" max="12" required inputmode="numeric"></label>
+          <label class="field"><span>Kills</span><input id="resultKills" type="number" min="0" max="100" required inputmode="numeric"></label>
+          <label class="field wide"><span>Result note</span><input id="resultNotes" type="text" maxlength="300" placeholder="Optional note"></label>
+          <div class="form-actions"><button class="btn btn-primary" id="resultSave" type="submit">Save draft result</button></div>
+        </form>
+
+        <div class="table-wrap">
+          <table class="reg-table">
+            <thead><tr><th>Rank</th><th>Slot</th><th>Team</th><th>Place</th><th>Kills</th><th>Placement pts</th><th>Kill pts</th><th>Total</th><th>Qualification</th><th>Status</th></tr></thead>
+            <tbody id="resultRows"></tbody>
+          </table>
+        </div>
+
+        <div class="form-actions result-actions">
+          <button class="btn btn-approve" id="resultApprove" type="button">Approve all drafts for selected match</button>
+          <button class="btn btn-primary" id="resultPublish" type="button">Publish selected match</button>
+          <button class="btn btn-ghost" id="resultUnpublish" type="button">Unpublish</button>
+          <button class="btn btn-ghost" id="resultCopy" type="button">Copy result chart</button>
+          <button class="btn btn-primary" id="resultShare" type="button">Share results &amp; leaderboard</button>
+          <button class="btn btn-ghost" id="leaderboardShare" type="button">Share leaderboard</button>
+        </div>
+
+        <h3 class="org-sub">Published leaderboard preview</h3>
+        <div class="table-wrap">
+          <table class="reg-table"><thead><tr><th>#</th><th>Team</th><th>Matches</th><th>Kills</th><th>Total</th></tr></thead><tbody id="leaderboardRows"></tbody></table>
+        </div>
+
+        <h3 class="org-sub">Scoring settings</h3>
+        <div class="tournament-form">
+          <label class="field"><span>Max active teams</span><input id="maxTeamsInput" type="number" min="0" max="1000" inputmode="numeric"></label>
+          <label class="field"><span>Kill points</span><input id="killPointsInput" type="number" min="0" max="10" step="0.5" inputmode="decimal"></label>
+          <label class="field wide"><span>Placement points (1st, 2nd, 3rd…)</span><input id="placementPointsInput" type="text" placeholder="12,9,8,7,6,5,4,3,2,1"></label>
+          <label class="field wide"><span>Tie-breaker order</span><select id="tieBreakersInput">
+            <option value="total,kills,placement">Total → Kills → Best placement (recommended)</option>
+            <option value="total,placement,kills">Total → Best placement → Kills</option>
+            <option value="kills,total,placement">Kills → Total → Best placement</option>
+            <option value="kills,placement,total">Kills → Best placement → Total</option>
+            <option value="placement,total,kills">Best placement → Total → Kills</option>
+            <option value="placement,kills,total">Best placement → Kills → Total</option>
+          </select></label>
+          <div class="form-actions"><button class="btn btn-ghost" id="scoringSave" type="button">Save tournament settings</button></div>
         </div>
       </section>
 

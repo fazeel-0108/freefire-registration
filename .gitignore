@@ -18,6 +18,14 @@ desktop.ini
 # clasp push staging (contains the private sheet id)
 .clasp-push/
 
+# Generated staging build: Code.js copy plus an optional .clasp.json with the
+# staging project id. Rebuild it with `node staging/prepare-staging.js`.
+staging/build/
+
+# Local staging endpoint config. It holds a deployment URL, not a secret, but
+# it is environment-specific and should not be committed.
+staging/.staging.json
+
 # Local backups made before payment changes: never published.
 backup/
 
@@ -35,3 +43,6 @@ node_modules/
 # invite payment-request spam. Keep them local.
 upi-qr.png
 upi-pay-qr.png
+
+# Chat attachments copied into the workspace
+.cloud-attachments/

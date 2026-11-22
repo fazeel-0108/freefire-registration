@@ -59,8 +59,9 @@ var CONFIG = {
   // Optional: receive an email for every registration.
   ORGANIZER_EMAIL: '',
 
-  // Optional: maximum number of teams. 0 = unlimited.
-  MAX_TEAMS: 0,
+  // Default maximum number of active teams. The organiser can change this in
+  // Settings (max_teams); 0 means no limit. Rejected rows never count.
+  MAX_TEAMS: 60,
 
   // How long the website counter may reuse a cached result (seconds).
   STATS_CACHE_SECONDS: 20,
@@ -108,6 +109,22 @@ var CONFIG = {
   PAYMENT_DRAFT_TTL_MINUTES: 30,
   PAYMENT_SETTINGS_SHEET: 'Settings',
   PAYMENT_DRAFT_SHEET: 'PaymentDrafts',
+
+  // --- Tournament operations ---------------------------------------
+  // These tabs are created automatically and are append-only in spirit: a
+  // match assignment is withdrawn by changing its state, never by deleting the
+  // row, and a published result is kept for the record.
+  MATCH_SHEET_NAME: 'Matches',
+  MATCH_TEAM_SHEET_NAME: 'MatchTeams',
+  RESULT_SHEET_NAME: 'Results',
+  MATCH_IDS: ['M1', 'M2', 'M3', 'M4', 'M5', 'M6'],
+  DEFAULT_PLACEMENT_POINTS: [12, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+  DEFAULT_KILL_POINTS: 1,
+  // Match times are always written and displayed in Indian Standard Time,
+  // regardless of the Apps Script project's own timezone setting.
+  TIMEZONE: 'Asia/Kolkata',
+  // The order can be changed in the dashboard. Every key must still be used.
+  DEFAULT_TIE_BREAKERS: ['total', 'kills', 'placement'],
 
   // --- WhatsApp notifications (optional) ---------------------------
   // Credentials are NOT here. They live in Script Properties, so they are
@@ -157,7 +174,9 @@ var HEADERS = [
   'Paid Amount',
   'Paid Currency',
   'Payment Verified At',
-  'Payment Provider'
+  'Payment Provider',
+  // Appended last: a stable identity that survives edits to the team name.
+  'Team ID'
 ];
 
 // Organiser workflow states. A blank status on an older row reads as PENDING.
@@ -179,7 +198,7 @@ var PAYMENT_STATUSES = [
   PAY.PAID, PAY.NEEDS_REVIEW, PAY.REJECTED
 ];
 
-var PAYMENT_METHODS = ['ONLINE', 'CASH'];
+var PAYMENT_METHODS = ['ONLINE', 'UPI', 'CASH'];
 
 // Statuses a team may never set for itself. Only an organiser can move a
 // payment to PAID — a UTR typed by a visitor proves nothing.
@@ -207,7 +226,8 @@ var COL = {
   FEE: 14, METHOD: 15, PAY_STATUS: 16, UTR: 17, PAY_NOTE: 18,
   PAY_AT: 19, PAY_BY: 20,
   PAY_ORDER: 21, PAY_ID: 22, PAID_AMOUNT: 23, PAID_CURRENCY: 24,
-  PAY_VERIFIED_AT: 25, PAY_PROVIDER: 26
+  PAY_VERIFIED_AT: 25, PAY_PROVIDER: 26,
+  TEAM_ID: 27
 };
 
 // Only players 1 and 2 give a WhatsApp number.
@@ -217,7 +237,7 @@ var NAME_COLUMNS = [COL.P1, COL.P2, COL.P3, COL.P4];
 var COLUMN_WIDTHS = [
   160, 170, 280, 135, 150, 135, 150, 135, 135, 110, 260, 100, 120,
   90, 120, 150, 165, 190, 160, 120,
-  180, 175, 100, 100, 150, 120
+  180, 175, 100, 100, 150, 120, 170
 ];
 
 // A calm, record-like palette. The brand lime survives only as one thin rule
@@ -264,6 +284,15 @@ function doGet(e) {
       return jsonResponse_(getStats_());
     }
 
+    // Public, published-only tournament data. Draft results and room
+    // credentials are never included.
+    if (action === 'results') {
+      return jsonResponse_(publicResults_());
+    }
+    if (action === 'schedule') {
+      return jsonResponse_(publicSchedule_());
+    }
+
     // The live entry fee and whether online payment is actually switched on.
     // The page never assumes either: it asks.
     if (action === 'config') {
@@ -274,7 +303,7 @@ function doGet(e) {
       ok: true,
       service: 'QQSGP Free Fire Registration',
       status: 'running',
-      endpoints: ['?action=stats', '?action=config', '?action=webhook', '?action=paywebhook']
+      endpoints: ['?action=stats', '?action=config', '?action=schedule', '?action=results', '?action=webhook', '?action=paywebhook']
     });
   } catch (error) {
     return errorResponse_('Server error: ' + messageOf_(error));
@@ -369,14 +398,16 @@ function doPost(e) {
 
     var sheet = getSheet_();
     ensureHeaders_(sheet);
+    ensureTeamIds_(sheet, true);
 
-    // 4. Rules.
-    if (CONFIG.MAX_TEAMS > 0 && countTeams_(sheet) >= CONFIG.MAX_TEAMS) {
-      return errorResponse_('All ' + CONFIG.MAX_TEAMS + ' team slots are taken. Registration is closed.');
+    // 4. Rules. The conflict check runs under the same lock as the write, so
+    // two simultaneous submissions cannot both pass it.
+    var maxTeams = maxTeams_();
+    if (maxTeams > 0 && activeTeamCount_(sheet) >= maxTeams) {
+      return errorResponse_('All ' + maxTeams + ' team slots are taken. Registration is closed.');
     }
-    if (hasTeamRegisteredToday_(sheet, checked.value.teamName)) {
-      return errorResponse_('A team named "' + checked.value.teamName + '" has already registered today.');
-    }
+    var conflict = registrationConflict_(sheet, checked.value);
+    if (!conflict.ok) return errorResponse_(conflict.error);
 
     // 5. Write the row.
     var rowNumber = appendRegistration_(sheet, checked.value);
@@ -398,8 +429,7 @@ function doPost(e) {
     // The id is the same opaque record id the dashboard uses. Everything the
     // site is told about money is read back from the row that was just
     // written, never taken from the request.
-    var stamp = sheet.getRange(rowNumber, COL.TIMESTAMP).getValue();
-    var newId = recordId_(stamp, checked.value.teamName);
+    var newId = sheet.getRange(rowNumber, COL.TEAM_ID).getValue();
     var written = sheet.getRange(rowNumber, 1, 1, HEADERS.length).getValues()[0];
     var payment = paymentFromRow_(written);
 
@@ -453,8 +483,8 @@ function getStats_() {
     departments: stats.departments,
     byDepartment: stats.byDepartment,
     lastRegistration: stats.lastRegistration,
-    capacity: CONFIG.MAX_TEAMS,
-    slotsLeft: CONFIG.MAX_TEAMS > 0 ? Math.max(CONFIG.MAX_TEAMS - stats.teams, 0) : null,
+    capacity: maxTeams_(),
+    slotsLeft: maxTeams_() > 0 ? Math.max(maxTeams_() - stats.teams, 0) : null,
     generatedAt: new Date().toISOString()
   };
 
@@ -575,28 +605,22 @@ function validateRegistration_(payload) {
       return { ok: false, error: 'Player ' + (i + 1) + ' name contains characters that are not allowed.' };
     }
 
-    // Players 1 and 2 must give a 10-digit WhatsApp number.
+    // Players 1 and 2 must give a 10-digit WhatsApp number. +91 and 91 are
+    // accepted and stored as the same canonical 10 digits. A household may
+    // share one number inside a team; cross-team reuse is rejected later.
     var whatsapp = '';
     if (i < 2) {
-      whatsapp = cleanText_(member.whatsapp).replace(/\D/g, '');
-      if (!/^\d{10}$/.test(whatsapp)) {
-        return { ok: false, error: 'Player ' + (i + 1) + ' WhatsApp number must be exactly 10 digits.' };
-      }
-      if (/^0{10}$/.test(whatsapp)) {
-        return { ok: false, error: 'Player ' + (i + 1) + ' WhatsApp number is not valid.' };
+      var typedDigits = cleanText_(member.whatsapp).replace(/\D/g, '');
+      whatsapp = normalizeIndianPhone_(member.whatsapp);
+      if (!whatsapp) {
+        if (/^0{10}$/.test(typedDigits)) {
+          return { ok: false, error: 'Player ' + (i + 1) + ' WhatsApp number is not valid.' };
+        }
+        return { ok: false, error: 'Player ' + (i + 1) + ' WhatsApp number must be exactly 10 digits. Use +91 or 91 only as the country code.' };
       }
     }
 
     members.push({ name: name, whatsapp: whatsapp });
-  }
-
-  // The two contact numbers must differ. A shared number is almost always a
-  // typo, and it leaves the organisers with only one reachable person.
-  if (members[0].whatsapp === members[1].whatsapp) {
-    return {
-      ok: false,
-      error: 'Player 1 and Player 2 cannot use the same WhatsApp number.'
-    };
   }
 
   // --- WhatsApp consent -------------------------------------------------
@@ -656,8 +680,25 @@ function validatePaymentChoice_(raw) {
   if (method === 'ONLINE') {
     return {
       ok: false,
-      error: 'Online payment has to be completed through the payment step, after the ' +
-        'provider confirms it. Nothing was submitted. Choose Cash, or pay online first.'
+      error: 'Gateway payment has to be completed through the payment step, after the ' +
+        'provider confirms it. Nothing was submitted. Choose UPI or Cash instead.'
+    };
+  }
+
+  if (method === 'UPI') {
+    var utr = cleanText_(source.utr).slice(0, 40);
+    if (utr && !/^[A-Za-z0-9._-]{4,40}$/.test(utr)) {
+      return { ok: false, error: 'The UPI reference should be 4-40 letters or digits.' };
+    }
+    return {
+      ok: true,
+      value: {
+        method: 'UPI',
+        status: PAY.PENDING,
+        utr: utr,
+        note: 'UPI payment submitted for organiser verification.',
+        by: 'TEAM'
+      }
     };
   }
 
@@ -774,26 +815,181 @@ function countTeams_(sheet) {
   return Math.max(sheet.getLastRow() - 1, 0);
 }
 
-/** True when the same team name was already submitted today. */
-function hasTeamRegisteredToday_(sheet, teamName) {
+/** Case/space-insensitive key for a team name. */
+function normaliseTeamName_(value) {
+  return cleanText_(value).toLowerCase();
+}
+
+/**
+ * Canonical 10-digit Indian mobile number, or ''. Accepts a plain 10-digit
+ * number and the +91 / 91 forms, ignoring spaces and dashes.
+ */
+function normalizeIndianPhone_(value) {
+  var digits = cleanText_(value).replace(/\D/g, '');
+  if (digits.length === 12 && digits.slice(0, 2) === '91') digits = digits.slice(2);
+  if (!/^\d{10}$/.test(digits) || /^0{10}$/.test(digits)) return '';
+  return digits;
+}
+
+/** Stored Team ID, falling back to the old deterministic id for old rows. */
+function teamIdFromRow_(row) {
+  var stored = cleanText_(row[COL.TEAM_ID - 1]);
+  if (stored) return stored;
+  return recordId_(row[COL.TIMESTAMP - 1], cleanText_(row[COL.TEAM - 1]));
+}
+
+function teamIdExists_(sheet, id) {
   var rows = countTeams_(sheet);
-  if (rows === 0) return false;
+  if (!id || rows === 0) return false;
+  if (sheet.getMaxColumns() < COL.TEAM_ID) return false;
+  var values = sheet.getRange(2, COL.TEAM_ID, rows, 1).getValues();
+  for (var i = 0; i < values.length; i++) {
+    if (cleanText_(values[i][0]) === id) return true;
+  }
+  return false;
+}
 
-  var names = sheet.getRange(2, COL.TEAM, rows, 1).getValues();
-  var stamps = sheet.getRange(2, COL.TIMESTAMP, rows, 1).getValues();
-  var today = dayKey_(new Date());
-  var target = teamName.toLowerCase();
+/** A new opaque, stable team id. 22 characters, like the legacy ids. */
+function newTeamId_(sheet) {
+  for (var attempt = 0; attempt < 10; attempt++) {
+    var seed = (Utilities.getUuid ? Utilities.getUuid() : '') + '|' +
+      new Date().getTime() + '|' + Math.random() + '|' + attempt;
+    var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, seed);
+    var token = Utilities.base64EncodeWebSafe(digest)
+      .replace(/=+$/, '')
+      .replace(/[^A-Za-z0-9_-]/g, '')
+      .slice(0, 16);
+    var id = 'QQSGP-' + token;
+    if (!teamIdExists_(sheet, id)) return id;
+  }
+  return 'QQSGP-' + String(new Date().getTime()).slice(-16);
+}
 
-  for (var i = 0; i < rows; i++) {
-    if (cleanText_(names[i][0]).toLowerCase() !== target) continue;
+/**
+ * Fills blank Team ID cells once, preserving the id the dashboard already
+ * uses for an old row. Safe to call while already holding the script lock.
+ */
+function ensureTeamIds_(sheet, lockHeld) {
+  var rows = countTeams_(sheet);
+  if (rows === 0 || sheet.getMaxColumns() < COL.TEAM_ID) return 0;
 
-    var stamp = stamps[i][0];
-    if (Object.prototype.toString.call(stamp) === '[object Date]' && dayKey_(stamp) === today) {
-      return true;
+  var range = sheet.getRange(2, COL.TEAM_ID, rows, 1);
+  var ids = range.getValues();
+  var missing = 0;
+  for (var i = 0; i < ids.length; i++) if (cleanText_(ids[i][0]) === '') missing++;
+  if (missing === 0) return 0;
+
+  var lock = null;
+  if (!lockHeld) {
+    lock = LockService.getScriptLock();
+    if (!lock.tryLock(CONFIG.LOCK_TIMEOUT_MS)) return 0;
+  }
+
+  try {
+    ids = range.getValues();
+    var used = {};
+    for (var u = 0; u < ids.length; u++) {
+      var existing = cleanText_(ids[u][0]);
+      if (existing) used[existing] = true;
+    }
+
+    var filled = 0;
+    for (var r = 0; r < ids.length; r++) {
+      if (cleanText_(ids[r][0]) !== '') continue;
+      var rowValues = sheet.getRange(r + 2, 1, 1, HEADERS.length).getValues()[0];
+      var id = recordId_(rowValues[COL.TIMESTAMP - 1], cleanText_(rowValues[COL.TEAM - 1]));
+      if (used[id]) id = newTeamId_(sheet);
+      ids[r][0] = id;
+      used[id] = true;
+      filled++;
+    }
+
+    if (filled > 0) range.setValues(ids);
+    return filled;
+  } finally {
+    if (lock) { try { lock.releaseLock(); } catch (ignored) {} }
+  }
+}
+
+/**
+ * Rejects a new team when its name, leader number or player number is already
+ * in use by another active team. Rejected rows are historical and do not block
+ * a corrected re-entry. The error never reveals the other team's details.
+ */
+function registrationConflict_(sheet, candidate) {
+  var rows = countTeams_(sheet);
+  if (rows === 0) return { ok: true };
+
+  var nameKey = normaliseTeamName_(candidate.teamName);
+  var leader = normalizeIndianPhone_(candidate.members[0] && candidate.members[0].whatsapp);
+  var player2 = candidate.members[1] ? normalizeIndianPhone_(candidate.members[1].whatsapp) : '';
+  var values = sheet.getRange(2, 1, rows, HEADERS.length).getValues();
+
+  for (var i = 0; i < values.length; i++) {
+    var row = values[i];
+    if (normaliseStatus_(row[COL.STATUS - 1]) === 'REJECTED') continue;
+
+    if (nameKey && normaliseTeamName_(row[COL.TEAM - 1]) === nameKey) {
+      return { ok: false, error: 'This team name is already registered.' };
+    }
+
+    var existingLeader = normalizeIndianPhone_(row[COL.P1_WA - 1]);
+    var existingPlayer2 = normalizeIndianPhone_(row[COL.P2_WA - 1]);
+
+    if (leader && (leader === existingLeader || leader === existingPlayer2)) {
+      return { ok: false, error: 'This team leader mobile number is already used by another team.' };
+    }
+    if (player2 && (player2 === existingLeader || player2 === existingPlayer2)) {
+      return { ok: false, error: 'This player mobile number is already registered with another team.' };
     }
   }
 
-  return false;
+  return { ok: true };
+}
+
+/** Read-only duplicate report for the organiser menu. */
+function duplicateReport_() {
+  var sheet = getSheet_();
+  ensureHeaders_(sheet);
+  var rows = countTeams_(sheet);
+  var report = { teamNames: [], leaderPhones: [], playerPhones: [] };
+  if (rows === 0) return report;
+
+  var values = sheet.getRange(2, 1, rows, HEADERS.length).getValues();
+  var names = {}, leaders = {}, players = {};
+
+  function add(map, key, label, row) {
+    if (!key) return;
+    if (!map[key]) map[key] = { teams: [], rows: [] };
+    map[key].teams.push(label);
+    map[key].rows.push(row);
+  }
+
+  for (var i = 0; i < values.length; i++) {
+    var row = values[i];
+    if (normaliseStatus_(row[COL.STATUS - 1]) === 'REJECTED') continue;
+    var team = cleanText_(row[COL.TEAM - 1]);
+    var rowNumber = i + 2;
+    add(names, normaliseTeamName_(team), team, rowNumber);
+    add(leaders, normalizeIndianPhone_(row[COL.P1_WA - 1]), team, rowNumber);
+    add(players, normalizeIndianPhone_(row[COL.P2_WA - 1]), team, rowNumber);
+  }
+
+  function collect(map, mask) {
+    return Object.keys(map).filter(function (key) { return map[key].rows.length > 1; })
+      .map(function (key) {
+        return {
+          value: mask ? '••••' + key.slice(-4) : map[key].teams[0],
+          teams: map[key].teams,
+          rows: map[key].rows
+        };
+      });
+  }
+
+  report.teamNames = collect(names, false);
+  report.leaderPhones = collect(leaders, true);
+  report.playerPhones = collect(players, true);
+  return report;
 }
 
 function dayKey_(date) {
@@ -804,6 +1000,7 @@ function dayKey_(date) {
 function appendRegistration_(sheet, registration) {
   var members = registration.members;
   var payment = registration.payment || null;
+  var teamId = registration.teamId || newTeamId_(sheet);
 
   var row = [
     new Date(),
@@ -833,7 +1030,8 @@ function appendRegistration_(sheet, registration) {
     payment ? (payment.paidAmount || '') : '',
     payment ? (payment.paidCurrency || '') : '',
     payment ? (payment.verifiedAt || '') : '',
-    payment ? (payment.provider || '') : ''
+    payment ? (payment.provider || '') : '',
+    teamId
   ];
 
   var target = sheet.getLastRow() + 1;
@@ -1196,6 +1394,8 @@ function onOpen() {
       .addItem('Apply sheet formatting', 'menuApplyFormatting')
       .addItem('Show registration stats', 'menuShowStats')
       .addItem('Repair header row', 'menuRepairHeader')
+      .addItem('Team IDs: backfill', 'menuBackfillTeamIds')
+      .addItem('Duplicates: report', 'menuShowDuplicates')
       .addItem('Payments: backfill ₹100 fee', 'menuBackfillFee')
       .addSeparator()
       .addItem('Organiser accounts: create', 'menuCreateAccount')
@@ -1235,6 +1435,39 @@ function menuRepairHeader() {
   ensureHeaders_(sheet);
   applySheetFormatting_(sheet);
   showAlert_('Header repaired', 'The header row was rebuilt and the sheet was re-formatted.');
+}
+
+function menuBackfillTeamIds() {
+  var sheet = getSheet_();
+  ensureHeaders_(sheet);
+  var filled = ensureTeamIds_(sheet, false);
+  showAlert_(
+    'Team IDs backfilled',
+    filled + ' row(s) received a stable Team ID. Rows that already had one were left untouched.'
+  );
+}
+
+function menuShowDuplicates() {
+  var report = duplicateReport_();
+  var lines = [];
+
+  function add(title, groups) {
+    if (!groups.length) return;
+    lines.push(title + ':');
+    groups.forEach(function (group) {
+      lines.push('  • ' + group.value + ' — rows ' + group.rows.join(', ') + ' — ' + group.teams.join(', '));
+    });
+    lines.push('');
+  }
+
+  add('Duplicate team names', report.teamNames);
+  add('Duplicate leader numbers', report.leaderPhones);
+  add('Duplicate player numbers', report.playerPhones);
+
+  showAlert_(
+    'Duplicate report (read-only)',
+    lines.length ? lines.join('\n') : 'No duplicate names or phone numbers were found.'
+  );
 }
 
 /**
@@ -1398,12 +1631,14 @@ var ORG_PERMISSIONS = {
   SUPER: [
     'records.view', 'records.update', 'records.export',
     'pay.view', 'pay.update',
+    'matches.view', 'matches.manage', 'results.view', 'results.manage',
     'wa.view', 'wa.send',
     'accounts.manage', 'sessions.manage', 'audit.view'
   ],
   ORGANIZER: [
     'records.view', 'records.update', 'records.export',
     'pay.view', 'pay.update',
+    'matches.view', 'matches.manage', 'results.view', 'results.manage',
     'wa.view', 'wa.send'
   ]
 };
@@ -1420,6 +1655,15 @@ var ORG_ACTION_PERMISSION = {
   'drafts-list': 'pay.view',
   'draft-resolve': 'pay.update',
   'export': 'records.export',
+  'teams': 'matches.view',
+  'tournament': 'matches.view',
+  'match-save': 'matches.manage',
+  'match-assign': 'matches.manage',
+  'match-unassign': 'matches.manage',
+  'result-save': 'results.manage',
+  'result-approve': 'results.manage',
+  'result-publish': 'results.manage',
+  'result-unpublish': 'results.manage',
   'notif-config': 'wa.view',
   'notif-list': 'wa.view',
   'notif-retry': 'wa.send',
@@ -2527,7 +2771,7 @@ function findRowById_(sheet, id) {
 
   var values = sheet.getRange(2, 1, rows, HEADERS.length).getValues();
   for (var i = 0; i < values.length; i++) {
-    if (recordId_(values[i][COL.TIMESTAMP - 1], cleanText_(values[i][COL.TEAM - 1])) === id) {
+    if (teamIdFromRow_(values[i]) === id) {
       return i + 2;
     }
   }
@@ -2604,9 +2848,20 @@ var DRAFT = {
   CANCELLED: 'CANCELLED',
   EXPIRED: 'EXPIRED',
   MISMATCH: 'MISMATCH',
+  // The provider answered, but not in the shape only the owning merchant can
+  // see. That is not evidence this account was paid, so the attempt is closed
+  // and deliberately kept OUT of the organiser review queue: a payment that
+  // went somewhere else must never be accepted by hand here.
+  IDENTITY: 'IDENTITY MISMATCH',
   UNPLACED: 'PAID - NO SLOT',
-  // The gateway says money arrived but its own confidence is below the level
-  // this event requires. A human decides; the team is not registered yet.
+  // The gateway observed a credit on the receiving account but has NOT
+  // reconciled it against the bank statement. That is evidence of money, not
+  // of settlement: the team is not registered and the attempt cannot be
+  // reused, so nobody pays twice while a reconciliation is outstanding.
+  OBSERVED: 'OBSERVED - AWAITING RECONCILIATION',
+  // The gateway says money arrived and is reconciled, but its own confidence
+  // is below the level this event requires. A human decides; the team is not
+  // registered yet.
   UNVERIFIED: 'NEEDS REVIEW'
 };
 
@@ -2684,19 +2939,24 @@ function saveEntryFee_(fee, actor) {
 }
 
 function publicConfig_() {
+  var manual = manualPaymentMode_();
   return {
     ok: true,
     fee: entryFee_(),
     currency: CONFIG.PAYMENT_CURRENCY,
-    provider: 'YOUPI',
-    // The page must not offer a payment it cannot verify. Until the merchant
-    // instance is configured the online button is replaced by a plain
-    // explanation and cash still works.
-    online: youpiConfigured_(),
-    // What the page may honestly say about the online path.
-    hosted: true,
-    label: 'YouPI PG',
-    minVerification: youpiMinVerification_(),
+    provider: manual ? 'MANUAL' : 'YOUPI',
+    // The page must not offer a payment it cannot verify. In manual mode there
+    // is no gateway; the team pays by UPI or cash and an organiser verifies it.
+    online: manual ? false : youpiConfigured_(),
+    manualUpi: manual,
+    // A public QR image is optional. The UPI ID itself is never returned: the
+    // organiser can show the QR or share the ID privately if they prefer.
+    upiQrUrl: manual ? upiQrUrl_() : '',
+    // What the page may honestly say about the payment path.
+    hosted: !manual,
+    label: manual ? 'UPI or cash' : 'YouPI PG',
+    minVerification: manual ? 0 : youpiMinVerification_(),
+    maxTeams: maxTeams_(),
     generatedAt: new Date().toISOString()
   };
 }
@@ -2721,11 +2981,27 @@ function youpiBaseUrl_() {
   return trimSlash_(propertyOr_(CONFIG.YOUPI_BASE_URL_PROPERTY));
 }
 
+/**
+ * Names of the Script Properties that keep online payment off, in the order
+ * they are checked. Names only - never values, never the key itself - so an
+ * organiser can see what is missing without a secret ever leaving the server.
+ */
+function youpiConfigMissing_() {
+  var missing = [];
+  if (!/^https?:\/\/[^\s]+$/i.test(youpiBaseUrl_())) {
+    missing.push(CONFIG.YOUPI_BASE_URL_PROPERTY);
+  }
+  if (!propertyOr_(CONFIG.YOUPI_MERCHANT_ID_PROPERTY)) {
+    missing.push(CONFIG.YOUPI_MERCHANT_ID_PROPERTY);
+  }
+  if (!propertyOr_(CONFIG.YOUPI_MERCHANT_KEY_PROPERTY)) {
+    missing.push(CONFIG.YOUPI_MERCHANT_KEY_PROPERTY);
+  }
+  return missing;
+}
+
 function youpiConfigured_() {
-  var base = youpiBaseUrl_();
-  if (!/^https?:\/\/[^\s]+$/i.test(base)) return false;
-  return !!(propertyOr_(CONFIG.YOUPI_MERCHANT_ID_PROPERTY) &&
-           propertyOr_(CONFIG.YOUPI_MERCHANT_KEY_PROPERTY));
+  return youpiConfigMissing_().length === 0;
 }
 
 function youpiMinVerification_() {
@@ -2743,7 +3019,7 @@ function youpiMinVerification_() {
  * the merchant's webhook secret, so it is kept in Script Properties and never
  * written to a sheet, a log line or a browser response.
  */
-function youpiCall_(method, path, payload) {
+function youpiCall_(method, path, payload, extraHeaders) {
   var base = youpiBaseUrl_();
   var merchantId = propertyOr_(CONFIG.YOUPI_MERCHANT_ID_PROPERTY);
   var merchantKey = propertyOr_(CONFIG.YOUPI_MERCHANT_KEY_PROPERTY);
@@ -2751,14 +3027,19 @@ function youpiCall_(method, path, payload) {
     return { ok: false, code: 'NOT_CONFIGURED', error: 'Online payment is not configured yet.' };
   }
 
+  var headers = {
+    'X-Merchant-Id': merchantId,
+    'X-Merchant-Key': merchantKey
+  };
+  if (extraHeaders) {
+    Object.keys(extraHeaders).forEach(function (name) { headers[name] = extraHeaders[name]; });
+  }
+
   var options = {
     method: method,
     contentType: 'application/json',
     muteHttpExceptions: true,
-    headers: {
-      'X-Merchant-Id': merchantId,
-      'X-Merchant-Key': merchantKey
-    }
+    headers: headers
   };
   if (payload) options.payload = JSON.stringify(payload);
 
@@ -2807,6 +3088,11 @@ function youpiCreatePayment_(token, teamName, fee, expires) {
     currency: CONFIG.PAYMENT_CURRENCY,
     description: 'QQSGP entry fee - ' + cleanText_(teamName).slice(0, 60),
     metadata: { token: token, team: cleanText_(teamName).slice(0, 120), purpose: 'QQSGP entry fee' }
+  }, {
+    // YouPI returns the existing session for the same order id, but an explicit
+    // idempotency key makes a retried create safe even if the order lookup
+    // changes. It is derived from our own token, never from the browser.
+    'Idempotency-Key': orderId
   });
   if (!res.ok) return res;
 
@@ -2970,7 +3256,10 @@ function openHeldDraftForTeam_(sheet, teamName) {
   var drafts = allDrafts_(sheet);
   for (var i = 0; i < drafts.length; i++) {
     var draft = drafts[i];
-    if ([DRAFT.UNVERIFIED, DRAFT.MISMATCH, DRAFT.UNPLACED].indexOf(draft.status) === -1) continue;
+    // OBSERVED belongs here: money has been seen for this team and is waiting
+    // for reconciliation, so handing out a second checkout is how someone pays
+    // twice for one entry.
+    if ([DRAFT.UNVERIFIED, DRAFT.MISMATCH, DRAFT.UNPLACED, DRAFT.OBSERVED].indexOf(draft.status) === -1) continue;
     if (cleanText_(draft.teamName).toLowerCase() === target) return draft;
   }
   return null;
@@ -3107,8 +3396,10 @@ function publicPaymentOrder_(e) {
     if (CONFIG.MAX_TEAMS > 0 && countTeams_(sheet) >= CONFIG.MAX_TEAMS) {
       return { ok: false, code: 'FULL', error: 'All ' + CONFIG.MAX_TEAMS + ' team slots are taken. Registration is closed.' };
     }
-    if (hasTeamRegisteredToday_(sheet, team.teamName)) {
-      return { ok: false, code: 'DUPLICATE', error: 'A team named "' + team.teamName + '" has already registered today.' };
+    ensureTeamIds_(sheet, true);
+    var conflict = registrationConflict_(sheet, team);
+    if (!conflict.ok) {
+      return { ok: false, code: 'DUPLICATE', error: conflict.error };
     }
 
     // The check above ran before this execution queued for the lock, so it is
@@ -3190,12 +3481,22 @@ function publicPaymentOrder_(e) {
 /**
  * YouPI's own answer about the session we opened, read with the merchant key.
  *
- * The gateway reports its confidence separately from the outcome:
- * verificationLevel 2 means both the bank SMS and the Gmail alert agreed. This
- * deployment can require 2 (the default), because the project's own README
- * says its status alone is not conclusive proof of settlement. Below the
- * required level the money is recorded but the team is NOT registered: the
- * attempt goes to NEEDS REVIEW for an organiser, who can accept it.
+ * Current YouPI contract (commit 405327c):
+ *   OBSERVED_SUCCESS + settlementState NOT_RECONCILED  money seen, not settled
+ *   RECONCILED      + settlementState RECONCILED       matched to a statement
+ *   SUCCESS                                            COD / counter / manual
+ *   MANUAL_REVIEW                                      held by the gateway
+ *
+ * Only a RECONCILED session may register a team. An observation is recorded
+ * (state OBSERVED) so it is not lost, but it is never settlement: YouPI's own
+ * README says its status is not conclusive proof, and SUCCESS no longer means
+ * a UPI payment arrived.
+ *
+ * The gateway also reports its confidence separately: verificationLevel 2
+ * means both the bank SMS and the Gmail alert agreed. This deployment can
+ * require 2 (the default). Below the required level the money is recorded but
+ * the team is NOT registered: the attempt goes to NEEDS REVIEW for an
+ * organiser, who can accept it.
  */
 function verifyYoupiPayment_(draft) {
   if (!draft.paymentId) return { state: 'PENDING' };
@@ -3204,15 +3505,82 @@ function verifyYoupiPayment_(draft) {
   if (!res.ok) return { state: 'PENDING', error: res.error };
 
   var session = res.body || {};
+
+  // YOUPI does not return a merchantId, so the owner-only verification level IS
+  // the identity signal: a redacted (non-owner) answer has no verificationLevel
+  // at all. A missing level must never be read as "0" and quietly become a
+  // payable attempt - that is how a payment that went to another account ends
+  // up in the organiser's review queue.
+  var announcedLevel = session.verificationLevel;
+  if (announcedLevel === undefined || announcedLevel === null || cleanText_(announcedLevel) === '') {
+    return {
+      state: 'MISMATCH',
+      reason: 'identity',
+      provider: 'YOUPI',
+      paymentId: cleanText_(session.paymentId) || draft.paymentId,
+      amount: Number(session.amountPaise) || 0,
+      currency: cleanText_(session.currency).toUpperCase()
+    };
+  }
+
   var status = cleanText_(session.status).toUpperCase();
+  var settlement = cleanText_(session.settlementState).toUpperCase();
   var amountPaise = Number(session.amountPaise);
   if (!isFinite(amountPaise) || !amountPaise) amountPaise = Math.round((Number(session.amount) || 0) * 100);
   var currency = cleanText_(session.currency).toUpperCase();
+  var method = cleanText_(session.method).toUpperCase();
+  var level = Number(session.verificationLevel) || 0;
 
   if (status === 'CANCELLED') return { state: 'CANCELLED' };
   if (status === 'EXPIRED') return { state: 'EXPIRED' };
   if (status === 'FAILED') return { state: 'FAILED' };
-  if (status !== 'SUCCESS') return { state: 'PENDING', paymentStatus: status };
+
+  // Money was seen on the receiving account. YouPI has not matched it to the
+  // bank statement, so it is not settlement and must never register a team.
+  if (status === 'OBSERVED_SUCCESS') {
+    return {
+      state: 'OBSERVED',
+      provider: 'YOUPI',
+      paymentId: cleanText_(session.paymentId) || draft.paymentId,
+      orderId: cleanText_(session.orderId),
+      amount: amountPaise,
+      currency: currency,
+      method: method || 'UPI',
+      settlementState: settlement || 'NOT_RECONCILED',
+      verificationLevel: level,
+      verificationTag: cleanText_(session.verificationTag)
+    };
+  }
+
+  // SUCCESS is the COD / counter / manual outcome. It is not a reconciled UPI
+  // payment, so an online registration is not closed on it.
+  if (status === 'SUCCESS' || status === 'MANUAL_REVIEW') {
+    return {
+      state: 'PENDING',
+      paymentStatus: status,
+      settlementState: settlement || (status === 'SUCCESS' ? 'NOT_BANK_SETTLEMENT' : 'MANUAL_REVIEW'),
+      unreconciled: true
+    };
+  }
+
+  if (status !== 'RECONCILED') return { state: 'PENDING', paymentStatus: status };
+
+  // A RECONCILED label without the matching settlementState is not the
+  // documented shape. Treat it as still unreconciled rather than as paid.
+  if (settlement !== 'RECONCILED') {
+    return {
+      state: 'PENDING',
+      paymentStatus: status,
+      settlementState: settlement || 'UNKNOWN',
+      awaitingReconciliation: true
+    };
+  }
+
+  // This project only opens UPI sessions. A reconciled COD or counter session
+  // is not this draft's payment, however convincing its ids look.
+  if (method && method !== 'UPI') {
+    return { state: 'PENDING', paymentStatus: status, method: method, awaitingReconciliation: true };
+  }
 
   var expected = Math.round(Number(draft.fee) * 100);
   var proof = {
@@ -3222,8 +3590,9 @@ function verifyYoupiPayment_(draft) {
     orderId: cleanText_(session.orderId),
     amount: amountPaise,
     currency: currency,
-    method: cleanText_(session.method) || 'UPI',
-    verificationLevel: Number(session.verificationLevel) || 0,
+    method: method || 'UPI',
+    settlementState: 'RECONCILED',
+    verificationLevel: level,
     verificationTag: cleanText_(session.verificationTag)
   };
 
@@ -3330,13 +3699,13 @@ function finaliseVerifiedPayment_(draft, evidence) {
     // registered the same name: keep the payment, refuse the second entry, and
     // leave a trail an organiser can act on.
     var full = CONFIG.MAX_TEAMS > 0 && countTeams_(sheet) >= CONFIG.MAX_TEAMS;
-    var duplicate = hasTeamRegisteredToday_(sheet, fresh.teamName);
-    if (full || duplicate) {
+    var conflict = registrationConflict_(sheet, { teamName: fresh.teamName, members: members });
+    if (full || !conflict.ok) {
       setDraftRow_(draftSheet, fresh.row, {
         status: DRAFT.UNPLACED, paymentId: evidence.paymentId, paidAmount: paidAmount / 100
       });
       orgAudit_(PAY_ACTOR, 'payment-no-slot', fresh.orderId || fresh.qrId,
-        fresh.teamName + ' paid ₹' + paidAmount / 100 + ' but ' + (full ? 'the event is full' : 'the team name is already registered'), 'refused');
+        fresh.teamName + ' paid ₹' + paidAmount / 100 + ' but ' + (full ? 'the event is full' : conflict.error), 'refused');
       return {
         ok: false, code: 'FULL', paid: true,
         error: 'Your payment was received, but the team could not be added automatically. An organiser will contact you.'
@@ -3377,12 +3746,12 @@ function finaliseVerifiedPayment_(draft, evidence) {
       }
     };
 
+    registration.teamId = newTeamId_(sheet);
     var rowNumber = appendRegistration_(sheet, registration);
     refreshBodyStyles_(sheet);
     clearStatsCache_();
 
-    var stamp = sheet.getRange(rowNumber, COL.TIMESTAMP).getValue();
-    var registrationId = recordId_(stamp, fresh.teamName);
+    var registrationId = sheet.getRange(rowNumber, COL.TEAM_ID).getValue();
 
     setDraftRow_(draftSheet, fresh.row, {
       status: DRAFT.FINALISED,
@@ -3418,6 +3787,36 @@ function finaliseVerifiedPayment_(draft, evidence) {
   } finally {
     try { lock.releaseLock(); } catch (ignored) {}
   }
+}
+
+/**
+ * Records an observed (but unreconciled) credit without treating it as paid.
+ *
+ * The draft is moved to OBSERVED so the team cannot open a second checkout
+ * while the bank reconciliation is outstanding. The poll continues, and a
+ * later RECONCILED answer finalises the same draft.
+ */
+function recordObservedPayment_(sheet, draft, evidence) {
+  if (draft.status !== DRAFT.OBSERVED) {
+    setDraftRow_(sheet, draft.row, {
+      status: DRAFT.OBSERVED,
+      paymentId: evidence.paymentId || draft.paymentId,
+      paidAmount: (evidence.amount || 0) / 100,
+      verification: 'YOUPI L' + (evidence.verificationLevel || 0) + ' OBSERVED'
+    });
+    orgAudit_(PAY_ACTOR, 'payment-observed', draft.orderId || draft.paymentId,
+      'gateway observed ₹' + ((evidence.amount || 0) / 100) + ' ' + (evidence.currency || 'INR') +
+      ' at verification level ' + (evidence.verificationLevel || 0) +
+      ' · not reconciled · team ' + draft.teamName + ' · awaiting bank statement', 'review');
+  }
+  return {
+    ok: true,
+    state: 'PENDING',
+    paymentStatus: 'OBSERVED_SUCCESS',
+    settlementState: evidence.settlementState || 'NOT_RECONCILED',
+    awaitingReconciliation: true,
+    verificationLevel: evidence.verificationLevel || 0
+  };
 }
 
 /**
@@ -3481,6 +3880,10 @@ function publicPaymentStatus_(e) {
     return { ok: true, state: 'EXPIRED' };
   }
 
+  if (evidence.state === 'OBSERVED') {
+    return recordObservedPayment_(sheet, draft, evidence);
+  }
+
   if (evidence.state === 'PAID') {
     var result = finaliseVerifiedPayment_(draft, evidence);
     if (result.ok) {
@@ -3491,6 +3894,23 @@ function publicPaymentStatus_(e) {
       };
     }
     return { ok: true, state: result.code === 'BUSY' ? 'PENDING' : 'REVIEW', error: result.error };
+  }
+
+  if (evidence.state === 'MISMATCH' && evidence.reason === 'identity') {
+    // The gateway did not answer as the owning merchant. Close the attempt
+    // without putting it in the review queue, and record why at most once.
+    if (draft.status !== DRAFT.IDENTITY) {
+      setDraftRow_(sheet, draft.row, {
+        status: DRAFT.IDENTITY,
+        paymentId: evidence.paymentId || ''
+      });
+      orgAudit_(PAY_ACTOR, 'payment-identity', draft.orderId || draft.paymentId,
+        'provider answered without the owner-only verification level; not proof this merchant was paid', 'refused');
+    }
+    return {
+      ok: true, state: 'REVIEW',
+      error: 'This payment could not be matched to the tournament account. Nothing has been registered — please contact the organisers.'
+    };
   }
 
   if (evidence.state === 'MISMATCH') {
@@ -3521,6 +3941,12 @@ function publicPaymentCancel_(e) {
 
   if (draft.status === DRAFT.FINALISED) {
     return { ok: true, state: 'PAID', team: draft.teamName, registrationId: draft.registrationId };
+  }
+  if (draft.status === DRAFT.OBSERVED) {
+    return {
+      ok: true, state: 'PENDING', awaitingReconciliation: true,
+      error: 'Your payment has been seen and is waiting for reconciliation. Please do not pay again.'
+    };
   }
   if (draft.status !== DRAFT.OPEN) return { ok: true, state: draft.status };
 
@@ -3557,6 +3983,16 @@ function publicPaymentWebhook_(e) {
     if (yDraft.status === DRAFT.FINALISED) return { ok: true, duplicate: true };
 
     var yEvidence = latestDraftPayment_(yDraft);
+    if (yEvidence.state === 'MISMATCH' && yEvidence.reason === 'identity') {
+      if (yDraft.status !== DRAFT.IDENTITY) {
+        setDraftRow_(ySheet, yDraft.row, {
+          status: DRAFT.IDENTITY, paymentId: yEvidence.paymentId || ''
+        });
+        orgAudit_(PAY_ACTOR, 'payment-identity', yDraft.orderId || yDraft.paymentId,
+          'provider answered without the owner-only verification level; not proof this merchant was paid', 'refused');
+      }
+      return { ok: true, state: 'REVIEW' };
+    }
     if (yEvidence.state === 'UNVERIFIED') {
       setDraftRow_(ySheet, yDraft.row, {
         status: DRAFT.UNVERIFIED, paymentId: yEvidence.paymentId || '',
@@ -3567,6 +4003,10 @@ function publicPaymentWebhook_(e) {
         'gateway reported money at verification level ' + (yEvidence.verificationLevel || 0) +
         ' · team ' + yDraft.teamName + ' · held for review', 'review');
       return { ok: true, state: 'REVIEW' };
+    }
+    if (yEvidence.state === 'OBSERVED') {
+      recordObservedPayment_(ySheet, yDraft, yEvidence);
+      return { ok: true, state: 'PENDING', awaitingReconciliation: true };
     }
     if (yEvidence.state !== 'PAID') return { ok: true, state: yEvidence.state || 'PENDING' };
 
@@ -3665,6 +4105,7 @@ function adminSheet_() {
 function recordFromRow_(rowNumber, row) {
   var stamp = row[COL.TIMESTAMP - 1];
   var teamName = cleanText_(row[COL.TEAM - 1]);
+  var id = teamIdFromRow_(row);
   var players = [];
 
   for (var n = 0; n < NAME_COLUMNS.length; n++) {
@@ -3677,7 +4118,8 @@ function recordFromRow_(rowNumber, row) {
   }
 
   return {
-    id: recordId_(stamp, teamName),
+    id: id,
+    teamId: id,
     row: rowNumber,
     timestamp: isDate_(stamp) ? stamp.toISOString() : '',
     timestampLabel: isDate_(stamp)
@@ -3746,7 +4188,8 @@ function normalisePaymentStatus_(value, method) {
 
 function normalisePaymentMethod_(value) {
   var text = cleanText_(value).toUpperCase();
-  if (text === 'ONLINE' || text === 'UPI') return 'ONLINE';
+  if (text === 'ONLINE') return 'ONLINE';
+  if (text === 'UPI') return 'UPI';
   if (text === 'CASH') return 'CASH';
   return '';
 }
@@ -3918,6 +4361,17 @@ function adminHandle_(e) {
   if (action === 'drafts-list') return adminDraftsList_();
   if (action === 'draft-resolve') return adminDraftResolve_(payload, auth.actor);
 
+  // Tournament operations: six fixed matches, assignments, scoring, results.
+  if (action === 'teams') return adminTeams_();
+  if (action === 'tournament') return adminTournament_();
+  if (action === 'match-save') return adminMatchSave_(payload, auth.actor);
+  if (action === 'match-assign') return adminMatchAssign_(payload, auth.actor);
+  if (action === 'match-unassign') return adminMatchUnassign_(payload, auth.actor);
+  if (action === 'result-save') return adminResultSave_(payload, auth.actor);
+  if (action === 'result-approve') return adminResultApprove_(payload, auth.actor);
+  if (action === 'result-publish') return adminResultPublish_(payload, auth.actor);
+  if (action === 'result-unpublish') return adminResultUnpublish_(payload, auth.actor);
+
   // WhatsApp: configuration, log, retry, and announcements.
   if (action === 'notif-config') return adminNotifConfig_();
   if (action === 'notif-list') return adminNotifList_(payload);
@@ -3934,17 +4388,27 @@ function adminHandle_(e) {
  * about what a team owes.
  */
 function adminSettingsGet_() {
+  var manual = manualPaymentMode_();
+  var points = placementPoints_();
   return {
     ok: true,
     fee: entryFee_(),
     currency: CONFIG.PAYMENT_CURRENCY,
-    provider: 'YOUPI',
-    online: youpiConfigured_(),
-    minVerification: youpiMinVerification_(),
+    provider: manual ? 'MANUAL' : 'YOUPI',
+    online: manual ? false : youpiConfigured_(),
+    manualUpi: manual,
+    minVerification: manual ? 0 : youpiMinVerification_(),
+    maxTeams: maxTeams_(),
+    placementPoints: points,
+    killPoints: killPoints_(),
+    tieBreakers: tieBreakers_(),
     // Read-only facts the organiser needs to trust the dashboard: which
     // gateway is wired in, and whether it is actually reachable/configured.
-    hosted: true,
-    gatewayHost: youpiBaseUrl_()
+    hosted: !manual,
+    gatewayHost: manual ? '' : youpiBaseUrl_(),
+    // Property NAMES only, for the organiser's own diagnosis. The values are
+    // never included, so this cannot leak the merchant key.
+    missing: manual ? [] : youpiConfigMissing_()
   };
 }
 
@@ -3952,10 +4416,78 @@ function adminSettingsSet_(payload, actor) {
   var result = saveEntryFee_(payload.fee, actor);
   if (!result.ok) return result;
 
+  // Optional tournament controls. Each is validated here, not trusted from
+  // the browser, and written to the same Settings tab as the fee.
+  if (payload.maxTeams !== undefined && payload.maxTeams !== '') {
+    var max = Number(payload.maxTeams);
+    if (!isFinite(max) || max < 0 || max > 1000 || Math.round(max) !== max) {
+      return { ok: false, code: 'MAX', error: 'Maximum teams must be a whole number from 0 to 1000.' };
+    }
+    saveSetting_( 'max_teams', String(max), actor);
+  }
+  if (payload.killPoints !== undefined && payload.killPoints !== '') {
+    var kp = Number(payload.killPoints);
+    if (!isFinite(kp) || kp < 0 || kp > 10) {
+      return { ok: false, code: 'KILL', error: 'Kill points must be between 0 and 10.' };
+    }
+    saveSetting_('kill_points', String(kp), actor);
+  }
+  if (payload.placementPoints !== undefined && payload.placementPoints !== '') {
+    var raw = payload.placementPoints;
+    var list = raw;
+    if (typeof raw === 'string') {
+      try { list = JSON.parse(raw); } catch (ignored) {
+        list = raw.split(',').map(function (part) { return Number(cleanText_(part)); });
+      }
+    }
+    if (!list || list.length === undefined || list.length < 1 || list.length > 100) {
+      return { ok: false, code: 'POINTS', error: 'Placement points must be a list of numbers.' };
+    }
+    var clean = [];
+    for (var i = 0; i < list.length; i++) {
+      var n = Number(list[i]);
+      if (!isFinite(n) || n < 0 || n > 100) {
+        return { ok: false, code: 'POINTS', error: 'Each placement point value must be between 0 and 100.' };
+      }
+      clean.push(Math.round(n));
+    }
+    saveSetting_('placement_points', JSON.stringify(clean), actor);
+  }
+  if (payload.tieBreakers !== undefined && payload.tieBreakers !== '') {
+    var tie = parseTieBreakers_(payload.tieBreakers);
+    if (!tie) {
+      return { ok: false, code: 'TIE', error: 'Tie-breakers must be an order of total, kills and placement.' };
+    }
+    saveSetting_('tie_breakers', JSON.stringify(tie), actor);
+  }
+
   clearStatsCache_();
   orgAudit_(actor, 'settings-fee', String(result.fee), 'entry fee set to ₹' + result.fee, 'ok');
 
-  return { ok: true, fee: result.fee, currency: CONFIG.PAYMENT_CURRENCY };
+  return {
+    ok: true, fee: result.fee, maxTeams: maxTeams_(),
+    placementPoints: placementPoints_(), killPoints: killPoints_(), tieBreakers: tieBreakers_(),
+    currency: CONFIG.PAYMENT_CURRENCY
+  };
+}
+
+/** Writes or replaces one key/value row in the Settings tab. */
+function saveSetting_(key, value, actor) {
+  var sheet = settingsSheet_();
+  var rows = Math.max(sheet.getLastRow() - 1, 0);
+  var stamp = new Date();
+  var who = actor ? actor.id : 'organiser';
+  if (rows > 0) {
+    var values = sheet.getRange(2, 1, rows, 1).getValues();
+    for (var i = 0; i < values.length; i++) {
+      if (cleanText_(values[i][0]) === key) {
+        sheet.getRange(i + 2, 2, 1, 3).setValues([[value, stamp, who]]);
+        return true;
+      }
+    }
+  }
+  sheet.appendRow([key, value, stamp, who]);
+  return true;
 }
 
 /* --------------------- payments held for review --------------------- */
@@ -4081,6 +4613,9 @@ function adminDraftResolve_(payload, actor) {
 
 function adminList_(payload) {
   var sheet = adminSheet_();
+  // Old rows get their stable Team ID on the first dashboard read, so a link
+  // copied from the dashboard stays valid even before a new registration.
+  ensureTeamIds_(sheet, false);
   var all = readRecords_(sheet);
   var filtered = filterRecords_(all, payload);
 
@@ -4128,8 +4663,7 @@ function adminUpdate_(payload, change) {
     var targetRow = -1;
 
     for (var i = 0; i < values.length; i++) {
-      var candidate = recordId_(values[i][COL.TIMESTAMP - 1], cleanText_(values[i][COL.TEAM - 1]));
-      if (candidate === id) { targetRow = i + 2; break; }
+      if (teamIdFromRow_(values[i]) === id) { targetRow = i + 2; break; }
     }
 
     if (targetRow === -1) {
@@ -4224,7 +4758,7 @@ function adminSetPayment_(payload, actor) {
   var methodWanted = cleanText_(payload.method);
   var method = methodWanted ? normalisePaymentMethod_(methodWanted) : '';
   if (methodWanted && !method) {
-    return { ok: false, code: 'METHOD', error: 'Payment method must be Online or Cash.' };
+    return { ok: false, code: 'METHOD', error: 'Payment method must be Online, UPI or Cash.' };
   }
 
   var note = cleanText_(payload.note);
@@ -4269,7 +4803,7 @@ function adminSetPayment_(payload, actor) {
       return {
         ok: false,
         code: 'METHOD',
-        error: 'Set the payment method to Online or Cash before marking it paid.'
+        error: 'Set the payment method to Online, UPI or Cash before marking it paid.'
       };
     }
 
@@ -4300,9 +4834,25 @@ function adminSetPayment_(payload, actor) {
       'ok'
     );
 
+    // A payment receipt is sent only when the money was actually marked PAID,
+    // and only after the sheet write succeeded. It is never a substitute for
+    // the organiser's verification.
+    var notification = null;
+    if (fresh.payment.status === PAY.PAID && current.status !== PAY.PAID) {
+      try {
+        notification = createAndSendNotification_(fresh, 'PAYMENT_RECEIVED',
+          'Your entry fee of ₹' + (fresh.payment.entryFee || CONFIG.TEAM_FEE) +
+          ' has been received and marked paid. Keep this message for your records.',
+          'PAYMENT|' + id + '|' + fresh.payment.updatedAt);
+      } catch (notificationError) {
+        console.error('Payment notification failed: ' + messageOf_(notificationError));
+      }
+    }
+
     return {
       ok: true,
       record: fresh,
+      notification: notification,
       counts: adminCounts_(readRecords_(sheet))
     };
   } finally {
@@ -4319,6 +4869,9 @@ function csvCell_(value) {
 }
 
 function adminExport_(payload) {
+  var dataset = cleanText_(payload.dataset).toLowerCase();
+  if (dataset && dataset !== 'registrations') return adminTournamentExport_(dataset, payload);
+
   var sheet = adminSheet_();
   var records = filterRecords_(readRecords_(sheet), payload);
 
@@ -4358,11 +4911,169 @@ function adminExport_(payload) {
     ].map(csvCell_).join(','));
   }
 
+  var csv = lines.join('\r\n');
+  if (cleanText_(payload.format).toLowerCase() === 'xlsx') {
+    return xlsxPayload_(csvRows_(csv), 'Registrations', 'qqsgp-registrations');
+  }
+
   return {
     ok: true,
     filename: 'qqsgp-registrations-' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm') + '.csv',
-    csv: lines.join('\r\n'),
+    csv: csv,
     total: records.length
+  };
+}
+
+/** CSV and Excel exports for the tournament tabs. Admin-only. */
+function adminTournamentExport_(dataset, payload) {
+  var headers;
+  var rows = [];
+  var name = 'Tournament';
+
+  if (dataset === 'matches') {
+    name = 'Matches';
+    headers = MATCH_HEADERS.slice(0);
+    var matches = readMatches_();
+    for (var m = 0; m < matches.length; m++) {
+      var x = matches[m];
+      rows.push([x.id, x.no, x.map, x.scheduledLabel, x.status, x.roomId,
+        x.roomPassword, x.releaseLabel, x.notes, x.updatedAt, x.updatedBy, x.publishedAt]);
+    }
+  } else if (dataset === 'results') {
+    name = 'Results';
+    headers = RESULT_HEADERS.slice(0);
+    var results = readResults_();
+    for (var r = 0; r < results.length; r++) {
+      var z = results[r];
+      rows.push([z.matchId, z.teamId, z.teamName, z.placement, z.kills,
+        z.placementPoints, z.killPoints, z.total, z.status, z.notes,
+        z.updatedAt, z.updatedBy, z.publishedAt]);
+    }
+  } else {
+    name = 'Leaderboard';
+    headers = ['Rank', 'Team ID', 'Team', 'Matches', 'Kills', 'Placement Points', 'Kill Points', 'Total', 'Best Placement'];
+    var board = leaderboard_(readResults_(), false);
+    for (var b = 0; b < board.length; b++) {
+      rows.push([board[b].rank, board[b].teamId, board[b].teamName, board[b].matches,
+        board[b].kills, board[b].placementPoints, board[b].killPoints, board[b].total,
+        board[b].bestPlacement]);
+    }
+  }
+
+  var lines = [headers.map(csvCell_).join(',')];
+  for (var i = 0; i < rows.length; i++) lines.push(rows[i].map(csvCell_).join(','));
+  var csv = lines.join('\r\n');
+  if (cleanText_(payload.format).toLowerCase() === 'xlsx') return xlsxPayload_(rows.length ? [headers].concat(rows) : [headers], name, 'qqsgp-' + dataset);
+  return {
+    ok: true,
+    filename: 'qqsgp-' + dataset + '-' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm') + '.csv',
+    csv: csv,
+    total: rows.length
+  };
+}
+
+function csvRows_(text) {
+  var rows = [];
+  var row = [];
+  var cell = '';
+  var quoted = false;
+  for (var i = 0; i < text.length; i++) {
+    var ch = text.charAt(i);
+    if (quoted) {
+      if (ch === '"' && text.charAt(i + 1) === '"') { cell += '"'; i++; }
+      else if (ch === '"') quoted = false;
+      else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ',') { row.push(cell); cell = ''; }
+    else if (ch === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
+    else if (ch !== '\r') cell += ch;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+function xmlEscape_(value) {
+  return String(value === null || value === undefined ? '' : value)
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+function xlsxColumn_(index) {
+  var n = index + 1;
+  var out = '';
+  while (n > 0) {
+    var rem = (n - 1) % 26;
+    out = String.fromCharCode(65 + rem) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
+}
+
+/**
+ * A small, dependency-free XLSX writer. There is no npm in Apps Script, so the
+ * OOXML package is assembled with Utilities.zip. Values are written as inline
+ * strings; Excel opens them as text, which is exactly what an audit export
+ * should be (no phone number is silently turned into a number).
+ */
+function xlsxPayload_(rows, sheetName, baseName) {
+  var sheetRows = [];
+  for (var r = 0; r < rows.length; r++) {
+    var cells = [];
+    for (var c = 0; c < rows[r].length; c++) {
+      var ref = xlsxColumn_(c) + (r + 1);
+      cells.push('<c r="' + ref + '" t="inlineStr"><is><t xml:space="preserve">' +
+        xmlEscape_(rows[r][c]) + '</t></is></c>');
+    }
+    sheetRows.push('<row r="' + (r + 1) + '">' + cells.join('') + '</row>');
+  }
+
+  var sheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+    '<sheetData>' + sheetRows.join('') + '</sheetData></worksheet>';
+  var workbookXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+    '<sheets><sheet name="' + xmlEscape_(sheetName).slice(0, 31) + '" sheetId="1" r:id="rId1"/></sheets></workbook>';
+  var workbookRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+    '</Relationships>';
+  var rootRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+    '</Relationships>';
+  var contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+    '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+    '</Types>';
+  var styles = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+    '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>' +
+    '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>' +
+    '<borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs>' +
+    '<cellXfs count="1"><xf xfId="0"/></cellXfs></styleSheet>';
+
+  var blobs = [
+    Utilities.newBlob(contentTypes, 'text/xml', '[Content_Types].xml'),
+    Utilities.newBlob(rootRels, 'text/xml', '_rels/.rels'),
+    Utilities.newBlob(workbookXml, 'text/xml', 'xl/workbook.xml'),
+    Utilities.newBlob(workbookRels, 'text/xml', 'xl/_rels/workbook.xml.rels'),
+    Utilities.newBlob(styles, 'text/xml', 'xl/styles.xml'),
+    Utilities.newBlob(sheetXml, 'text/xml', 'xl/worksheets/sheet1.xml')
+  ];
+  var zip = Utilities.zip(blobs, baseName + '.xlsx');
+  return {
+    ok: true,
+    filename: baseName + '-' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm') + '.xlsx',
+    mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    excel: Utilities.base64Encode(zip.getBytes()),
+    total: Math.max(rows.length - 1, 0)
   };
 }
 
@@ -4699,6 +5410,12 @@ var WA_VARS = {
   APPROVED: ['leader', 'team', 'id'],
   REJECTED: ['leader', 'team', 'id'],
   WAITLISTED: ['leader', 'team', 'id'],
+  PAYMENT_RECEIVED: ['leader', 'team', 'message'],
+  MATCH_SCHEDULED: ['leader', 'team', 'message'],
+  MATCH_RESCHEDULED: ['leader', 'team', 'message'],
+  MATCH_REMINDER: ['leader', 'team', 'message'],
+  ROOM_DETAILS: ['leader', 'team', 'message'],
+  RESULTS_PUBLISHED: ['leader', 'team', 'message'],
   ANNOUNCEMENT: ['leader', 'team', 'message']
 };
 
@@ -4707,6 +5424,12 @@ var WA_TEMPLATE_SUFFIX = {
   APPROVED: 'team_approved',
   REJECTED: 'team_rejected',
   WAITLISTED: 'team_waitlisted',
+  PAYMENT_RECEIVED: 'payment_received',
+  MATCH_SCHEDULED: 'match_scheduled',
+  MATCH_RESCHEDULED: 'match_rescheduled',
+  MATCH_REMINDER: 'match_reminder',
+  ROOM_DETAILS: 'room_details',
+  RESULTS_PUBLISHED: 'results_published',
   ANNOUNCEMENT: 'announcement'
 };
 
@@ -4715,6 +5438,12 @@ var WA_TYPE_LABEL = {
   APPROVED: 'Team approved',
   REJECTED: 'Team rejected',
   WAITLISTED: 'Team waitlisted',
+  PAYMENT_RECEIVED: 'Payment received',
+  MATCH_SCHEDULED: 'Match scheduled',
+  MATCH_RESCHEDULED: 'Match rescheduled',
+  MATCH_REMINDER: 'Match reminder',
+  ROOM_DETAILS: 'Room details',
+  RESULTS_PUBLISHED: 'Results published',
   ANNOUNCEMENT: 'Announcement'
 };
 
@@ -4744,9 +5473,11 @@ function waText_(type, record, message) {
       ' We will notify you if your registration status changes. ' +
       '- QQSGP Tournament Organizers';
   }
-  if (type === 'ANNOUNCEMENT') {
-    return 'Hello ' + name + ', an important QQSGP Free Fire Championship ' +
-      'announcement for your team ' + team + ': ' + message + '. ' +
+  if (type === 'ANNOUNCEMENT' || type === 'PAYMENT_RECEIVED' ||
+      type === 'MATCH_SCHEDULED' || type === 'MATCH_RESCHEDULED' ||
+      type === 'MATCH_REMINDER' || type === 'ROOM_DETAILS' ||
+      type === 'RESULTS_PUBLISHED') {
+    return 'Hello ' + name + ', QQSGP update for ' + team + ': ' + message + ' ' +
       '- QQSGP Tournament Organizers';
   }
   return 'Hello ' + name + ', your team ' + team +
@@ -5615,4 +6346,965 @@ function sendTestWhatsApp() {
     (result.error ? ' - ' + result.error : ''));
 
   return result.state === 'SENT';
+}
+
+/* ==================================================================
+   TOURNAMENT OPERATIONS
+   ------------------------------------------------------------------
+   Exactly six matches (M1-M6), team assignments, room release, placement
+   and kill scoring, approval, publication, public schedule and leaderboard.
+
+   Storage is deliberately three plain tabs:
+     Matches     one row for each of M1-M6, edited in place.
+     MatchTeams  one row per team per match; withdrawn, never deleted.
+     Results     one row per team per match; republishing replaces the
+                 published timestamp, but the result history stays in place.
+
+   The public endpoints never return a room password before its release time
+   and never return a result that has not been published. Both rules live in
+   the server, not in the browser.
+   ================================================================== */
+
+var MATCH_HEADERS = [
+  'Match ID', 'Match No', 'Map', 'Scheduled At', 'Status',
+  'Room ID', 'Room Password', 'Room Release At', 'Notes',
+  'Updated At', 'Updated By', 'Published At', 'Stage', 'Room'
+];
+
+var MATCH_COL = {
+  ID: 1, NO: 2, MAP: 3, SCHEDULED: 4, STATUS: 5,
+  ROOM_ID: 6, ROOM_PASSWORD: 7, RELEASE: 8, NOTES: 9,
+  UPDATED: 10, UPDATED_BY: 11, PUBLISHED: 12, STAGE: 13, ROOM: 14
+};
+
+var MATCH_STAGES = ['QUALIFIER', 'KNOCKOUT 1', 'KNOCKOUT 2', 'GRAND FINAL'];
+var MATCH_ROOM_SIZE = 12;
+
+var MATCH_TEAM_HEADERS = [
+  'Match ID', 'Team ID', 'Team Name', 'Slot', 'Assigned At',
+  'Assigned By', 'State'
+];
+
+var MATCH_TEAM_COL = {
+  MATCH: 1, TEAM_ID: 2, TEAM_NAME: 3, SLOT: 4,
+  ASSIGNED: 5, ASSIGNED_BY: 6, STATE: 7
+};
+
+var RESULT_HEADERS = [
+  'Match ID', 'Team ID', 'Team Name', 'Placement', 'Kills',
+  'Placement Points', 'Kill Points', 'Total Points', 'Status', 'Notes',
+  'Updated At', 'Updated By', 'Published At'
+];
+
+var RESULT_COL = {
+  MATCH: 1, TEAM_ID: 2, TEAM_NAME: 3, PLACEMENT: 4, KILLS: 5,
+  PLACEMENT_POINTS: 6, KILL_POINTS: 7, TOTAL: 8, STATUS: 9, NOTES: 10,
+  UPDATED: 11, UPDATED_BY: 12, PUBLISHED: 13
+};
+
+var MATCH_STATUSES = ['SCHEDULED', 'LIVE', 'COMPLETED', 'CANCELLED'];
+var RESULT_STATUSES = ['DRAFT', 'APPROVED', 'PUBLISHED'];
+var MATCH_TEAM_STATES = ['ACTIVE', 'WITHDRAWN'];
+
+function tournamentMatchIds_() {
+  return (CONFIG.MATCH_IDS || ['M1', 'M2', 'M3', 'M4', 'M5', 'M6']).slice(0);
+}
+
+function normaliseMatchId_(value) {
+  var id = cleanText_(value).toUpperCase();
+  return tournamentMatchIds_().indexOf(id) === -1 ? '' : id;
+}
+
+function normaliseMatchStatus_(value) {
+  var state = cleanText_(value).toUpperCase();
+  return MATCH_STATUSES.indexOf(state) === -1 ? 'SCHEDULED' : state;
+}
+
+function normaliseMatchStage_(value) {
+  var stage = cleanText_(value).toUpperCase().replace(/\s+/g, ' ');
+  if (stage === 'QUALIFIERS' || stage === 'QUALIFIER ROUND' || stage === 'LEAGUE') return 'QUALIFIER';
+  if (stage === 'KNOCKOUT STAGE 1' || stage === 'KNOCKOUT-1' || stage === 'KO 1') return 'KNOCKOUT 1';
+  if (stage === 'KNOCKOUT STAGE 2' || stage === 'KNOCKOUT-2' || stage === 'KO 2') return 'KNOCKOUT 2';
+  if (stage === 'FINAL' || stage === 'GRAND FINALS' || stage === 'GRAND-FINAL') return 'GRAND FINAL';
+  return MATCH_STAGES.indexOf(stage) === -1 ? 'QUALIFIER' : stage;
+}
+
+function normaliseResultStatus_(value) {
+  var state = cleanText_(value).toUpperCase();
+  return RESULT_STATUSES.indexOf(state) === -1 ? 'DRAFT' : state;
+}
+
+function manualPaymentMode_() {
+  var mode = cleanText_(propertyOr_('payment_mode')).toLowerCase();
+  if (mode === 'manual') return true;
+  if (mode === 'youpi') return false;
+  // Auto: the safe default. Without merchant properties there is no gateway to
+  // call, so registrations use the organiser-verified UPI / cash path.
+  return !youpiConfigured_();
+}
+
+/** A public QR image is optional; an ID or account number is never returned. */
+function upiQrUrl_() {
+  var url = cleanText_(propertyOr_('upi_qr_url'));
+  if (!url) return '';
+  if (/^https:\/\/[^\s]+$/i.test(url)) return url;
+  if (/^[A-Za-z0-9._/-]+$/.test(url) && url.indexOf('..') === -1) return url;
+  return '';
+}
+
+function maxTeams_() {
+  var raw = readSettings_()['max_teams'];
+  var value = Number(raw);
+  if (raw !== '' && raw !== undefined && isFinite(value) && value >= 0 && value <= 1000) {
+    return Math.round(value);
+  }
+  return Number(CONFIG.MAX_TEAMS) > 0 ? Math.round(Number(CONFIG.MAX_TEAMS)) : 0;
+}
+
+/** Rejected rows stay as evidence but never consume a tournament slot. */
+function activeTeamCount_(sheet) {
+  var rows = countTeams_(sheet);
+  if (rows === 0) return 0;
+  var values = sheet.getRange(2, COL.STATUS, rows, 1).getValues();
+  var active = 0;
+  for (var i = 0; i < values.length; i++) {
+    if (normaliseStatus_(values[i][0]) !== 'REJECTED') active++;
+  }
+  return active;
+}
+
+function placementPoints_() {
+  var raw = readSettings_()['placement_points'];
+  if (raw) {
+    try {
+      var parsed = JSON.parse(raw);
+      if (parsed && parsed.length !== undefined && parsed.length > 0) {
+        var clean = [];
+        for (var i = 0; i < parsed.length && i < 100; i++) {
+          var n = Number(parsed[i]);
+          clean.push(isFinite(n) && n >= 0 ? Math.round(n) : 0);
+        }
+        return clean;
+      }
+    } catch (ignored) {}
+  }
+  return CONFIG.DEFAULT_PLACEMENT_POINTS.slice(0);
+}
+
+function killPoints_() {
+  var raw = readSettings_()['kill_points'];
+  var value = Number(raw);
+  if (raw !== '' && raw !== undefined && isFinite(value) && value >= 0 && value <= 10) {
+    return Math.round(value * 100) / 100;
+  }
+  return Number(CONFIG.DEFAULT_KILL_POINTS) || 1;
+}
+
+/** Parse a tie-breaker order. Returns null when the order is not usable. */
+function parseTieBreakers_(value) {
+  var list = value;
+  if (typeof list === 'string') {
+    try { list = JSON.parse(list); } catch (ignored) { list = list.split(','); }
+  }
+  if (!list || list.length === undefined || !list.length) return null;
+  var allowed = { total: true, kills: true, placement: true };
+  var seen = {};
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    var key = cleanText_(list[i]).toLowerCase().replace(/[ _-]+/g, '');
+    if (key === 'bestplacement') key = 'placement';
+    if (!allowed[key] || seen[key]) continue;
+    seen[key] = true;
+    out.push(key);
+  }
+  return out.length === 3 ? out : null;
+}
+
+function tieBreakers_() {
+  return parseTieBreakers_(readSettings_()['tie_breakers']) ||
+    (CONFIG.DEFAULT_TIE_BREAKERS || ['total', 'kills', 'placement']).slice(0);
+}
+
+function compareTieBreak_(a, b, key) {
+  if (key === 'total') return (Number(b.total) || 0) - (Number(a.total) || 0);
+  if (key === 'kills') return (Number(b.kills) || 0) - (Number(a.kills) || 0);
+  // Lower placement number is better. A missing placement sorts last.
+  return (Number(a.bestPlacement || a.placement) || 999) -
+    (Number(b.bestPlacement || b.placement) || 999);
+}
+
+function sortByTieBreakers_(rows, order) {
+  var tie = order || tieBreakers_();
+  rows.sort(function (a, b) {
+    for (var i = 0; i < tie.length; i++) {
+      var cmp = compareTieBreak_(a, b, tie[i]);
+      if (cmp) return cmp;
+    }
+    return cleanText_(a.teamName).localeCompare(cleanText_(b.teamName));
+  });
+  return rows;
+}
+
+function tournamentSheet_(name, headers, widths) {
+  var book = openBook_();
+  if (!book) throw new Error('No spreadsheet found.');
+  var sheet = book.getSheetByName(name);
+  if (!sheet) sheet = book.insertSheet(name);
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  }
+  if (widths && sheet.getLastColumn() < headers.length) {
+    for (var i = 0; i < widths.length; i++) sheet.setColumnWidth(i + 1, widths[i]);
+  }
+  return sheet;
+}
+
+function matchSheet_() {
+  return tournamentSheet_(CONFIG.MATCH_SHEET_NAME, MATCH_HEADERS, [70, 70, 120, 165, 110, 120, 130, 165, 220, 155, 120, 155, 120, 80]);
+}
+
+function matchTeamSheet_() {
+  return tournamentSheet_(CONFIG.MATCH_TEAM_SHEET_NAME, MATCH_TEAM_HEADERS, [70, 22, 170, 60, 155, 120, 100]);
+}
+
+function resultSheet_() {
+  return tournamentSheet_(CONFIG.RESULT_SHEET_NAME, RESULT_HEADERS, [70, 22, 170, 80, 70, 120, 90, 90, 95, 220, 155, 120, 155]);
+}
+
+function tournamentDateTime_(value) {
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return isNaN(value.getTime()) ? null : value;
+  }
+  var text = cleanText_(value);
+  if (!text) return null;
+  // A datetime-local value has no timezone. The dashboard is an Indian
+  // tournament, so interpret it as IST rather than the script project's
+  // timezone (which may be UTC or anything else).
+  var naive = text.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  var date = naive
+    ? new Date(naive[1] + '-' + naive[2] + '-' + naive[3] + 'T' + naive[4] + ':' + naive[5] +
+      ':' + (naive[6] || '00') + '+05:30')
+    : new Date(text);
+  return isNaN(date.getTime()) ? null : date;
+}
+
+function tournamentIso_(value) {
+  var date = tournamentDateTime_(value);
+  return date ? date.toISOString() : '';
+}
+
+function tournamentLabel_(value) {
+  var date = tournamentDateTime_(value);
+  if (!date) return 'Not scheduled';
+  return Utilities.formatDate(date, CONFIG.TIMEZONE || 'Asia/Kolkata', 'dd MMM yyyy, hh:mm a') + ' IST';
+}
+
+function ensureTournamentSheets_() {
+  var sheet = matchSheet_();
+  var lastColumn = sheet.getLastColumn();
+  if (lastColumn < MATCH_HEADERS.length) {
+    sheet.getRange(1, lastColumn + 1, 1, MATCH_HEADERS.length - lastColumn)
+      .setValues([MATCH_HEADERS.slice(lastColumn)])
+      .setFontWeight('bold');
+  }
+  var existing = {};
+  var rows = Math.max(sheet.getLastRow() - 1, 0);
+  if (rows > 0) {
+    var ids = sheet.getRange(2, 1, rows, 1).getValues();
+    for (var i = 0; i < ids.length; i++) {
+      var id = normaliseMatchId_(ids[i][0]);
+      if (id) existing[id] = true;
+    }
+  }
+  var now = new Date();
+  for (var m = 0; m < tournamentMatchIds_().length; m++) {
+    var matchId = tournamentMatchIds_()[m];
+    if (existing[matchId]) continue;
+    sheet.appendRow([matchId, m + 1, '', '', 'SCHEDULED', '', '', '', '', now, 'system', '', 'QUALIFIER', '']);
+  }
+  matchTeamSheet_();
+  resultSheet_();
+  sheet.getRange(2, MATCH_COL.SCHEDULED, Math.max(sheet.getLastRow() - 1, 1), 1).setNumberFormat('dd mmm yyyy, hh:mm AM/PM');
+  sheet.getRange(2, MATCH_COL.RELEASE, Math.max(sheet.getLastRow() - 1, 1), 1).setNumberFormat('dd mmm yyyy, hh:mm AM/PM');
+  resultSheet_().getRange(2, RESULT_COL.UPDATED, Math.max(resultSheet_().getLastRow() - 1, 1), 1).setNumberFormat('dd mmm yyyy, hh:mm AM/PM');
+}
+
+function matchFromRow_(rowNumber, row) {
+  var scheduled = tournamentDateTime_(row[MATCH_COL.SCHEDULED - 1]);
+  var release = tournamentDateTime_(row[MATCH_COL.RELEASE - 1]);
+  var roomPassword = cleanText_(row[MATCH_COL.ROOM_PASSWORD - 1]);
+  var roomId = cleanText_(row[MATCH_COL.ROOM_ID - 1]);
+  return {
+    row: rowNumber,
+    id: normaliseMatchId_(row[MATCH_COL.ID - 1]),
+    no: Number(row[MATCH_COL.NO - 1]) || 0,
+    map: cleanText_(row[MATCH_COL.MAP - 1]),
+    scheduledAt: scheduled ? scheduled.toISOString() : '',
+    scheduledLabel: scheduled ? tournamentLabel_(scheduled) : 'Not scheduled',
+    status: normaliseMatchStatus_(row[MATCH_COL.STATUS - 1]),
+    roomId: roomId,
+    roomPassword: roomPassword,
+    hasRoom: !!(roomId || roomPassword),
+    releaseAt: release ? release.toISOString() : '',
+    releaseLabel: release ? tournamentLabel_(release) : '',
+    roomReleased: !!(release && release.getTime() <= new Date().getTime()),
+    notes: cleanText_(row[MATCH_COL.NOTES - 1]),
+    updatedAt: tournamentIso_(row[MATCH_COL.UPDATED - 1]),
+    updatedBy: cleanText_(row[MATCH_COL.UPDATED_BY - 1]),
+    publishedAt: tournamentIso_(row[MATCH_COL.PUBLISHED - 1]),
+    stage: normaliseMatchStage_(row[MATCH_COL.STAGE - 1]),
+    room: cleanText_(row[MATCH_COL.ROOM - 1]).slice(0, 20)
+  };
+}
+
+function readMatches_() {
+  ensureTournamentSheets_();
+  var sheet = matchSheet_();
+  var rows = Math.max(sheet.getLastRow() - 1, 0);
+  if (rows === 0) return [];
+  var values = sheet.getRange(2, 1, rows, MATCH_HEADERS.length).getValues();
+  var byId = {};
+  for (var i = 0; i < values.length; i++) {
+    var match = matchFromRow_(i + 2, values[i]);
+    if (match.id && !byId[match.id]) byId[match.id] = match;
+  }
+  var out = [];
+  for (var m = 0; m < tournamentMatchIds_().length; m++) {
+    var id = tournamentMatchIds_()[m];
+    if (byId[id]) out.push(byId[id]);
+  }
+  return out;
+}
+
+function matchTeamFromRow_(rowNumber, row) {
+  return {
+    row: rowNumber,
+    matchId: normaliseMatchId_(row[MATCH_TEAM_COL.MATCH - 1]),
+    teamId: cleanText_(row[MATCH_TEAM_COL.TEAM_ID - 1]),
+    teamName: cleanText_(row[MATCH_TEAM_COL.TEAM_NAME - 1]),
+    slot: Number(row[MATCH_TEAM_COL.SLOT - 1]) || 0,
+    assignedAt: tournamentIso_(row[MATCH_TEAM_COL.ASSIGNED - 1]),
+    assignedBy: cleanText_(row[MATCH_TEAM_COL.ASSIGNED_BY - 1]),
+    state: cleanText_(row[MATCH_TEAM_COL.STATE - 1]).toUpperCase() === 'WITHDRAWN' ? 'WITHDRAWN' : 'ACTIVE'
+  };
+}
+
+function readMatchTeams_() {
+  ensureTournamentSheets_();
+  var sheet = matchTeamSheet_();
+  var rows = Math.max(sheet.getLastRow() - 1, 0);
+  if (rows === 0) return [];
+  var values = sheet.getRange(2, 1, rows, MATCH_TEAM_HEADERS.length).getValues();
+  var out = [];
+  for (var i = 0; i < values.length; i++) out.push(matchTeamFromRow_(i + 2, values[i]));
+  return out;
+}
+
+function resultFromRow_(rowNumber, row) {
+  return {
+    row: rowNumber,
+    matchId: normaliseMatchId_(row[RESULT_COL.MATCH - 1]),
+    teamId: cleanText_(row[RESULT_COL.TEAM_ID - 1]),
+    teamName: cleanText_(row[RESULT_COL.TEAM_NAME - 1]),
+    placement: Number(row[RESULT_COL.PLACEMENT - 1]) || 0,
+    kills: Number(row[RESULT_COL.KILLS - 1]) || 0,
+    placementPoints: Number(row[RESULT_COL.PLACEMENT_POINTS - 1]) || 0,
+    killPoints: Number(row[RESULT_COL.KILL_POINTS - 1]) || 0,
+    total: Number(row[RESULT_COL.TOTAL - 1]) || 0,
+    status: normaliseResultStatus_(row[RESULT_COL.STATUS - 1]),
+    notes: cleanText_(row[RESULT_COL.NOTES - 1]),
+    updatedAt: tournamentIso_(row[RESULT_COL.UPDATED - 1]),
+    updatedBy: cleanText_(row[RESULT_COL.UPDATED_BY - 1]),
+    publishedAt: tournamentIso_(row[RESULT_COL.PUBLISHED - 1])
+  };
+}
+
+function readResults_() {
+  ensureTournamentSheets_();
+  var sheet = resultSheet_();
+  var rows = Math.max(sheet.getLastRow() - 1, 0);
+  if (rows === 0) return [];
+  var values = sheet.getRange(2, 1, rows, RESULT_HEADERS.length).getValues();
+  var out = [];
+  for (var i = 0; i < values.length; i++) out.push(resultFromRow_(i + 2, values[i]));
+  return out;
+}
+
+function tournamentTeam_(teamId) {
+  var id = cleanText_(teamId);
+  if (!id) return null;
+  var sheet = adminSheet_();
+  ensureHeaders_(sheet);
+  ensureTeamIds_(sheet, false);
+  var records = readRecords_(sheet);
+  for (var i = 0; i < records.length; i++) if (records[i].id === id) return records[i];
+  return null;
+}
+
+function adminTeams_() {
+  var sheet = adminSheet_();
+  ensureHeaders_(sheet);
+  ensureTeamIds_(sheet, false);
+  var records = readRecords_(sheet);
+  var out = [];
+  for (var i = 0; i < records.length; i++) {
+    var record = records[i];
+    if (record.status === 'REJECTED') continue;
+    out.push({
+      id: record.id,
+      teamName: record.teamName,
+      department: record.department,
+      status: record.status,
+      whatsappConsent: !!record.whatsappConsent
+    });
+  }
+  out.sort(function (a, b) { return a.teamName.localeCompare(b.teamName); });
+  return { ok: true, teams: out };
+}
+
+function activeMatchTeamIds_(matchId) {
+  var list = readMatchTeams_();
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].matchId === matchId && list[i].state === 'ACTIVE' && list[i].teamId) out.push(list[i].teamId);
+  }
+  return out;
+}
+
+function leaderboard_(results, publishedOnly) {
+  var byTeam = {};
+  for (var i = 0; i < results.length; i++) {
+    var row = results[i];
+    if (!row.teamId || !row.matchId) continue;
+    if (row.status === 'DRAFT') continue;
+    if (publishedOnly && row.status !== 'PUBLISHED') continue;
+    var team = byTeam[row.teamId] || {
+      teamId: row.teamId, teamName: row.teamName, matches: 0, kills: 0, booyah: 0,
+      placementPoints: 0, killPoints: 0, total: 0, bestPlacement: 0
+    };
+    team.teamName = team.teamName || row.teamName;
+    team.matches++;
+    if (Number(row.placement) === 1) team.booyah++;
+    team.kills += Number(row.kills) || 0;
+    team.placementPoints += Number(row.placementPoints) || 0;
+    team.killPoints += Number(row.killPoints) || 0;
+    team.total += Number(row.total) || 0;
+    if (!team.bestPlacement || (row.placement && row.placement < team.bestPlacement)) team.bestPlacement = row.placement;
+    byTeam[row.teamId] = team;
+  }
+  var out = [];
+  for (var id in byTeam) if (Object.prototype.hasOwnProperty.call(byTeam, id)) out.push(byTeam[id]);
+  sortByTieBreakers_(out, tieBreakers_());
+  for (var r = 0; r < out.length; r++) out[r].rank = r + 1;
+  return out;
+}
+
+function adminTournament_() {
+  ensureTournamentSheets_();
+  var matches = readMatches_();
+  var assignments = readMatchTeams_();
+  var results = readResults_();
+  var byMatch = {};
+  for (var i = 0; i < assignments.length; i++) {
+    var a = assignments[i];
+    if (a.state !== 'ACTIVE') continue;
+    if (!byMatch[a.matchId]) byMatch[a.matchId] = [];
+    byMatch[a.matchId].push({
+      teamId: a.teamId, teamName: a.teamName, slot: a.slot, assignedAt: a.assignedAt
+    });
+  }
+  for (var m = 0; m < matches.length; m++) {
+    matches[m].teams = byMatch[matches[m].id] || [];
+    matches[m].teamCount = matches[m].teams.length;
+    matches[m].resultCount = results.filter(function (r) { return r.matchId === matches[m].id; }).length;
+    matches[m].publishedCount = results.filter(function (r) {
+      return r.matchId === matches[m].id && r.status === 'PUBLISHED';
+    }).length;
+  }
+  return {
+    ok: true,
+    matches: matches,
+    results: results,
+    teams: adminTeams_().teams,
+    leaderboard: leaderboard_(results, false),
+    publishedLeaderboard: leaderboard_(results, true),
+    placementPoints: placementPoints_(),
+    killPoints: killPoints_(),
+    tieBreakers: tieBreakers_(),
+    maxTeams: maxTeams_(),
+    generatedAt: new Date().toISOString()
+  };
+}
+
+function adminMatchSave_(payload, actor) {
+  var matchId = normaliseMatchId_(payload.matchId);
+  if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose one of M1-M6.' };
+
+  var map = cleanText_(payload.map).slice(0, 40);
+  var status = normaliseMatchStatus_(payload.status);
+  var scheduledAt = cleanText_(payload.scheduledAt) ? tournamentDateTime_(payload.scheduledAt) : null;
+  if (cleanText_(payload.scheduledAt) && !scheduledAt) {
+    return { ok: false, code: 'DATE', error: 'The scheduled date and time is not valid.' };
+  }
+
+  var roomId = cleanText_(payload.roomId).slice(0, 40);
+  var roomPassword = cleanText_(payload.roomPassword).slice(0, 40);
+  var releaseAt = cleanText_(payload.releaseAt) ? tournamentDateTime_(payload.releaseAt) : null;
+  if (cleanText_(payload.releaseAt) && !releaseAt) {
+    return { ok: false, code: 'DATE', error: 'The room release time is not valid.' };
+  }
+  if ((roomId || roomPassword) && !releaseAt) {
+    return { ok: false, code: 'RELEASE', error: 'Set a room release time. Credentials must never be visible early.' };
+  }
+  var notes = cleanText_(payload.notes).slice(0, 500);
+
+  var sheet = matchSheet_();
+  var matches = readMatches_();
+  var target = null;
+  for (var i = 0; i < matches.length; i++) if (matches[i].id === matchId) target = matches[i];
+  if (!target) return { ok: false, code: 'MATCH', error: 'That match row is missing. Reload the dashboard.' };
+
+  var stage = normaliseMatchStage_(payload.stage || target.stage || 'QUALIFIER');
+  var room = cleanText_(payload.roomLabel !== undefined ? payload.roomLabel : target.room).slice(0, 20);
+
+  var now = new Date();
+  var who = actor ? actor.id : 'organiser';
+  sheet.getRange(target.row, 1, 1, MATCH_HEADERS.length).setValues([[
+    matchId, target.no || Number(matchId.slice(1)), map, scheduledAt || '', status,
+    roomId, roomPassword, releaseAt || '', notes, now, who,
+    status === 'COMPLETED' && !target.publishedAt ? now : (target.publishedAt || ''),
+    stage, room
+  ]]);
+
+  var fresh = null;
+  var all = readMatches_();
+  for (var m = 0; m < all.length; m++) if (all[m].id === matchId) fresh = all[m];
+
+  orgAudit_(actor, 'match-save', matchId,
+    (map ? map + ' · ' : '') + (scheduledAt ? tournamentLabel_(scheduledAt) : 'no time') + ' · ' + status,
+    'ok');
+
+  // Notifications are best-effort and never undo a saved match.
+  try {
+    var teamIds = activeMatchTeamIds_(matchId);
+    if (scheduledAt && teamIds.length) {
+      var type = target.scheduledAt && target.scheduledAt !== scheduledAt.toISOString()
+        ? 'MATCH_RESCHEDULED' : 'MATCH_SCHEDULED';
+      queueMatchNotifications_(type, fresh, teamIds,
+        matchScheduleMessage_(fresh), 'schedule|' + scheduledAt.toISOString());
+    }
+    if (roomId && releaseAt && releaseAt.getTime() <= now.getTime() && teamIds.length) {
+      queueMatchNotifications_('ROOM_DETAILS', fresh, teamIds,
+        roomDetailsMessage_(fresh), 'room|' + releaseAt.toISOString());
+    }
+  } catch (error) {
+    console.error('Match notification failed: ' + messageOf_(error));
+  }
+
+  return { ok: true, match: fresh, message: 'Match saved.' };
+}
+
+function adminMatchAssign_(payload, actor) {
+  var matchId = normaliseMatchId_(payload.matchId);
+  var teamId = cleanText_(payload.teamId);
+  if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose a match.' };
+  if (!teamId) return { ok: false, code: 'TEAM', error: 'Choose a team.' };
+
+  var record = tournamentTeam_(teamId);
+  if (!record) return { ok: false, code: 'TEAM', error: 'That team is not in the registration sheet.' };
+  if (record.status !== 'APPROVED') {
+    return { ok: false, code: 'STATUS', error: 'Only an approved team can be assigned to a match.' };
+  }
+
+  var sheet = matchTeamSheet_();
+  var list = readMatchTeams_();
+  var existing = null;
+  var slotTaken = {};
+  var activeCount = 0;
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].matchId !== matchId) continue;
+    if (list[i].state === 'ACTIVE') {
+      activeCount++;
+      slotTaken[list[i].slot] = true;
+      if (list[i].teamId === teamId) existing = list[i];
+    } else if (list[i].teamId === teamId && !existing) {
+      existing = list[i];
+    }
+  }
+  if (existing && existing.state === 'ACTIVE') return { ok: true, already: true, matchId: matchId, teamId: teamId };
+  if (activeCount >= MATCH_ROOM_SIZE) {
+    return { ok: false, code: 'FULL', error: 'All 12 slots in this room are taken.' };
+  }
+
+  var requestedSlot = Number(payload.slot) || 0;
+  if (requestedSlot && (requestedSlot < 1 || requestedSlot > MATCH_ROOM_SIZE || slotTaken[requestedSlot])) {
+    return { ok: false, code: 'SLOT', error: 'Choose a free slot from 1 to 12.' };
+  }
+  var slot = requestedSlot;
+  if (!slot) {
+    for (var s = 1; s <= MATCH_ROOM_SIZE; s++) if (!slotTaken[s]) { slot = s; break; }
+  }
+  if (!slot) return { ok: false, code: 'FULL', error: 'All 12 slots in this room are taken.' };
+
+  var now = new Date();
+  var who = actor ? actor.id : 'organiser';
+  if (existing) {
+    sheet.getRange(existing.row, 1, 1, MATCH_TEAM_HEADERS.length).setValues([[
+      matchId, teamId, record.teamName, slot, now, who, 'ACTIVE'
+    ]]);
+  } else {
+    sheet.appendRow([matchId, teamId, record.teamName, slot, now, who, 'ACTIVE']);
+  }
+
+  orgAudit_(actor, 'match-assign', matchId + ':' + teamId, record.teamName + ' · slot ' + slot, 'ok');
+
+  try {
+    var match = null;
+    var matches = readMatches_();
+    for (var m = 0; m < matches.length; m++) if (matches[m].id === matchId) match = matches[m];
+    if (match && match.scheduledAt) {
+      queueMatchNotifications_('MATCH_SCHEDULED', match, [teamId],
+        matchScheduleMessage_(match), 'schedule|' + match.scheduledAt);
+    }
+  } catch (error) {
+    console.error('Assignment notification failed: ' + messageOf_(error));
+  }
+
+  return { ok: true, matchId: matchId, teamId: teamId, slot: slot, message: record.teamName + ' added to ' + matchId + '.' };
+}
+
+function adminMatchUnassign_(payload, actor) {
+  var matchId = normaliseMatchId_(payload.matchId);
+  var teamId = cleanText_(payload.teamId);
+  if (!matchId || !teamId) return { ok: false, code: 'INPUT', error: 'Choose a match and a team.' };
+  var list = readMatchTeams_();
+  var target = null;
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].matchId === matchId && list[i].teamId === teamId && list[i].state === 'ACTIVE') target = list[i];
+  }
+  if (!target) return { ok: false, code: 'NOT_FOUND', error: 'That team is not assigned to this match.' };
+
+  matchTeamSheet_().getRange(target.row, MATCH_TEAM_COL.STATE).setValue('WITHDRAWN');
+  orgAudit_(actor, 'match-unassign', matchId + ':' + teamId, target.teamName + ' withdrawn', 'ok');
+  return { ok: true, message: target.teamName + ' removed from ' + matchId + '.' };
+}
+
+function adminResultSave_(payload, actor) {
+  var matchId = normaliseMatchId_(payload.matchId);
+  var teamId = cleanText_(payload.teamId);
+  if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose a match.' };
+  if (!teamId) return { ok: false, code: 'TEAM', error: 'Choose a team.' };
+
+  var assigned = activeMatchTeamIds_(matchId);
+  if (assigned.indexOf(teamId) === -1) {
+    return { ok: false, code: 'ASSIGN', error: 'Assign that team to the match before entering a result.' };
+  }
+  var record = tournamentTeam_(teamId);
+  if (!record) return { ok: false, code: 'TEAM', error: 'That team is not in the registration sheet.' };
+
+  var placement = Number(payload.placement);
+  var kills = Number(payload.kills);
+  if (!isFinite(placement) || placement < 1 || placement > MATCH_ROOM_SIZE || Math.round(placement) !== placement) {
+    return { ok: false, code: 'PLACEMENT', error: 'Placement must be a whole number from 1 to 12.' };
+  }
+  if (!isFinite(kills) || kills < 0 || kills > 100 || Math.round(kills) !== kills) {
+    return { ok: false, code: 'KILLS', error: 'Kills must be a whole number from 0 to 100.' };
+  }
+
+  var results = readResults_();
+  var existing = null;
+  for (var i = 0; i < results.length; i++) {
+    if (results[i].matchId === matchId && results[i].teamId === teamId) existing = results[i];
+    if (results[i].matchId === matchId && results[i].teamId !== teamId &&
+        Number(results[i].placement) === placement) {
+      return { ok: false, code: 'PLACEMENT', error: 'Placement ' + placement + ' is already used by ' + results[i].teamName + '.' };
+    }
+  }
+
+  var points = placementPoints_();
+  var placementPoints = Number(points[placement - 1]) || 0;
+  var killPoints = Math.round(kills * killPoints_() * 100) / 100;
+  var total = Math.round((placementPoints + killPoints) * 100) / 100;
+  var now = new Date();
+  var who = actor ? actor.id : 'organiser';
+  var notes = cleanText_(payload.notes).slice(0, 300);
+  var row = [matchId, teamId, record.teamName, placement, kills, placementPoints, killPoints, total, 'DRAFT', notes, now, who, ''];
+
+  if (existing) {
+    resultSheet_().getRange(existing.row, 1, 1, RESULT_HEADERS.length).setValues([row]);
+  } else {
+    resultSheet_().appendRow(row);
+  }
+
+  orgAudit_(actor, 'result-save', matchId + ':' + teamId,
+    'P' + placement + ' · ' + kills + ' kills · ' + total + ' pts', 'ok');
+
+  var fresh = null;
+  var all = readResults_();
+  for (var r = 0; r < all.length; r++) if (all[r].matchId === matchId && all[r].teamId === teamId) fresh = all[r];
+  return { ok: true, result: fresh, message: 'Result saved as draft.' };
+}
+
+function adminResultApprove_(payload, actor) {
+  var matchId = normaliseMatchId_(payload.matchId);
+  var teamId = cleanText_(payload.teamId);
+  if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose a match.' };
+  var sheet = resultSheet_();
+  var results = readResults_();
+  var count = 0;
+  for (var i = 0; i < results.length; i++) {
+    var row = results[i];
+    if (row.matchId !== matchId || row.status === 'PUBLISHED') continue;
+    if (teamId && row.teamId !== teamId) continue;
+    sheet.getRange(row.row, RESULT_COL.STATUS).setValue('APPROVED');
+    count++;
+  }
+  if (!count) return { ok: false, code: 'EMPTY', error: 'There are no draft results to approve.' };
+  orgAudit_(actor, 'result-approve', matchId, count + ' result(s) approved', 'ok');
+  return { ok: true, approved: count, message: count + ' result(s) approved.' };
+}
+
+function adminResultPublish_(payload, actor) {
+  var matchId = normaliseMatchId_(payload.matchId);
+  if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose a match.' };
+  var results = readResults_();
+  var rows = [];
+  for (var i = 0; i < results.length; i++) if (results[i].matchId === matchId) rows.push(results[i]);
+  if (!rows.length) return { ok: false, code: 'EMPTY', error: 'Enter at least one result before publishing.' };
+  var drafts = 0;
+  for (var r = 0; r < rows.length; r++) if (rows[r].status === 'DRAFT') drafts++;
+  if (drafts) return { ok: false, code: 'DRAFTS', error: 'Approve every result for ' + matchId + ' before publishing.' };
+
+  var now = new Date();
+  var sheet = resultSheet_();
+  for (var p = 0; p < rows.length; p++) {
+    sheet.getRange(rows[p].row, RESULT_COL.STATUS).setValue('PUBLISHED');
+    sheet.getRange(rows[p].row, RESULT_COL.PUBLISHED).setValue(now);
+  }
+  orgAudit_(actor, 'result-publish', matchId, rows.length + ' result(s) published', 'ok');
+
+  try {
+    var match = null;
+    var matches = readMatches_();
+    for (var m = 0; m < matches.length; m++) if (matches[m].id === matchId) match = matches[m];
+    if (match) {
+      var teamIds = activeMatchTeamIds_(matchId);
+      for (var t = 0; t < teamIds.length; t++) {
+        var result = null;
+        for (var x = 0; x < rows.length; x++) if (rows[x].teamId === teamIds[t]) result = rows[x];
+        if (!result) continue;
+        var record = tournamentTeam_(teamIds[t]);
+        if (!record) continue;
+        var message = 'Results for ' + matchId + ' are published. ' + record.teamName +
+          ' finished #' + result.placement + ' with ' + result.kills + ' kills and ' + result.total +
+          ' points. Check the public leaderboard for the full standings.';
+        createAndSendNotification_(record, 'RESULTS_PUBLISHED', message,
+          'RESULTS|' + matchId + '|' + now.toISOString() + '|' + record.id);
+      }
+    }
+  } catch (error) {
+    console.error('Result notification failed: ' + messageOf_(error));
+  }
+
+  return { ok: true, published: rows.length, message: 'Results published to the public leaderboard.' };
+}
+
+function adminResultUnpublish_(payload, actor) {
+  var matchId = normaliseMatchId_(payload.matchId);
+  if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose a match.' };
+  var sheet = resultSheet_();
+  var results = readResults_();
+  var count = 0;
+  for (var i = 0; i < results.length; i++) {
+    if (results[i].matchId !== matchId || results[i].status !== 'PUBLISHED') continue;
+    sheet.getRange(results[i].row, RESULT_COL.STATUS).setValue('APPROVED');
+    sheet.getRange(results[i].row, RESULT_COL.PUBLISHED).setValue('');
+    count++;
+  }
+  if (!count) return { ok: false, code: 'EMPTY', error: 'That match has no published results.' };
+  orgAudit_(actor, 'result-unpublish', matchId, count + ' result(s) returned to approved', 'ok');
+  return { ok: true, message: 'Results unpublished.' };
+}
+
+function publicSchedule_() {
+  var matches = readMatches_();
+  var results = readResults_();
+  var out = [];
+  for (var i = 0; i < matches.length; i++) {
+    var match = matches[i];
+    var published = 0;
+    for (var r = 0; r < results.length; r++) {
+      if (results[r].matchId === match.id && results[r].status === 'PUBLISHED') published++;
+    }
+    var released = match.roomReleased && match.status !== 'CANCELLED';
+    out.push({
+      id: match.id,
+      map: match.map,
+      stage: match.stage,
+      roomLabel: match.room,
+      scheduledAt: match.scheduledAt,
+      scheduledLabel: match.scheduledLabel,
+      status: match.status,
+      room: released ? { id: match.roomId, password: match.roomPassword, releasedAt: match.releaseAt } : null,
+      releaseAt: match.releaseLabel,
+      releaseAtIso: match.releaseAt,
+      roomReleased: released,
+      resultsPublished: published > 0,
+      publishedCount: published,
+      notes: match.notes
+    });
+  }
+  return { ok: true, matches: out, serverNow: new Date().toISOString(), generatedAt: new Date().toISOString() };
+}
+
+function publicResults_() {
+  var results = readResults_();
+  var published = [];
+  for (var i = 0; i < results.length; i++) {
+    if (results[i].status === 'PUBLISHED') {
+      published.push({
+        matchId: results[i].matchId,
+        teamId: results[i].teamId,
+        teamName: results[i].teamName,
+        placement: results[i].placement,
+        kills: results[i].kills,
+        placementPoints: results[i].placementPoints,
+        killPoints: results[i].killPoints,
+        total: results[i].total,
+        publishedAt: results[i].publishedAt
+      });
+    }
+  }
+  // Rank each room separately, #1 through #12. The public table must show the
+  // same order as the organiser's result table.
+  var tie = tieBreakers_();
+  var byMatch = {};
+  for (var p = 0; p < published.length; p++) {
+    var key = published[p].matchId;
+    if (!byMatch[key]) byMatch[key] = [];
+    byMatch[key].push(published[p]);
+  }
+  var ranked = [];
+  var matchIds = [];
+  for (var id in byMatch) if (Object.prototype.hasOwnProperty.call(byMatch, id)) matchIds.push(id);
+  matchIds.sort();
+  for (var m = 0; m < matchIds.length; m++) {
+    var rows = sortByTieBreakers_(byMatch[matchIds[m]], tie);
+    for (var r = 0; r < rows.length; r++) {
+      rows[r].rank = r + 1;
+      ranked.push(rows[r]);
+    }
+  }
+  return {
+    ok: true,
+    results: ranked,
+    leaderboard: leaderboard_(results, true),
+    tieBreakers: tie,
+    generatedAt: new Date().toISOString()
+  };
+}
+
+function matchScheduleMessage_(match) {
+  return 'Match ' + match.id + (match.map ? ' (' + match.map + ')' : '') +
+    ' is scheduled for ' + match.scheduledLabel +
+    '. Report on time. Room details are released separately at the published release time.';
+}
+
+function roomDetailsMessage_(match) {
+  return 'Room details for ' + match.id + ': Room ID ' + (match.roomId || '—') +
+    ', password ' + (match.roomPassword || '—') + '. Release time: ' + match.releaseLabel + '.';
+}
+
+function queueMatchNotifications_(type, match, teamIds, message, eventKey) {
+  if (!match || !teamIds || !teamIds.length) return { attempted: 0, sent: 0, skipped: 0, failed: 0 };
+  var out = { attempted: 0, sent: 0, skipped: 0, failed: 0 };
+  for (var i = 0; i < teamIds.length; i++) {
+    var record = tournamentTeam_(teamIds[i]);
+    if (!record) continue;
+    out.attempted++;
+    try {
+      var result = createAndSendNotification_(record, type, message,
+        'MATCH|' + match.id + '|' + type + '|' + eventKey + '|' + record.id);
+      if (result.state === 'SKIPPED') out.skipped++;
+      else if (result.state === 'FAILED' || result.state === 'UNCERTAIN') out.failed++;
+      else if (result.state === 'SENT' || result.state === 'DELIVERED' || result.state === 'READ') out.sent++;
+    } catch (error) {
+      out.failed++;
+      console.error('Match notification failed: ' + messageOf_(error));
+    }
+  }
+  return out;
+}
+
+/**
+ * Time-driven reconciliation. Install these from the sheet menu once. They are
+ * idempotent: a notification already recorded for the event is not sent again.
+ */
+function releaseRooms() {
+  var matches = readMatches_();
+  var now = new Date();
+  var sent = 0;
+  for (var i = 0; i < matches.length; i++) {
+    var match = matches[i];
+    if (!match.hasRoom || !match.releaseAt || match.status === 'CANCELLED') continue;
+    var release = tournamentDateTime_(match.releaseAt);
+    if (!release || release.getTime() > now.getTime()) continue;
+    var teams = activeMatchTeamIds_(match.id);
+    if (!teams.length) continue;
+    var result = queueMatchNotifications_('ROOM_DETAILS', match, teams,
+      roomDetailsMessage_(match), 'room|' + match.releaseAt);
+    sent += result.sent;
+  }
+  return sent;
+}
+
+function sendMatchReminders() {
+  var matches = readMatches_();
+  var now = new Date().getTime();
+  var sent = 0;
+  for (var i = 0; i < matches.length; i++) {
+    var match = matches[i];
+    if (match.status !== 'SCHEDULED' || !match.scheduledAt) continue;
+    var at = tournamentDateTime_(match.scheduledAt);
+    if (!at) continue;
+    var minutes = (at.getTime() - now) / 60000;
+    if (minutes < 0 || minutes > 60) continue;
+    var teams = activeMatchTeamIds_(match.id);
+    if (!teams.length) continue;
+    var result = queueMatchNotifications_('MATCH_REMINDER', match, teams,
+      'Reminder: ' + matchScheduleMessage_(match), 'reminder|' + match.scheduledAt);
+    sent += result.sent;
+  }
+  return sent;
+}
+
+function installTournamentTriggers() {
+  var wanted = ['releaseRooms', 'sendMatchReminders'];
+  var existing = ScriptApp.getProjectTriggers();
+  var installed = [];
+  for (var i = 0; i < existing.length; i++) {
+    if (wanted.indexOf(existing[i].getHandlerFunction()) !== -1) installed.push(existing[i].getHandlerFunction());
+  }
+  if (installed.indexOf('releaseRooms') === -1) {
+    ScriptApp.newTrigger('releaseRooms').timeBased().everyMinutes(5).create();
+  }
+  if (installed.indexOf('sendMatchReminders') === -1) {
+    ScriptApp.newTrigger('sendMatchReminders').timeBased().everyMinutes(15).create();
+  }
+  return { ok: true, installed: wanted };
+}
+
+function tournamentSetup() {
+  ensureTournamentSheets_();
+  var info = {
+    ok: true,
+    matches: readMatches_().length,
+    placementPoints: placementPoints_(),
+    killPoints: killPoints_(),
+    tieBreakers: tieBreakers_(),
+    maxTeams: maxTeams_()
+  };
+  console.log(JSON.stringify(info));
+  return info;
 }

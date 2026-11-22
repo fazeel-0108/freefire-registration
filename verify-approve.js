@@ -47,11 +47,17 @@ vm.runInContext(
   prelude +
     "\n" +
     source.slice(from, to) +
-    "\nthis.__approve = { waNumber, waUrl, whatsappLink, waRecipients, paymentStatusLine, approvalMessage };",
+    "\nthis.__approve = {\n" +
+    "  waNumber, waUrl, whatsappLink, waRecipients, paymentStatusLine, approvalMessage,\n" +
+    "  rejectionMessage, ORGANISER_CONTACT_WA\n" +
+    "};",
   sandbox
 );
 
-const { waNumber, waUrl, whatsappLink, waRecipients, paymentStatusLine, approvalMessage } = sandbox.__approve;
+const {
+  waNumber, waUrl, whatsappLink, waRecipients, paymentStatusLine, approvalMessage,
+  rejectionMessage, ORGANISER_CONTACT_WA
+} = sandbox.__approve;
 
 let pass = 0;
 const failures = [];
@@ -168,6 +174,61 @@ const nameless = approvalMessage({ id: "x", teamName: "Solo", players: [] }, "")
 check("a missing recipient name still produces a sentence", /^Hello team!/.test(nameless));
 check("a missing department is labelled, not invented", /Department: Not recorded/.test(nameless));
 
+/* ------------------------- rejection message ------------------------- */
+
+const rejected = rejectionMessage(record, "Asha");
+
+check("rejection greets the recipient by name", rejected.indexOf("Hello Asha,") === 0, rejected.split("\n")[0]);
+check("rejection names the team", rejected.indexOf("*Night Ravens*") !== -1);
+check("rejection gives the registration id", rejected.indexOf("🆔 Registration ID: AbCdEfGhIjKlMnOpQrSt") !== -1);
+check("rejection states the payment status", rejected.indexOf("💰 Payment status: Pending") !== -1);
+check("rejection is polite, not blunt", /sorry/.test(rejected) && /Thank you for registering/.test(rejected));
+check("rejection says plainly that no slot is offered", /cannot offer your team a slot/.test(rejected));
+check("rejection does not shout a bare status", rejected.indexOf("REJECTED") === -1);
+check("rejection points at the published organiser contact", rejected.indexOf("https://wa.me/" + ORGANISER_CONTACT_WA) !== -1, ORGANISER_CONTACT_WA);
+check("the contact is a real Indian WhatsApp number", /^91[6-9]\d{9}$/.test(ORGANISER_CONTACT_WA), ORGANISER_CONTACT_WA);
+check(
+  "rejection invents no second phone number",
+  (rejected.match(/\d{10}/g) || []).every((digits) => ORGANISER_CONTACT_WA.indexOf(digits) !== -1),
+  (rejected.match(/\d{10}/g) || []).join(", ")
+);
+check("rejection does not promise a refund", !/refund/i.test(rejected));
+check("rejection does not claim a message was sent", !/\b(sent|delivered|messaged you)\b/i.test(rejected));
+check("rejection ends with the organising team", rejected.trim().endsWith("— QQSGP Free Fire Tournament Organizing Team"));
+check("rejection has no unresolved placeholders", !/{{|\}\}/.test(rejected));
+check("every rejection line is filled in", rejected.split("\n").every((line) => line.indexOf("undefined") === -1 && line.indexOf("null") === -1));
+
+const rejectionLink = waUrl(people[0].raw, rejectionMessage(record, people[0].name));
+check(
+  "the rejection link encodes the whole message",
+  rejectionLink === "https://wa.me/919876543210?text=" + encodeURIComponent(rejectionMessage(record, "Asha")),
+  rejectionLink.slice(0, 60)
+);
+check("the encoded rejection link has no raw newlines", rejectionLink.indexOf("\n") === -1);
+eq("a team with no usable number gets no rejection link", waUrl("", rejectionMessage(record, "Asha")), "");
+
+/* Rejection wiring: saved first, message prepared, never auto-sent. */
+const offerFrom = source.indexOf("function offerRejection(record) {");
+const offerTo = offerFrom === -1 ? -1 : source.indexOf("\n}\n", offerFrom) + 3;
+const offerBody = offerFrom === -1 ? "" : source.slice(offerFrom, offerTo);
+
+check("the rejection flow has a message preparer", offerFrom !== -1);
+check("the preparer opens WhatsApp instead of sending", /window\.open\(url, "_blank"\)/.test(offerBody));
+check("the preparer makes no network claim", !/await |api\(|fetch\(/.test(offerBody));
+check("a blocked popup leaves the Contact link", /blocked the new tab/.test(offerBody));
+check(
+  "a missing number is said plainly",
+  /No usable WhatsApp number is stored, so no message could be prepared/.test(offerBody)
+);
+check(
+  "only the saved record gets a rejection message",
+  /if \(result\.record\.status === "REJECTED"\) offerRejection\(result\.record\);/.test(source)
+);
+check(
+  "copying a rejection copies the same text",
+  /record\.status === "REJECTED"[\s\S]{0,40}rejectionMessage\(record, leader\.name\)/.test(source)
+);
+
 /* ------------- the click path really is wired to Approve ------------- */
 
 check(
@@ -184,7 +245,7 @@ check(
 );
 check(
   "the message is built from the server's record, not the stale copy",
-  /const saved = result\.record;[\s\S]{0,400}approvalMessage\(saved, recipient\.name\)/.test(source)
+  /const saved = result\.record;[\s\S]{0,700}approvalMessage\(saved, recipient\.name\)/.test(source)
 );
 check(
   "an already-approved team is not approved again",
@@ -197,6 +258,15 @@ check(
 check(
   "an unusable leader number asks instead of guessing",
   /if \(leader && leader\.number\) \{[\s\S]{0,200}if \(usable\.length\) \{[\s\S]{0,60}pickRecipient\(record, usable\)/.test(source)
+);
+
+/* The recovery-key path builds its permissions in the browser, and it once
+   omitted pay.update: the key could see the drawer but "Mark paid" said the
+   role was not allowed. The server grants Super Admin pay.update, so the
+   browser list must too. */
+check(
+  "the break-glass key can change payments and the fee",
+  /const SUPER_PERMISSIONS = \[[\s\S]*?"pay\.update"[\s\S]*?\];/.test(source)
 );
 
 /* ----------------------------- report ----------------------------- */
