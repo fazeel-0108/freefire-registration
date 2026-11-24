@@ -264,13 +264,14 @@ the local staging database) drove `verifyYoupiPayment_` to `PAID`,
 was then disabled. **That was a simulator, not a bank payment**, and no
 tournament row was written from it. See [STAGING.md](STAGING.md).
 
-**Browser** (preview harness): the hosted checkout is framed, there is no
-submit button; the stand-in gateway click is
-discovered by polling (no page button), the panel reaches *Registered & Paid*,
-a level-1 answer stops at the review message with no row, a double gateway
-click registers once, cash stays pending, and a direct `ONLINE`/`PAID` POST is
-refused. Desktop 1280×900 and phone 390×844 checked (no horizontal overflow;
-the frame is replaced by a full-width button on phones).
+**Browser:** these checkout behaviours were only ever observed in the local mock
+harness, which has since been removed on request: framed hosted checkout with no
+submit button, a stand-in gateway click discovered by polling, *Registered &
+Paid* on success, a level-1 answer stopping at the review message with no row, a
+double gateway click registering once, cash staying pending, and a direct
+`ONLINE`/`PAID` POST being refused. They were last checked at desktop 1280×900
+and phone 390×844. Against a real gateway they are **unverified** until the live
+run in §5E is done.
 
 **Not tested:** a real merchant account on a public YouPI instance and a real
 UPI payment through it. Those need the credentials and the observer phone

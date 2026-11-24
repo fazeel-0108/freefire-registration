@@ -301,8 +301,7 @@ Nothing below has been requested from a third party or purchased.
 | --- | --- |
 | `node verify-apps-script.js` | **599 passed, 0 failed** (586 before this change; 13 new contract checks) |
 | `node verify-approve.js` | **80 checks passed** |
-| `node verify-preview-isolation.js` | **23 passed, 0 failed** |
-| Staging `/exec` (`staging/check-staging.js`, GET only) | **HTTP 403** — 1 passed, 4 failed, 2 warnings. The deployment exists but has not been authorised and `sheet_id` is not set; this is the manual Google step in `staging/README.md §5a`. |
+| Staging `/exec` (`staging/check-staging.js`, GET only) | **HTTP 403** — 1 passed, 4 failed, 2 warnings. The deployment exists but has not been authorised and `sheet_id` is not set; this is the manual Google step in `staging/README.md §4a`. |
 | Production `?action=config` (read-only) | `online:false`, `provider:"YOUPI"`, `fee:100`, `minVerification:2` — unchanged |
 | Production `?action=stats` (read-only) | 2 teams / 4 players, last entry 23 Oct 21:46 — unchanged |
 | Live YouPI call | **None.** The instance was not started; no real payment was attempted. |

@@ -11,8 +11,6 @@ Files:
 | `appsscript.json` | Manifest for the staging deployment (V8, Asia/Kolkata, web app = Me / Anyone). |
 | `prepare-staging.js` | Copies `../apps-script.js` into `staging/build/Code.js` and writes a no-secret checklist. Refuses the production project id. |
 | `check-staging.js` | Read-only check of a staging `/exec` URL (`config` and `stats` only). Refuses the production deployment. |
-| `console.html` | Premium staging control room served at `/__test/staging/console.html` by the local preview server. |
-| `console.js`, `console.css` | Its live checks, synthetic flow and styling. |
 | `.staging.json.example` | Copy to `.staging.json` (gitignored) after deploying staging; fill `execUrl` with the staging `/exec` URL. |
 | `build/` | Generated. Ignored by git; contains `Code.js`, `appsscript.json`, a staging-only `StagingCheck.gs`, the checklist and an optional `.clasp.json`. |
 
@@ -76,19 +74,7 @@ unchanged.
 7. Optional: run `setupAdminKey()` once from the editor if you want a bypass
    dashboard key for staging. Do not reuse the production key.
 
-## 3. Open the staging control room
-
-With the preview server running (`node .preview-server.js . 8788`):
-
-```
-http://127.0.0.1:8788/__test/staging/console.html
-```
-
-It reads production with public GETs only, shows the real test results, and
-tests the registration flow against the in-memory mock. It does not create a
-Sheet or a deployment.
-
-## 4. Deploy the staging web app
+## 3. Deploy the staging web app
 
 1. **Deploy → New deployment → Web app**.
 2. Description: `staging`.
@@ -107,7 +93,7 @@ Sheet or a deployment.
    `staging/.staging.json` and put the same `/exec` URL in `execUrl`. The file
    is gitignored. Do not put a merchant key or Sheet ID in it.
 
-## 5. Point a copy of the page at staging (optional)
+## 4. Point a copy of the page at staging (optional)
 
 1. Copy `index.html`, `script.js`, `admin.html` and `admin.js` to a scratch
    folder outside the repo.
@@ -117,7 +103,7 @@ Sheet or a deployment.
 4. Register one synthetic **cash** team and confirm exactly one new row appears
    in the **staging** Sheet, not production.
 
-## 5a. What was actually provisioned on 2026-11-03
+## 4a. What was actually provisioned on 2026-11-03
 
 `clasp` was already authorised as the organiser's Google account, so the
 staging resources were created without touching production:
@@ -146,7 +132,7 @@ write Script Properties. That is the one remaining manual Google step:
 The recording in `staging/.staging.json` is local and gitignored. If the
 staging project is ever recreated, update that file with the new `/exec` URL.
 
-## 6. Verify the production `sheet_id` without revealing it
+## 5. Verify the production `sheet_id` without revealing it
 
 1. Open the production Sheet. Its URL contains `/d/<PRODUCTION_SHEET_ID>/edit`.
 2. Open the production Apps Script project → **Project Settings → Script
@@ -159,7 +145,7 @@ staging project is ever recreated, update that file with the new `/exec` URL.
 5. If they disagree, **stop**. Do not change the property; one of the two is the
    wrong Sheet, and changing it could move live registrations.
 
-## 7. Which deployment is which
+## 6. Which deployment is which
 
 | Deployment | Where it appears | What it is |
 | --- | --- | --- |
@@ -171,12 +157,9 @@ script and its `Code.js` is older than `apps-script.js`. A `clasp push` from
 there would overwrite the live backend. The generated `staging/build/` is the
 only folder intended for a staging push.
 
-## 8. Why mock payments cannot mark production PAID
+## 7. No local mock any more
 
-- The mock harness binds to `127.0.0.1` and has no outbound HTTP client. Its
-  "gateway" is a local page; `/__mock/pay` updates an in-memory draft only.
-- The real `apps-script.js` refuses a client-supplied `ONLINE`/`PAID` value and
-  writes `PAID` only after its own authenticated status read.
-- `node verify-preview-isolation.js` asserts both points and runs a complete
-  mock payment, so a broken harness fails the check instead of silently
-  reaching the live deployment.
+The local mock harness and its control room were removed on request, so nothing
+here can produce a fake registration. The protection that mattered stays in the
+shipped code: `apps-script.js` refuses a client-supplied `ONLINE`/`PAID` value
+and writes `PAID` only after its own authenticated status read.

@@ -45,24 +45,13 @@ guardrails: [PAYMENTS.md](PAYMENTS.md).
 
 ## 2. What is running, and where
 
-### Local tournament preview (this repository)
+### No local mock backend
 
-```
-node .preview-server.js . 8788
-http://127.0.0.1:8788/__test/index.html
-http://127.0.0.1:8788/__test/admin.html
-```
-
-- Uses a **mock** Apps Script backend and a stand-in checkout at
-  `/__mock/gateway`. No floating `TEST MODE` pill is injected any more; the only
-  harness chrome on a served page is the small green `Local login:` chip.
-- Mock dashboard key (local only): `mock-dashboard-key-for-browser-tests`.
-- State is in memory: the fee, the draft map and any rows you create reset to the
-  seed data when you restart the process. Restart it after editing the harness.
-- The sandbox starts with the **mock** checkout switched on so the hosted-
-  checkout panel can be exercised; `POST /__mock/mode` with `{"online":false}`
-  shows the cash-only state production reports today. No real gateway is
-  contacted by this harness.
+The mock harness that used to live here (`node .preview-server.js . 8788`, its
+`/__test/...` pages, the `/__mock/*` endpoints and `verify-preview-isolation.js`)
+was **removed on request**. Nothing in this repository can now serve fake
+registrations, fake rooms or a stand-in checkout. Every test runs against the
+real published site and the real `/exec` deployment.
 
 ### Local YouPI PG V2 (separate clone, not part of this repository)
 
@@ -128,36 +117,7 @@ SMS/Gmail observer is configured.
 
 ---
 
-## 3b. Preview harness — browser run, 23 Oct 2026
-
-Run against `node .preview-server.js . 8788` (mock Apps Script + stand-in YouPI
-checkout). Every step below was driven through the real `index.html` /
-`admin.html` in a browser, and the mock sheet was read back through the admin
-API each time. This proves the **UI and the contract wiring**; it does not
-prove Google Sheets or a real gateway, which need the account holder (§5).
-
-| Run | Result |
-| --- | --- |
-| 2-player team, online, ₹100 | Dialog showed YouPI PG at ₹100; gateway confirmed L2; "Registered & Paid" with registration id; counters 8→9 teams, 19→21 players; row `ONLINE / PAID / ₹100 / YouPI L2` |
-| Same token delivered twice more | `duplicate:true`, same registration id, still **one** row |
-| Approve from the organiser drawer | Row became `APPROVED`; payment stayed `PAID`; notification logged `SKIPPED` because consent was not ticked |
-| 3-player team, cash, online switched off | Online button hidden with the cash-only explanation; row `CASH / PENDING / ₹100`, approval `PENDING` |
-| "Mark paid" on that cash row | Confirmation dialog named the amount; row became `PAID / ₹100` with actor and audit entry; approval stayed `PENDING` |
-| Fee changed 100 → 150 | Config reported 150; a new 4-player team was snapshot at `entryFee 150`; the earlier rows kept `100` |
-| Reject the ₹150 team | Row retained as `REJECTED`; payment untouched (`PENDING`, ₹150); nothing deleted |
-| Online payment at verification level 1 | Checkout said "held for an organiser"; **no row** was created; the draft appeared in *Payments to review* as `YOUPI L1` |
-| Accept that draft with a note | Exactly one row created (`ONLINE / PAID / ₹150`), queue emptied, organiser note and actor written to the payment |
-
-Two fidelity fixes were made to the harness while doing this, so the preview
-tells the same story as the backend:
-
-- an accepted review now writes the organiser's note and actor onto the payment
-  (it previously dropped both), and the draft's real department is shown in the
-  queue instead of a hard-coded `CSE`;
-- the unreachable Razorpay branches were deleted from the harness, leaving YouPI
-  as its only provider (it already was at runtime).
-
-### Why the live page has no working online option
+## 3b. Why the live page has no working online option
 
 Production `…/exec?action=config` answers `online:false`, so the option is not
 being hidden by a frontend bug: the server decides. `online` is true only when
@@ -265,8 +225,7 @@ are read by the live deployment.
    `/exec` URL. `admin.js` needs the same change if you test the dashboard from
    that copy.
 2. Serve the copy over HTTPS or `http://localhost` (Apps Script rejects some
-   cross-origin POSTs from `file://`). The repository's own preview harness is
-   the local alternative and needs no Google session.
+   cross-origin POSTs from `file://`).
 3. The production GitHub Pages site must keep pointing at the production `/exec`.
 
 ### E. Verify before trusting it
@@ -318,9 +277,7 @@ take the compliance question to the college organiser.
 ## 6. Staging acceptance checklist
 
 Covered by the automated suites (`node verify-apps-script.js`, 599 checks;
-`node verify-approve.js`, 80 checks; `node verify-preview-isolation.js`, 23
-checks proving the mock cannot reach production) and, for the flows listed in
-§3b, by driving the browser preview:
+`node verify-approve.js`, 80 checks):
 
 - 2-, 3- and 4-player teams; invalid sizes rejected.
 - Cash registration stays `PENDING`; organiser can mark it `PAID` with a note
@@ -349,16 +306,6 @@ Still requires the staged cloud resources or a phone:
 ## 7. Commands used
 
 ```bash
-# tournament preview (mock Apps Script + stand-in checkout)
-node .preview-server.js . 8788
-# http://127.0.0.1:8788/__test/index.html
-# http://127.0.0.1:8788/__test/admin.html
-# dashboard key: mock-dashboard-key-for-browser-tests
-
-# switch the harness between online and cash-only, or hold at a lower level
-curl -X POST http://127.0.0.1:8788/__mock/mode -H 'Content-Type: application/json' -d '{"online":false}'
-curl -X POST http://127.0.0.1:8788/__mock/mode -H 'Content-Type: application/json' -d '{"online":true,"level":1}'
-
 # tests (no network, no Google account)
 node verify-apps-script.js
 node verify-approve.js
@@ -381,7 +328,6 @@ payment. Full analysis: [PAYMENT-ARCHITECTURE.md](PAYMENT-ARCHITECTURE.md).
 | --- | --- |
 | `node verify-apps-script.js` | 586 passed, 0 failed |
 | `node verify-approve.js` | 80 checks passed |
-| `node verify-preview-isolation.js` | 23 passed, 0 failed |
 | Staging `/exec` via `staging/check-staging.js` | HTTP 403 — the deployment is still unauthorised and `sheet_id` is unset (manual Google step, §5a of `staging/README.md`) |
 | Production `?action=config` | `online:false`, `provider:"YOUPI"`, `fee:100`, `minVerification:2` |
 | Production `?action=stats` | 2 teams / 4 players, last entry 23 Oct 21:46 — unchanged |
@@ -444,7 +390,6 @@ adapter then reports a provider error, writes no row, and leaves the draft
 | --- | --- |
 | `node verify-apps-script.js` | **599 passed, 0 failed** (586 before; 13 new contract checks) |
 | `node verify-approve.js` | 80 checks passed |
-| `node verify-preview-isolation.js` | 23 passed, 0 failed |
 | New cases | observed → `PENDING`; inconsistent `NOT_RECONCILED` → `PENDING`; bare `SUCCESS` → `PENDING`; valid `RECONCILED` → `PAID`; wrong amount; wrong order; duplicate reconciliation; delayed reconciliation; rotated key |
 | Production | untouched; `online:false` still |
 | Real money moved | none |

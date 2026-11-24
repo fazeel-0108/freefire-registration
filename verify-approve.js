@@ -4,10 +4,10 @@
    The functions are extracted from the real admin.js (between two
    markers) and executed in a vm, so this tests the shipped source and
    not a copy of it. The parts that need a DOM (the click handler, the
-   network call, the tab) are exercised in the browser against
-   .preview-server.js instead; what is proven here is the part that is
-   easiest to get subtly wrong: number normalisation, the message text
-   and the payment line.
+   network call, the tab) are exercised in a browser against the live
+   site instead; what is proven here is the part that is easiest to get
+   subtly wrong: number normalisation, the message text and the payment
+   line.
 
      node verify-approve.js
    ================================================================== */
