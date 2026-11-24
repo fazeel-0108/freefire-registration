@@ -210,6 +210,40 @@ the "Registration open" pill once the new backend answers `/exec?action=stats`.
 - **Auto-refresh** every 30 seconds while the tab is visible.
 - Rejected and waitlisted teams stay in the sheet. Nothing is ever deleted.
 
+### Rooms, slot assignments and results
+
+The tournament board is organised around rooms, not matches.
+
+- **Rooms and slot assignments** — choose **Number of matches** (1–6, and the
+  same control per stage) and save. Each match shows two room panels: **ROOM A**
+  and **ROOM B**, each with its own Room ID, password, release time, twelve slots,
+  result status and copy/share button. Saving one room never writes the other,
+  and rescheduling the match never wipes either credential. The schedule form
+  (map, stage, scheduled time in IST, status, notes) sits above the panels; the
+  table under them lists every match with `12/12`, `0/12`, credential state and
+  result counts.
+- **Slot assignment** — match → room → team → slot, then **Save assignment**.
+  The table lists every seat as `Match | Room | Slot | Team` with a confirmation
+  before removing one. The server refuses a team twice in a match, two teams in
+  one slot, a thirteenth team in a room and any unapproved team, and answers a
+  duplicate with `This team is already assigned to ROOM B — Slot 7.`
+- **Slot list** — the WhatsApp poster for one room, built from saved assignments.
+  Empty seats are labelled `OPEN SLOT`; credentials appear only after that
+  room's release time. **Copy every room** produces all of them at once.
+- **Results and leaderboards** — stage → match → room loads that room's seated
+  teams by slot. Enter placement and kills; placement points, kill points, total
+  and rank are calculated live from the scoring settings. **Save Room results**
+  writes the room in one call, then *Mark submitted* → *Verify* → *Publish room*
+  moves it along. Each room has its own referee photo (PNG/JPEG/WebP, max 1.5 MB,
+  stored in Drive and linked to the match and room). Below the grid are the
+  **room leaderboard**, the **match leaderboard across all rooms** and the
+  **stage leaderboard** with one column per configured match, marked
+  *Provisional* until every configured match is verified and *Final* afterwards.
+- **Scrolling** — every save and every background refresh re-renders in place.
+  No section is reloaded, nothing calls `scrollIntoView` unless you press *Edit*,
+  and the scroll position is re-asserted after the render, so saving an
+  assignment, a schedule, credentials or results never moves the page.
+
 ### Approve opens WhatsApp with the message typed
 
 **Approve** does both steps in one tap:
@@ -273,7 +307,7 @@ WHATSAPP.md for the templates, the webhook and the consent rules.
 ## 9. Tests performed automatically
 
 `node verify-apps-script.js` runs the real `apps-script.js` against a mocked
-Apps Script runtime: **556 checks, all passing**. They cover the registration
+Apps Script runtime: **743 checks, all passing**. They cover the registration
 contract (2–4 players, duplicate team, shared phone, department list, counters,
 cache invalidation, error containment), the dashboard API (deny by default,
 key setup, wrong key, lockout and its expiry, listing, counts, opaque ids,
@@ -284,7 +318,11 @@ unknown/missing admin actions), the fee in Settings, the whole verified online
 payment path (YouPI hosted checkout: forged callbacks, wrong amount, wrong
 order, duplicate callbacks, cancel, expiry, weak verification held for review,
 organiser accept/reject), the removal of every Razorpay path, and the review
-queue itself.
+queue itself, and the room-based tournament: M1–M6 only (no M7), two rooms
+with independent credentials and release times, slot rules, twelve-seat
+capacity, one-to-six match counts and per-stage counts, room-wise results,
+combined match and stage boards, provisional/final states, missing-match
+handling, referee evidence (type, size, linking) and audited corrections.
 
 `node verify-approve.js` extracts the approval and WhatsApp helpers from the real
 `admin.js` and runs **54 checks** without a browser: Indian number
@@ -358,7 +396,7 @@ team of 2, 3 or 4 players all pay the same fee.
 
 | Team chose | Saved as | Who moves it to `PAID` |
 | --- | --- | --- |
-| **Online** (gateway) | `ONLINE` / **`PAID`** — written by the backend the moment the gateway reports a confirmed payment for that session, in INR, for the exact fee snapshot | Nobody. The gateway's API answer is the proof; the row carries the order id, payment id, paid amount, currency, verification time and provider. With **YouPI**, only a payment at the required verification level (default 2 = bank SMS + Gmail) counts. |
+| **Online — dormant gateway** | `ONLINE` / `PAID` — only if a verified gateway is deliberately configured and enabled | The gateway, and only when it is switched on with owner approval. Manual mode is the active workflow: the site shows a UPI QR, the team claims the payment, and an organiser confirms the money before the row moves to `PAID`. |
 | **Cash** | `CASH` / **`PENDING`** | You, once the notes are in your hand — in the sheet on your phone, or from the dashboard. |
 
 YouPI PG is the only online gateway. The **Tournament settings** panel shows

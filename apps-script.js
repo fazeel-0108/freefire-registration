@@ -117,7 +117,19 @@ var CONFIG = {
   MATCH_SHEET_NAME: 'Matches',
   MATCH_TEAM_SHEET_NAME: 'MatchTeams',
   RESULT_SHEET_NAME: 'Results',
+  ROOM_SHEET_NAME: 'TournamentRooms',
+  EVIDENCE_SHEET_NAME: 'Evidence',
+  // The ONE place the tournament's match numbers live. The tournament plays
+  // at most six matches, so M7 must never exist: the dashboard lists this
+  // list only, and no code path appends an id to it.
   MATCH_IDS: ['M1', 'M2', 'M3', 'M4', 'M5', 'M6'],
+  // Each match is played in these rooms, every room with its own 12 slots and
+  // its own Room ID / password. Add a code here to add a room everywhere.
+  MATCH_ROOMS: ['A', 'B'],
+  DEFAULT_MATCH_COUNT: 6,
+  // A referee photo is optional evidence, never required to save a result.
+  EVIDENCE_MAX_BYTES: 1572864,
+  EVIDENCE_FOLDER: 'QQSGP Referee Evidence',
   DEFAULT_PLACEMENT_POINTS: [12, 9, 8, 7, 6, 5, 4, 3, 2, 1],
   DEFAULT_KILL_POINTS: 1,
   // Match times are always written and displayed in Indian Standard Time,
@@ -4363,15 +4375,18 @@ function adminHandle_(e) {
   if (action === 'drafts-list') return adminDraftsList_();
   if (action === 'draft-resolve') return adminDraftResolve_(payload, auth.actor);
 
-  // Tournament operations: six fixed matches, assignments, scoring, results.
+  // Tournament operations: at most six matches, rooms, slots, results.
   if (action === 'teams') return adminTeams_();
   if (action === 'tournament') return adminTournament_();
   if (action === 'match-save') return adminMatchSave_(payload, auth.actor);
+  if (action === 'match-count-set') return adminMatchCountSet_(payload, auth.actor);
+  if (action === 'room-save') return adminRoomSave_(payload, auth.actor);
   if (action === 'match-assign') return adminMatchAssign_(payload, auth.actor);
   if (action === 'match-unassign') return adminMatchUnassign_(payload, auth.actor);
-  if (action === 'match-add') return adminMatchAdd_(payload, auth.actor);
-  if (action === 'match-remove') return adminMatchRemove_(payload, auth.actor);
   if (action === 'result-save') return adminResultSave_(payload, auth.actor);
+  if (action === 'room-result-save') return adminRoomResultsSave_(payload, auth.actor);
+  if (action === 'room-result-status') return adminRoomResultStatus_(payload, auth.actor);
+  if (action === 'result-evidence') return adminResultEvidence_(payload, auth.actor);
   if (action === 'result-approve') return adminResultApprove_(payload, auth.actor);
   if (action === 'result-publish') return adminResultPublish_(payload, auth.actor);
   if (action === 'result-unpublish') return adminResultUnpublish_(payload, auth.actor);
@@ -6386,61 +6401,130 @@ var MATCH_ROOM_SIZE = 12;
 
 var MATCH_TEAM_HEADERS = [
   'Match ID', 'Team ID', 'Team Name', 'Slot', 'Assigned At',
-  'Assigned By', 'State'
+  'Assigned By', 'State', 'Room'
 ];
 
 var MATCH_TEAM_COL = {
   MATCH: 1, TEAM_ID: 2, TEAM_NAME: 3, SLOT: 4,
-  ASSIGNED: 5, ASSIGNED_BY: 6, STATE: 7
+  ASSIGNED: 5, ASSIGNED_BY: 6, STATE: 7, ROOM: 8
 };
 
 var RESULT_HEADERS = [
   'Match ID', 'Team ID', 'Team Name', 'Placement', 'Kills',
   'Placement Points', 'Kill Points', 'Total Points', 'Status', 'Notes',
-  'Updated At', 'Updated By', 'Published At'
+  'Updated At', 'Updated By', 'Published At', 'Room'
 ];
 
 var RESULT_COL = {
   MATCH: 1, TEAM_ID: 2, TEAM_NAME: 3, PLACEMENT: 4, KILLS: 5,
   PLACEMENT_POINTS: 6, KILL_POINTS: 7, TOTAL: 8, STATUS: 9, NOTES: 10,
-  UPDATED: 11, UPDATED_BY: 12, PUBLISHED: 13
+  UPDATED: 11, UPDATED_BY: 12, PUBLISHED: 13, ROOM: 14
 };
 
-var MATCH_STATUSES = ['SCHEDULED', 'LIVE', 'COMPLETED', 'CANCELLED'];
-var RESULT_STATUSES = ['DRAFT', 'APPROVED', 'PUBLISHED'];
+/* One row per match and room. Room A's credentials are mirrored onto the
+   Matches tab in the legacy columns so older readers keep working. */
+var ROOM_HEADERS = [
+  'Match ID', 'Room', 'Room ID', 'Room Password', 'Release At',
+  'Notes', 'Updated At', 'Updated By'
+];
+
+var ROOM_COL = {
+  MATCH: 1, ROOM: 2, ROOM_ID: 3, ROOM_PASSWORD: 4, RELEASE: 5,
+  NOTES: 6, UPDATED: 7, UPDATED_BY: 8
+};
+
+/* The referee photo for one room's result submission. The file lives in Drive;
+   this tab keeps only the reference, never the image bytes. */
+var EVIDENCE_HEADERS = [
+  'Match ID', 'Room', 'File ID', 'File URL', 'File Name', 'Mime Type',
+  'Size', 'Uploaded At', 'Uploaded By', 'Stage'
+];
+
+var EVIDENCE_COL = {
+  MATCH: 1, ROOM: 2, FILE_ID: 3, URL: 4, NAME: 5, MIME: 6,
+  SIZE: 7, UPLOADED: 8, UPLOADED_BY: 9, STAGE: 10
+};
+
+var MATCH_STATUSES = ['DRAFT', 'SCHEDULED', 'LIVE', 'COMPLETED', 'CANCELLED'];
+/* APPROVED is shown as "Submitted" and VERIFIED as "Verified". The stored
+   values stay as they are so rows written by older deployments still read. */
+var RESULT_STATUSES = ['DRAFT', 'APPROVED', 'VERIFIED', 'PUBLISHED'];
 var MATCH_TEAM_STATES = ['ACTIVE', 'WITHDRAWN'];
 
 var MATCH_IDS_PROPERTY = 'match_ids';
 
 /**
- * The qualifier rooms are fixed in CONFIG, but an organiser can add more rooms
- * (M7, M8 …) from the dashboard. The extra ids are remembered in Script
- * Properties so every later read, assignment and public page sees the same
- * room list. Ids are always ordered by their number, never as strings.
+ * Every match number the tournament can ever have, and the only place it is
+ * defined: CONFIG.MATCH_IDS (M1-M6). Nothing appends to this list at runtime,
+ * so an accidental M7 cannot appear. `match_ids` in Script Properties used to
+ * hold extra ids from the old "Add room" button; it is ignored from now on.
  */
 function tournamentMatchIds_() {
-  var base = (CONFIG.MATCH_IDS || ['M1', 'M2', 'M3', 'M4', 'M5', 'M6']).slice(0);
-  var extra = [];
-  try {
-    var raw = PropertiesService.getScriptProperties().getProperty(MATCH_IDS_PROPERTY) || '';
-    if (raw) {
-      var parsed = JSON.parse(raw);
-      if (parsed && parsed.length !== undefined) extra = parsed;
-    }
-  } catch (ignored) {
-    extra = [];
-  }
+  var base = CONFIG.MATCH_IDS || ['M1', 'M2', 'M3', 'M4', 'M5', 'M6'];
   var ids = [];
   var seen = {};
-  var all = base.concat(extra);
-  for (var i = 0; i < all.length; i++) {
-    var id = cleanText_(all[i]).toUpperCase();
-    if (!/^M[0-9]{1,3}$/.test(id) || seen[id]) continue;
+  for (var i = 0; i < base.length && i < 6; i++) {
+    var id = cleanText_(base[i]).toUpperCase();
+    if (!/^M[1-6]$/.test(id) || seen[id]) continue;
     seen[id] = true;
     ids.push(id);
   }
   ids.sort(function (a, b) { return (Number(a.slice(1)) || 0) - (Number(b.slice(1)) || 0); });
   return ids.length ? ids : ['M1'];
+}
+
+/** How many matches are actually played this stage: 1 to 6, default 6. */
+function configuredMatchCount_() {
+  var raw = Number(readSettings_()['match_count']);
+  if (isFinite(raw) && raw >= 1 && raw <= 6) return Math.round(raw);
+  var fallback = Number(CONFIG.DEFAULT_MATCH_COUNT);
+  return isFinite(fallback) && fallback >= 1 && fallback <= 6 ? Math.round(fallback) : 6;
+}
+
+/** Per-stage overrides, e.g. {"KNOCKOUT 1": 2, "GRAND FINAL": 1}. */
+function stageMatchCounts_() {
+  var out = {};
+  try {
+    var raw = readSettings_()['stage_match_counts'];
+    if (!raw) return out;
+    var parsed = JSON.parse(raw);
+    for (var key in parsed) {
+      if (!Object.prototype.hasOwnProperty.call(parsed, key)) continue;
+      var stage = normaliseMatchStage_(key);
+      var count = Number(parsed[key]);
+      if (isFinite(count) && count >= 1 && count <= 6) out[stage] = Math.round(count);
+    }
+  } catch (ignored) {}
+  return out;
+}
+
+function matchCountForStage_(stage) {
+  var counts = stageMatchCounts_();
+  var key = normaliseMatchStage_(stage);
+  return counts[key] ? counts[key] : configuredMatchCount_();
+}
+
+/** The room codes of every match, from the single list in CONFIG. */
+function matchRoomCodes_() {
+  var base = CONFIG.MATCH_ROOMS || ['A', 'B'];
+  var out = [];
+  var seen = {};
+  for (var i = 0; i < base.length; i++) {
+    var code = cleanText_(base[i]).toUpperCase().replace(/^ROOM\s+/, '').slice(0, 1);
+    if (!/^[A-D]$/.test(code) || seen[code]) continue;
+    seen[code] = true;
+    out.push(code);
+  }
+  return out.length ? out : ['A'];
+}
+
+function normaliseRoomCode_(value) {
+  var code = cleanText_(value).toUpperCase().replace(/^ROOM\s+/, '').slice(0, 1);
+  return matchRoomCodes_().indexOf(code) === -1 ? '' : code;
+}
+
+function roomLabel_(code) {
+  return 'ROOM ' + (code || 'A');
 }
 
 function normaliseMatchId_(value) {
@@ -6602,7 +6686,83 @@ function matchTeamSheet_() {
 }
 
 function resultSheet_() {
-  return tournamentSheet_(CONFIG.RESULT_SHEET_NAME, RESULT_HEADERS, [70, 22, 170, 80, 70, 120, 90, 90, 95, 220, 155, 120, 155]);
+  return tournamentSheet_(CONFIG.RESULT_SHEET_NAME, RESULT_HEADERS, [70, 22, 170, 80, 70, 120, 90, 90, 95, 220, 155, 120, 155, 70]);
+}
+
+function roomSheet_() {
+  return tournamentSheet_(CONFIG.ROOM_SHEET_NAME, ROOM_HEADERS, [70, 60, 120, 130, 165, 220, 155, 120]);
+}
+
+function evidenceSheet_() {
+  return tournamentSheet_(CONFIG.EVIDENCE_SHEET_NAME, EVIDENCE_HEADERS, [70, 60, 120, 260, 180, 110, 80, 155, 120, 120]);
+}
+
+function roomFromRow_(rowNumber, row) {
+  var release = tournamentDateTime_(row[ROOM_COL.RELEASE - 1]);
+  var roomId = cleanText_(row[ROOM_COL.ROOM_ID - 1]);
+  var roomPassword = cleanText_(row[ROOM_COL.ROOM_PASSWORD - 1]);
+  var code = cleanText_(row[ROOM_COL.ROOM - 1]).toUpperCase().slice(0, 1) || 'A';
+  return {
+    row: rowNumber,
+    matchId: normaliseMatchId_(row[ROOM_COL.MATCH - 1]),
+    room: code,
+    label: roomLabel_(code),
+    roomId: roomId,
+    roomPassword: roomPassword,
+    hasRoom: !!(roomId || roomPassword),
+    releaseAt: release ? release.toISOString() : '',
+    releaseLabel: release ? tournamentLabel_(release) : '',
+    roomReleased: !!(release && release.getTime() <= new Date().getTime()),
+    notes: cleanText_(row[ROOM_COL.NOTES - 1])
+  };
+}
+
+/** Every room row, ordered by match number and then room letter. */
+function readRooms_() {
+  ensureTournamentSheets_();
+  var sheet = roomSheet_();
+  var rows = Math.max(sheet.getLastRow() - 1, 0);
+  if (rows === 0) return [];
+  var values = sheet.getRange(2, 1, rows, ROOM_HEADERS.length).getValues();
+  var out = [];
+  var seen = {};
+  for (var i = 0; i < values.length; i++) {
+    var room = roomFromRow_(i + 2, values[i]);
+    if (!room.matchId) continue;
+    var key = room.matchId + '|' + room.room;
+    if (seen[key]) continue;
+    seen[key] = true;
+    out.push(room);
+  }
+  out.sort(function (a, b) {
+    var diff = (Number(a.matchId.slice(1)) || 0) - (Number(b.matchId.slice(1)) || 0);
+    return diff || a.room.localeCompare(b.room);
+  });
+  return out;
+}
+
+function roomFor_(rooms, matchId, code) {
+  for (var i = 0; i < rooms.length; i++) {
+    if (rooms[i].matchId === matchId && rooms[i].room === code) return rooms[i];
+  }
+  return null;
+}
+
+/** The room a team actually sits in for a match, from its active assignment. */
+function roomOfTeam_(assignments, matchId, teamId) {
+  for (var i = 0; i < assignments.length; i++) {
+    var a = assignments[i];
+    if (a.state === 'ACTIVE' && a.matchId === matchId && a.teamId === teamId) return a.room || 'A';
+  }
+  return '';
+}
+
+function assignmentFor_(assignments, matchId, teamId) {
+  for (var i = 0; i < assignments.length; i++) {
+    var a = assignments[i];
+    if (a.state === 'ACTIVE' && a.matchId === matchId && a.teamId === teamId) return a;
+  }
+  return null;
 }
 
 function tournamentDateTime_(value) {
@@ -6633,10 +6793,25 @@ function tournamentLabel_(value) {
   return Utilities.formatDate(date, CONFIG.TIMEZONE || 'Asia/Kolkata', 'dd MMM yyyy, hh:mm a') + ' IST';
 }
 
+/** Adds any header columns an older copy of this tab is missing. */
+function extendHeaders_(sheet, headers) {
+  var last = sheet.getLastColumn();
+  if (last >= headers.length) return;
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    return;
+  }
+  sheet.getRange(1, last + 1, 1, headers.length - last)
+    .setValues([headers.slice(last)])
+    .setFontWeight('bold');
+}
+
 function ensureTournamentSheets_() {
   var sheet = matchSheet_();
   var lastColumn = sheet.getLastColumn();
   if (lastColumn < MATCH_HEADERS.length) {
+
     sheet.getRange(1, lastColumn + 1, 1, MATCH_HEADERS.length - lastColumn)
       .setValues([MATCH_HEADERS.slice(lastColumn)])
       .setFontWeight('bold');
@@ -6656,11 +6831,63 @@ function ensureTournamentSheets_() {
     if (existing[matchId]) continue;
     sheet.appendRow([matchId, m + 1, '', '', 'SCHEDULED', '', '', '', '', now, 'system', '', 'QUALIFIER', '']);
   }
-  matchTeamSheet_();
-  resultSheet_();
+  var teamSheet = matchTeamSheet_();
+  extendHeaders_(teamSheet, MATCH_TEAM_HEADERS);
+  var resultsSheet = resultSheet_();
+  extendHeaders_(resultsSheet, RESULT_HEADERS);
+
+  /* One row per match and room. A room that does not exist yet is seeded from
+     the legacy Matches credentials for Room A, so an existing tournament keeps
+     the Room ID and password it already published. */
+  var roomsSheet = roomSheet_();
+  extendHeaders_(roomsSheet, ROOM_HEADERS);
+  var have = {};
+  if (roomsSheet.getLastRow() > 1) {
+    var roomRows = roomsSheet.getRange(2, 1, roomsSheet.getLastRow() - 1, 2).getValues();
+    for (var r = 0; r < roomRows.length; r++) {
+      var rm = normaliseMatchId_(roomRows[r][0]);
+      var rc = cleanText_(roomRows[r][1]).toUpperCase().slice(0, 1);
+      if (rm && rc) have[rm + '|' + rc] = true;
+    }
+  }
+  var matchRows = Math.max(sheet.getLastRow() - 1, 0);
+  var matchValues = matchRows > 0
+    ? sheet.getRange(2, 1, matchRows, MATCH_HEADERS.length).getValues()
+    : [];
+  var legacy = {};
+  for (var l = 0; l < matchValues.length; l++) {
+    var lid = normaliseMatchId_(matchValues[l][MATCH_COL.ID - 1]);
+    if (!lid) continue;
+    legacy[lid] = {
+      roomId: cleanText_(matchValues[l][MATCH_COL.ROOM_ID - 1]),
+      roomPassword: cleanText_(matchValues[l][MATCH_COL.ROOM_PASSWORD - 1]),
+      release: matchValues[l][MATCH_COL.RELEASE - 1]
+    };
+  }
+  var ids = tournamentMatchIds_();
+  var codes = matchRoomCodes_();
+  for (var i = 0; i < ids.length; i++) {
+    for (var c = 0; c < codes.length; c++) {
+      if (have[ids[i] + '|' + codes[c]]) continue;
+      var seed = codes[c] === 'A' ? legacy[ids[i]] || {} : {};
+      roomsSheet.appendRow([ids[i], codes[c], seed.roomId || '', seed.roomPassword || '',
+        seed.release || '', '', now, 'system']);
+      have[ids[i] + '|' + codes[c]] = true;
+    }
+  }
+  evidenceSheet_();
+
   sheet.getRange(2, MATCH_COL.SCHEDULED, Math.max(sheet.getLastRow() - 1, 1), 1).setNumberFormat('dd mmm yyyy, hh:mm AM/PM');
   sheet.getRange(2, MATCH_COL.RELEASE, Math.max(sheet.getLastRow() - 1, 1), 1).setNumberFormat('dd mmm yyyy, hh:mm AM/PM');
-  resultSheet_().getRange(2, RESULT_COL.UPDATED, Math.max(resultSheet_().getLastRow() - 1, 1), 1).setNumberFormat('dd mmm yyyy, hh:mm AM/PM');
+  roomsSheet.getRange(2, ROOM_COL.RELEASE, Math.max(roomsSheet.getLastRow() - 1, 1), 1).setNumberFormat('dd mmm yyyy, hh:mm AM/PM');
+  resultsSheet.getRange(2, RESULT_COL.UPDATED, Math.max(resultsSheet.getLastRow() - 1, 1), 1).setNumberFormat('dd mmm yyyy, hh:mm AM/PM');
+
+  /* The old dashboard remembered extra rooms here (M7, M8...). Six matches is
+     the rule now, so the property is dropped once and never written again. */
+  try {
+    var props = PropertiesService.getScriptProperties();
+    if (props.getProperty(MATCH_IDS_PROPERTY)) props.deleteProperty(MATCH_IDS_PROPERTY);
+  } catch (ignored2) {}
 }
 
 function matchFromRow_(rowNumber, row) {
@@ -6719,7 +6946,9 @@ function matchTeamFromRow_(rowNumber, row) {
     slot: Number(row[MATCH_TEAM_COL.SLOT - 1]) || 0,
     assignedAt: tournamentIso_(row[MATCH_TEAM_COL.ASSIGNED - 1]),
     assignedBy: cleanText_(row[MATCH_TEAM_COL.ASSIGNED_BY - 1]),
-    state: cleanText_(row[MATCH_TEAM_COL.STATE - 1]).toUpperCase() === 'WITHDRAWN' ? 'WITHDRAWN' : 'ACTIVE'
+    state: cleanText_(row[MATCH_TEAM_COL.STATE - 1]).toUpperCase() === 'WITHDRAWN' ? 'WITHDRAWN' : 'ACTIVE',
+    // Rows written before rooms existed have no room and were all "Room A".
+    room: cleanText_(row[MATCH_TEAM_COL.ROOM - 1]).toUpperCase().slice(0, 1) || 'A'
   };
 }
 
@@ -6749,7 +6978,9 @@ function resultFromRow_(rowNumber, row) {
     notes: cleanText_(row[RESULT_COL.NOTES - 1]),
     updatedAt: tournamentIso_(row[RESULT_COL.UPDATED - 1]),
     updatedBy: cleanText_(row[RESULT_COL.UPDATED_BY - 1]),
-    publishedAt: tournamentIso_(row[RESULT_COL.PUBLISHED - 1])
+    publishedAt: tournamentIso_(row[RESULT_COL.PUBLISHED - 1]),
+    // Older rows carry no room; the caller fills it from the assignment.
+    room: cleanText_(row[RESULT_COL.ROOM - 1]).toUpperCase().slice(0, 1)
   };
 }
 
@@ -6796,13 +7027,136 @@ function adminTeams_() {
   return { ok: true, teams: out };
 }
 
-function activeMatchTeamIds_(matchId) {
+function activeMatchTeamIds_(matchId, room) {
   var list = readMatchTeams_();
   var out = [];
   for (var i = 0; i < list.length; i++) {
-    if (list[i].matchId === matchId && list[i].state === 'ACTIVE' && list[i].teamId) out.push(list[i].teamId);
+    if (list[i].matchId !== matchId || list[i].state !== 'ACTIVE' || !list[i].teamId) continue;
+    if (room && list[i].room !== room) continue;
+    out.push(list[i].teamId);
   }
   return out;
+}
+
+/** Gives every result its room, taken from the assignment when the row is old. */
+function attachResultRooms_(results, assignments) {
+  for (var i = 0; i < results.length; i++) {
+    if (results[i].room) continue;
+    var a = assignmentFor_(assignments, results[i].matchId, results[i].teamId);
+    results[i].room = a ? a.room : 'A';
+  }
+  return results;
+}
+
+/** Draft → Submitted → Verified → Published, for one room's result rows. */
+function roomResultStatus_(rows) {
+  if (!rows || !rows.length) return 'EMPTY';
+  var lowest = 99;
+  var order = { DRAFT: 0, APPROVED: 1, VERIFIED: 2, PUBLISHED: 3 };
+  for (var i = 0; i < rows.length; i++) {
+    var value = order[rows[i].status];
+    if (value === undefined) value = 0;
+    if (value < lowest) lowest = value;
+  }
+  if (lowest >= 3) return 'PUBLISHED';
+  if (lowest >= 2) return 'VERIFIED';
+  if (lowest >= 1) return 'APPROVED';
+  return 'DRAFT';
+}
+
+/**
+ * Sorts a set of result rows and numbers them #1, #2, #3 …
+ * The rows are copied: a room board, a match board and a stage board all rank
+ * the same underlying results, and they must not overwrite each other's ranks.
+ */
+function standingsFor_(rows, tie) {
+  var copy = [];
+  var list = rows || [];
+  for (var i = 0; i < list.length; i++) {
+    var clone = {};
+    for (var key in list[i]) {
+      if (Object.prototype.hasOwnProperty.call(list[i], key)) clone[key] = list[i][key];
+    }
+    copy.push(clone);
+  }
+  sortByTieBreakers_(copy, tie || tieBreakers_());
+  for (var r = 0; r < copy.length; r++) copy[r].rank = r + 1;
+  return copy;
+}
+
+/** Teams that may appear in an official board: verified or published only. */
+function officialRows_(rows) {
+  var out = [];
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].status === 'VERIFIED' || rows[i].status === 'PUBLISHED') out.push(rows[i]);
+  }
+  return out;
+}
+
+/**
+ * The combined board of one stage: every verified result of every visible
+ * match of that stage, added per team. A match a team did not play is reported
+ * as null, never as zero points.
+ */
+function stageBoard_(stage, matches, results, limit) {
+  var tie = tieBreakers_();
+  var ids = [];
+  for (var m = 0; m < matches.length && ids.length < limit; m++) {
+    if (matches[m].stage === stage) ids.push(matches[m].id);
+  }
+  var perMatch = {};
+  var teams = {};
+  var order = [];
+  for (var i = 0; i < results.length; i++) {
+    var row = results[i];
+    if (ids.indexOf(row.matchId) === -1) continue;
+    if (row.status !== 'VERIFIED' && row.status !== 'PUBLISHED') continue;
+    if (!teams[row.teamId]) {
+      teams[row.teamId] = {
+        teamId: row.teamId, teamName: row.teamName, total: 0, kills: 0,
+        placementPoints: 0, killPoints: 0, matches: 0, bestPlacement: 0,
+        byMatch: {}, countedMatches: {}
+      };
+      order.push(row.teamId);
+    }
+    var team = teams[row.teamId];
+    team.total += Number(row.total) || 0;
+    team.kills += Number(row.kills) || 0;
+    team.placementPoints += Number(row.placementPoints) || 0;
+    team.killPoints += Number(row.killPoints) || 0;
+    team.matches++;
+    team.byMatch[row.matchId] = Number(row.total) || 0;
+    team.countedMatches[row.matchId] = true;
+    if (!team.bestPlacement || (row.placement && row.placement < team.bestPlacement)) {
+      team.bestPlacement = row.placement;
+    }
+    perMatch[row.matchId] = true;
+  }
+  var rows = [];
+  for (var t = 0; t < order.length; t++) rows.push(teams[order[t]]);
+  sortByTieBreakers_(rows, tie);
+  for (var r = 0; r < rows.length; r++) rows[r].rank = r + 1;
+
+  var matchInfo = [];
+  var pending = 0;
+  for (var k = 0; k < ids.length; k++) {
+    var count = 0;
+    var allVerified = true;
+    for (var j = 0; j < results.length; j++) {
+      if (results[j].matchId !== ids[k]) continue;
+      count++;
+      if (results[j].status !== 'VERIFIED' && results[j].status !== 'PUBLISHED') allVerified = false;
+    }
+    if (!count || !allVerified) pending++;
+    matchInfo.push({ id: ids[k], results: count, verified: count > 0 && allVerified });
+  }
+  return {
+    stage: stage,
+    matches: matchInfo,
+    rows: rows,
+    provisional: pending > 0,
+    final: ids.length > 0 && pending === 0
+  };
 }
 
 function leaderboard_(results, publishedOnly) {
@@ -6837,41 +7191,442 @@ function adminTournament_() {
   ensureTournamentSheets_();
   var matches = readMatches_();
   var assignments = readMatchTeams_();
-  var results = readResults_();
-  var byMatch = {};
+  var results = attachResultRooms_(readResults_(), assignments);
+  var rooms = readRooms_();
+  var tie = tieBreakers_();
+  var codes = matchRoomCodes_();
+
+  var byMatchRoom = {};
   for (var i = 0; i < assignments.length; i++) {
     var a = assignments[i];
     if (a.state !== 'ACTIVE') continue;
-    if (!byMatch[a.matchId]) byMatch[a.matchId] = [];
-    byMatch[a.matchId].push({
-      teamId: a.teamId, teamName: a.teamName, slot: a.slot, assignedAt: a.assignedAt
+    var key = a.matchId + '|' + a.room;
+    if (!byMatchRoom[key]) byMatchRoom[key] = [];
+    byMatchRoom[key].push({
+      teamId: a.teamId, teamName: a.teamName, slot: a.slot, room: a.room, assignedAt: a.assignedAt
     });
   }
-  var fixedRooms = CONFIG.MATCH_IDS || ['M1', 'M2', 'M3', 'M4', 'M5', 'M6'];
-  for (var m = 0; m < matches.length; m++) {
-    matches[m].teams = byMatch[matches[m].id] || [];
-    matches[m].teamCount = matches[m].teams.length;
-    // The six qualifier rooms are permanent; a room added from the dashboard
-    // can be deleted again while it is still empty.
-    matches[m].removable = fixedRooms.indexOf(matches[m].id) === -1;
-    matches[m].resultCount = results.filter(function (r) { return r.matchId === matches[m].id; }).length;
-    matches[m].publishedCount = results.filter(function (r) {
-      return r.matchId === matches[m].id && r.status === 'PUBLISHED';
-    }).length;
+
+  var resultByMatchRoom = {};
+  var countByMatch = {};
+  var publishedByMatch = {};
+  for (var r = 0; r < results.length; r++) {
+    var rk = results[r].matchId + '|' + results[r].room;
+    if (!resultByMatchRoom[rk]) resultByMatchRoom[rk] = [];
+    resultByMatchRoom[rk].push(results[r]);
+    countByMatch[results[r].matchId] = (countByMatch[results[r].matchId] || 0) + 1;
+    if (results[r].status === 'PUBLISHED') {
+      publishedByMatch[results[r].matchId] = (publishedByMatch[results[r].matchId] || 0) + 1;
+    }
   }
+
+  /* The organiser controls how many matches a stage plays. A match is visible
+     when its position inside its own stage is below that stage's count, so only
+     M1..Mn ever reach a dropdown. */
+  var seenStage = {};
+  for (var m = 0; m < matches.length; m++) {
+    var stage = matches[m].stage;
+    var used = seenStage[stage] || 0;
+    matches[m].visible = used < matchCountForStage_(stage);
+    seenStage[stage] = used + 1;
+    matches[m].removable = false;
+    matches[m].rooms = [];
+    for (var c = 0; c < codes.length; c++) {
+      var room = roomFor_(rooms, matches[m].id, codes[c]);
+      var panelTeams = (byMatchRoom[matches[m].id + '|' + codes[c]] || []).slice(0);
+      panelTeams.sort(function (x, y) { return x.slot - y.slot; });
+      var panelResults = resultByMatchRoom[matches[m].id + '|' + codes[c]] || [];
+      var publishedPanel = 0;
+      for (var p = 0; p < panelResults.length; p++) {
+        if (panelResults[p].status === 'PUBLISHED') publishedPanel++;
+      }
+      matches[m].rooms.push({
+        room: codes[c],
+        label: roomLabel_(codes[c]),
+        roomId: room ? room.roomId : '',
+        roomPassword: room ? room.roomPassword : '',
+        hasRoom: !!(room && room.hasRoom),
+        releaseAt: room ? room.releaseAt : '',
+        releaseLabel: room && room.releaseLabel ? room.releaseLabel : '',
+        roomReleased: !!(room && room.roomReleased),
+        teams: panelTeams,
+        teamCount: panelTeams.length,
+        resultCount: panelResults.length,
+        publishedCount: publishedPanel,
+        status: roomResultStatus_(panelResults),
+        leaderboard: standingsFor_(officialRows_(panelResults), tie)
+      });
+    }
+    // Room A stays mirrored on the match itself for older readers.
+    var roomA = matches[m].rooms[0];
+    if (roomA) {
+      matches[m].roomId = roomA.roomId;
+      matches[m].roomPassword = roomA.roomPassword;
+      matches[m].hasRoom = roomA.hasRoom;
+      matches[m].releaseAt = roomA.releaseAt;
+      matches[m].releaseLabel = roomA.releaseLabel;
+      matches[m].roomReleased = roomA.roomReleased;
+    }
+    matches[m].teams = [];
+    for (var pc = 0; pc < matches[m].rooms.length; pc++) {
+      matches[m].teams = matches[m].teams.concat(matches[m].rooms[pc].teams);
+    }
+    matches[m].teamCount = matches[m].teams.length;
+    matches[m].resultCount = countByMatch[matches[m].id] || 0;
+    matches[m].publishedCount = publishedByMatch[matches[m].id] || 0;
+  }
+
+  var matchBoards = {};
+  var stageBoards = {};
+  for (var b = 0; b < matches.length; b++) {
+    var matchRows = [];
+    for (var q = 0; q < results.length; q++) if (results[q].matchId === matches[b].id) matchRows.push(results[q]);
+    matchBoards[matches[b].id] = standingsFor_(officialRows_(matchRows), tie);
+  }
+  for (var s = 0; s < MATCH_STAGES.length; s++) {
+    stageBoards[MATCH_STAGES[s]] = stageBoard_(MATCH_STAGES[s], matches, results, matchCountForStage_(MATCH_STAGES[s]));
+  }
+
   return {
     ok: true,
     matches: matches,
     results: results,
+    rooms: codes,
+    matchIds: tournamentMatchIds_(),
+    matchCount: configuredMatchCount_(),
+    stageMatchCounts: stageMatchCounts_(),
+    stages: MATCH_STAGES.slice(0),
+    matchBoards: matchBoards,
+    stageBoards: stageBoards,
+    evidence: readEvidence_(),
     teams: adminTeams_().teams,
     leaderboard: leaderboard_(results, false),
     publishedLeaderboard: leaderboard_(results, true),
     placementPoints: placementPoints_(),
     killPoints: killPoints_(),
-    tieBreakers: tieBreakers_(),
+    tieBreakers: tie,
     maxTeams: maxTeams_(),
     generatedAt: new Date().toISOString()
   };
+}
+
+function readEvidence_() {
+  var sheet = evidenceSheet_();
+  var rows = Math.max(sheet.getLastRow() - 1, 0);
+  if (!rows) return [];
+  var values = sheet.getRange(2, 1, rows, EVIDENCE_HEADERS.length).getValues();
+  var out = [];
+  for (var i = 0; i < values.length; i++) {
+    var matchId = normaliseMatchId_(values[i][EVIDENCE_COL.MATCH - 1]);
+    if (!matchId) continue;
+    var code = cleanText_(values[i][EVIDENCE_COL.ROOM - 1]).toUpperCase().slice(0, 1) || 'A';
+    out.push({
+      row: i + 2,
+      matchId: matchId,
+      room: code,
+      label: roomLabel_(code),
+      fileId: cleanText_(values[i][EVIDENCE_COL.FILE_ID - 1]),
+      url: cleanText_(values[i][EVIDENCE_COL.URL - 1]),
+      name: cleanText_(values[i][EVIDENCE_COL.NAME - 1]),
+      mime: cleanText_(values[i][EVIDENCE_COL.MIME - 1]),
+      size: Number(values[i][EVIDENCE_COL.SIZE - 1]) || 0,
+      uploadedAt: tournamentIso_(values[i][EVIDENCE_COL.UPLOADED - 1]),
+      uploadedBy: cleanText_(values[i][EVIDENCE_COL.UPLOADED_BY - 1]),
+      stage: cleanText_(values[i][EVIDENCE_COL.STAGE - 1])
+    });
+  }
+  return out;
+}
+
+function evidenceFor_(matchId, room) {
+  var list = readEvidence_();
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].matchId === matchId && list[i].room === room) return list[i];
+  }
+  return null;
+}
+
+/**
+ * Saves one room's credentials. Each room keeps its own Room ID, password and
+ * release time, so Room A's details can never be written over Room B's.
+ */
+function adminRoomSave_(payload, actor) {
+  var matchId = normaliseMatchId_(payload.matchId);
+  if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose a match.' };
+  var code = normaliseRoomCode_(payload.room || 'A');
+  if (!code) return { ok: false, code: 'ROOM', error: 'Choose a room.' };
+
+  var roomId = cleanText_(payload.roomId).slice(0, 40);
+  var roomPassword = cleanText_(payload.roomPassword).slice(0, 40);
+  var releaseText = cleanText_(payload.releaseAt);
+  var releaseAt = releaseText ? tournamentDateTime_(releaseText) : null;
+  if (releaseText && !releaseAt) {
+    return { ok: false, code: 'DATE', error: 'The release time is not valid.' };
+  }
+  if ((roomId || roomPassword) && !releaseAt) {
+    return { ok: false, code: 'RELEASE', error: 'Set a release time. Credentials must never be visible early.' };
+  }
+
+  var target = roomFor_(readRooms_(), matchId, code);
+  if (!target) return { ok: false, code: 'ROOM', error: 'That room row is missing. Reload the dashboard.' };
+
+  var now = new Date();
+  var who = actor ? actor.id : 'organiser';
+  roomSheet_().getRange(target.row, 1, 1, ROOM_HEADERS.length).setValues([[
+    matchId, code, roomId, roomPassword, releaseAt || '',
+    cleanText_(payload.notes).slice(0, 300), now, who
+  ]]);
+
+  // Room A is mirrored onto the Matches tab for readers that predate rooms.
+  if (code === 'A') {
+    var match = null;
+    var matches = readMatches_();
+    for (var i = 0; i < matches.length; i++) if (matches[i].id === matchId) match = matches[i];
+    if (match) {
+      var sheet = matchSheet_();
+      sheet.getRange(match.row, MATCH_COL.ROOM_ID).setValue(roomId);
+      sheet.getRange(match.row, MATCH_COL.ROOM_PASSWORD).setValue(roomPassword);
+      sheet.getRange(match.row, MATCH_COL.RELEASE).setValue(releaseAt || '');
+    }
+  }
+
+  orgAudit_(actor, 'room-save', matchId + ':' + code,
+    (roomId ? 'room id set' : 'room id cleared') +
+    (releaseAt ? ' · release ' + tournamentLabel_(releaseAt) : ''), 'ok');
+  return {
+    ok: true,
+    room: roomFor_(readRooms_(), matchId, code),
+    message: roomLabel_(code) + ' of ' + matchId + ' saved.'
+  };
+}
+
+/** 1 to 6 matches, stored once for the whole event or per stage. */
+function adminMatchCountSet_(payload, actor) {
+  var count = Number(payload.matchCount);
+  if (!isFinite(count) || count < 1 || count > 6 || Math.round(count) !== count) {
+    return { ok: false, code: 'COUNT', error: 'Choose a number of matches from 1 to 6.' };
+  }
+  var stage = cleanText_(payload.stage);
+  if (stage) {
+    var key = normaliseMatchStage_(stage);
+    var map = stageMatchCounts_();
+    map[key] = count;
+    saveSetting_('stage_match_counts', JSON.stringify(map), actor);
+    orgAudit_(actor, 'match-count', key, String(count), 'ok');
+    return { ok: true, matchCount: configuredMatchCount_(), stageMatchCounts: stageMatchCounts_(), message: key + ' plays ' + count + ' match' + (count === 1 ? '' : 'es') + '.' };
+  }
+  saveSetting_('match_count', String(count), actor);
+  orgAudit_(actor, 'match-count', 'all stages', String(count), 'ok');
+  return { ok: true, matchCount: count, message: 'The tournament now plays ' + count + ' match' + (count === 1 ? '' : 'es') + '.' };
+}
+
+/**
+ * Saves every result of one room in a single call: the grid the organiser
+ * fills row by row is one save, so a slow script cannot leave half a room
+ * written. Validated again here — the browser is never trusted.
+ */
+function adminRoomResultsSave_(payload, actor) {
+  var matchId = normaliseMatchId_(payload.matchId);
+  if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose a match.' };
+  var code = normaliseRoomCode_(payload.room || 'A');
+  if (!code) return { ok: false, code: 'ROOM', error: 'Choose a room.' };
+  var rows = payload.rows && payload.rows.length !== undefined ? payload.rows : [];
+  if (!rows.length) return { ok: false, code: 'EMPTY', error: 'There is nothing to save.' };
+
+  var assignments = readMatchTeams_();
+  var seated = {};
+  for (var a = 0; a < assignments.length; a++) {
+    if (assignments[a].state !== 'ACTIVE' || assignments[a].matchId !== matchId || assignments[a].room !== code) continue;
+    seated[assignments[a].teamId] = assignments[a];
+  }
+
+  var results = readResults_();
+  var existing = {};
+  for (var r = 0; r < results.length; r++) {
+    if (results[r].matchId !== matchId) continue;
+    existing[results[r].teamId] = results[r];
+  }
+
+  var points = placementPoints_();
+  var perKill = killPoints_();
+  var usedPlacements = {};
+  var usedTeams = {};
+  var prepared = [];
+  var lockNote = '';
+
+  for (var i = 0; i < rows.length; i++) {
+    var input = rows[i] || {};
+    var teamId = cleanText_(input.teamId);
+    if (!teamId || !seated[teamId]) {
+      return { ok: false, code: 'ASSIGN', error: 'A team in that table is no longer in ' + roomLabel_(code) + '. Reload the page.' };
+    }
+    if (usedTeams[teamId]) {
+      return { ok: false, code: 'DUP', error: 'The same team appears twice in this room.' };
+    }
+    usedTeams[teamId] = true;
+
+    var placement = Number(input.placement);
+    var kills = Number(input.kills);
+    if (!isFinite(placement) || placement < 1 || placement > MATCH_ROOM_SIZE || Math.round(placement) !== placement) {
+      return { ok: false, code: 'PLACEMENT', error: 'Placement must be a whole number from 1 to 12.' };
+    }
+    if (!isFinite(kills) || kills < 0 || kills > 100 || Math.round(kills) !== kills) {
+      return { ok: false, code: 'KILLS', error: 'Kills must be a whole number from 0 to 100.' };
+    }
+    if (usedPlacements[placement]) {
+      return { ok: false, code: 'PLACEMENT', error: 'Placement ' + placement + ' is used twice in ' + roomLabel_(code) + '.' };
+    }
+    usedPlacements[placement] = true;
+
+    var current = existing[teamId];
+    if (current && (current.status === 'VERIFIED' || current.status === 'PUBLISHED') && payload.correct !== true) {
+      return {
+        ok: false, code: 'CORRECTION',
+        error: 'Correcting a locked result needs a confirmed correction. ' + matchId + ' ' + roomLabel_(code) + ' is ' + current.status.toLowerCase() + '.'
+      };
+    }
+    if (current && current.status === 'PUBLISHED') lockNote = 'published';
+
+    var placementPoints = Number(points[placement - 1]) || 0;
+    var killPoints = Math.round(kills * perKill * 100) / 100;
+    prepared.push({
+      teamId: teamId,
+      teamName: seated[teamId].teamName,
+      placement: placement,
+      kills: kills,
+      placementPoints: placementPoints,
+      killPoints: killPoints,
+      total: Math.round((placementPoints + killPoints) * 100) / 100,
+      previous: current ? {
+        placement: current.placement, kills: current.kills, total: current.total, status: current.status
+      } : null
+    });
+  }
+
+  var sheet = resultSheet_();
+  var now = new Date();
+  var who = actor ? actor.id : 'organiser';
+  var notes = cleanText_(payload.notes).slice(0, 300);
+  for (var p = 0; p < prepared.length; p++) {
+    var row = prepared[p];
+    var target = existing[row.teamId];
+    var values = [matchId, row.teamId, row.teamName, row.placement, row.kills,
+      row.placementPoints, row.killPoints, row.total, 'DRAFT', notes, now, who, '', code];
+    if (target) sheet.getRange(target.row, 1, 1, RESULT_HEADERS.length).setValues([values]);
+    else sheet.appendRow(values);
+    if (row.previous && (row.previous.placement !== row.placement || row.previous.kills !== row.kills)) {
+      orgAudit_(actor, 'result-correct', matchId + ':' + code + ':' + row.teamId,
+        'was P' + row.previous.placement + ' / ' + row.previous.kills + ' kills (' + row.previous.total + ' pts, ' + row.previous.status + ')' +
+        ' → P' + row.placement + ' / ' + row.kills + ' kills (' + row.total + ' pts)', 'ok');
+    }
+  }
+
+  orgAudit_(actor, 'room-result-save', matchId + ':' + code, prepared.length + ' row(s)', 'ok');
+  return {
+    ok: true,
+    saved: prepared.length,
+    message: prepared.length + ' result(s) saved for ' + matchId + ' ' + roomLabel_(code) + ' as draft.' +
+      (lockNote ? ' The earlier published version stays in the audit trail.' : '')
+  };
+}
+
+/** Moves one room's results along Draft → Submitted → Verified → Published. */
+function adminRoomResultStatus_(payload, actor) {
+  var matchId = normaliseMatchId_(payload.matchId);
+  if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose a match.' };
+  var code = normaliseRoomCode_(payload.room || 'A');
+  if (!code) return { ok: false, code: 'ROOM', error: 'Choose a room.' };
+  var status = cleanText_(payload.status).toUpperCase();
+  if (status === 'SUBMITTED') status = 'APPROVED';
+  if (status === 'VERIFIED') status = 'VERIFIED';
+  if (RESULT_STATUSES.indexOf(status) === -1) {
+    return { ok: false, code: 'STATUS', error: 'Unknown result status.' };
+  }
+
+  var assignments = readMatchTeams_();
+  var results = attachResultRooms_(readResults_(), assignments);
+  var rows = [];
+  for (var i = 0; i < results.length; i++) {
+    if (results[i].matchId === matchId && (results[i].room || 'A') === code) rows.push(results[i]);
+  }
+  if (!rows.length) return { ok: false, code: 'EMPTY', error: 'Enter results for ' + roomLabel_(code) + ' first.' };
+  if (status === 'PUBLISHED') {
+    for (var d = 0; d < rows.length; d++) {
+      if (rows[d].status === 'DRAFT') {
+        return { ok: false, code: 'DRAFTS', error: 'Submit ' + roomLabel_(code) + ' results before publishing them.' };
+      }
+    }
+  }
+
+  var sheet = resultSheet_();
+  var now = new Date();
+  for (var r = 0; r < rows.length; r++) {
+    sheet.getRange(rows[r].row, RESULT_COL.STATUS).setValue(status);
+    sheet.getRange(rows[r].row, RESULT_COL.ROOM).setValue(code);
+    if (status === 'PUBLISHED') sheet.getRange(rows[r].row, RESULT_COL.PUBLISHED).setValue(now);
+  }
+  orgAudit_(actor, 'room-result-status', matchId + ':' + code, status + ' · ' + rows.length + ' row(s)', 'ok');
+  return { ok: true, status: status, message: matchId + ' ' + roomLabel_(code) + ' results are ' + status.toLowerCase() + '.' };
+}
+
+/**
+ * Attaches a referee photo to one room's result submission. Optional, and only
+ * images are accepted. The bytes go to Drive; the sheet keeps the reference.
+ */
+function adminResultEvidence_(payload, actor) {
+  var matchId = normaliseMatchId_(payload.matchId);
+  if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose a match.' };
+  var code = normaliseRoomCode_(payload.room || 'A');
+  if (!code) return { ok: false, code: 'ROOM', error: 'Choose a room.' };
+  var mime = cleanText_(payload.mimeType).toLowerCase();
+  var allowed = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/webp': 'webp' };
+  if (!allowed[mime]) return { ok: false, code: 'TYPE', error: 'Evidence must be a PNG, JPEG or WebP image.' };
+  var data = cleanText_(payload.dataBase64);
+  if (!data) return { ok: false, code: 'FILE', error: 'The image did not arrive. Try choosing it again.' };
+  var limit = CONFIG.EVIDENCE_MAX_BYTES || 1572864;
+  // Size is judged from the encoded length before decoding, so an oversized
+  // upload is refused without ever being decoded.
+  if (Math.floor((data.length * 3) / 4) > limit + 3) {
+    return { ok: false, code: 'SIZE', error: 'Evidence must be 1.5 MB or smaller.' };
+  }
+  var bytes;
+  try { bytes = Utilities.base64Decode(data); } catch (error) {
+    return { ok: false, code: 'FILE', error: 'The image could not be read.' };
+  }
+  if (bytes.length > limit) {
+    return { ok: false, code: 'SIZE', error: 'Evidence must be 1.5 MB or smaller.' };
+  }
+  if (typeof DriveApp === 'undefined') {
+    return { ok: false, code: 'DRIVE', error: 'Evidence storage is not available here.' };
+  }
+
+  var match = null;
+  var matches = readMatches_();
+  for (var i = 0; i < matches.length; i++) if (matches[i].id === matchId) match = matches[i];
+  var name = 'evidence-' + matchId + '-room-' + code + '-' + new Date().getTime() + '.' + allowed[mime];
+  var file;
+  try {
+    var folder;
+    var folders = DriveApp.getFoldersByName(CONFIG.EVIDENCE_FOLDER || 'QQSGP Referee Evidence');
+    folder = folders.hasNext() ? folders.next() : DriveApp.createFolder(CONFIG.EVIDENCE_FOLDER || 'QQSGP Referee Evidence');
+    file = folder.createFile(Utilities.newBlob(bytes, mime, name));
+    try { file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); } catch (ignored) {}
+  } catch (error) {
+    return { ok: false, code: 'DRIVE', error: 'The evidence could not be saved: ' + messageOf_(error) };
+  }
+
+  var url = 'https://drive.google.com/file/d/' + file.getId() + '/view';
+  var sheet = evidenceSheet_();
+  var existing = evidenceFor_(matchId, code);
+  var now = new Date();
+  var who = actor ? actor.id : 'organiser';
+  var values = [matchId, code, file.getId(), url, name, mime, bytes.length, now, who,
+    match ? match.stage : 'QUALIFIER'];
+  if (existing) sheet.getRange(existing.row, 1, 1, EVIDENCE_HEADERS.length).setValues([values]);
+  else sheet.appendRow(values);
+
+  orgAudit_(actor, 'result-evidence', matchId + ':' + code, name, 'ok');
+  return { ok: true, evidence: evidenceFor_(matchId, code), message: 'Referee photo attached to ' + matchId + ' ' + roomLabel_(code) + '.' };
 }
 
 function adminMatchSave_(payload, actor) {
@@ -6885,22 +7640,38 @@ function adminMatchSave_(payload, actor) {
     return { ok: false, code: 'DATE', error: 'The scheduled date and time is not valid.' };
   }
 
-  var roomId = cleanText_(payload.roomId).slice(0, 40);
-  var roomPassword = cleanText_(payload.roomPassword).slice(0, 40);
-  var releaseAt = cleanText_(payload.releaseAt) ? tournamentDateTime_(payload.releaseAt) : null;
-  if (cleanText_(payload.releaseAt) && !releaseAt) {
-    return { ok: false, code: 'DATE', error: 'The room release time is not valid.' };
-  }
-  if ((roomId || roomPassword) && !releaseAt) {
-    return { ok: false, code: 'RELEASE', error: 'Set a room release time. Credentials must never be visible early.' };
-  }
-  var notes = cleanText_(payload.notes).slice(0, 500);
-
   var sheet = matchSheet_();
   var matches = readMatches_();
   var target = null;
   for (var i = 0; i < matches.length; i++) if (matches[i].id === matchId) target = matches[i];
   if (!target) return { ok: false, code: 'MATCH', error: 'That match row is missing. Reload the dashboard.' };
+
+  /* Credentials belong to a room, not to a match. They are only touched when
+     the caller actually sends the fields, so saving a new schedule cannot
+     wipe Room A's Room ID and password. Room A is mirrored onto this row for
+     readers that predate rooms. */
+  var credentialFields = payload.roomId !== undefined || payload.roomPassword !== undefined ||
+    payload.releaseAt !== undefined;
+  var roomARow = roomFor_(readRooms_(), matchId, 'A');
+  var roomId;
+  var roomPassword;
+  var releaseAt;
+  if (credentialFields) {
+    roomId = cleanText_(payload.roomId).slice(0, 40);
+    roomPassword = cleanText_(payload.roomPassword).slice(0, 40);
+    releaseAt = cleanText_(payload.releaseAt) ? tournamentDateTime_(payload.releaseAt) : null;
+    if (cleanText_(payload.releaseAt) && !releaseAt) {
+      return { ok: false, code: 'DATE', error: 'The room release time is not valid.' };
+    }
+    if ((roomId || roomPassword) && !releaseAt) {
+      return { ok: false, code: 'RELEASE', error: 'Set a room release time. Credentials must never be visible early.' };
+    }
+  } else {
+    roomId = roomARow ? roomARow.roomId : target.roomId;
+    roomPassword = roomARow ? roomARow.roomPassword : target.roomPassword;
+    releaseAt = tournamentDateTime_(roomARow && roomARow.releaseAt ? roomARow.releaseAt : target.releaseAt);
+  }
+  var notes = cleanText_(payload.notes).slice(0, 500);
 
   var stage = normaliseMatchStage_(payload.stage || target.stage || 'QUALIFIER');
   var room = cleanText_(payload.roomLabel !== undefined ? payload.roomLabel : target.room).slice(0, 20);
@@ -6913,6 +7684,12 @@ function adminMatchSave_(payload, actor) {
     status === 'COMPLETED' && !target.publishedAt ? now : (target.publishedAt || ''),
     stage, room
   ]]);
+
+  if (credentialFields && roomARow) {
+    roomSheet_().getRange(roomARow.row, 1, 1, ROOM_HEADERS.length).setValues([[
+      matchId, 'A', roomId, roomPassword, releaseAt || '', roomARow.notes || '', now, who
+    ]]);
+  }
 
   var fresh = null;
   var all = readMatches_();
@@ -6954,14 +7731,20 @@ function adminMatchAssign_(payload, actor) {
     return { ok: false, code: 'STATUS', error: 'Only an approved team can be assigned to a match.' };
   }
 
+  var code = normaliseRoomCode_(payload.room || 'A');
+  if (!code) return { ok: false, code: 'ROOM', error: 'Choose a room.' };
+
   var sheet = matchTeamSheet_();
   var list = readMatchTeams_();
-  var existing = null;
+  var existing = null;   // a withdrawn row of this team that can be reused
+  var live = null;       // this team's active seat anywhere in the match
   var slotTaken = {};
   var activeCount = 0;
   for (var i = 0; i < list.length; i++) {
     if (list[i].matchId !== matchId) continue;
     if (list[i].state === 'ACTIVE') {
+      if (list[i].teamId === teamId) live = list[i];
+      if (list[i].room !== code) continue;
       activeCount++;
       slotTaken[list[i].slot] = true;
       if (list[i].teamId === teamId) existing = list[i];
@@ -6969,32 +7752,46 @@ function adminMatchAssign_(payload, actor) {
       existing = list[i];
     }
   }
-  if (existing && existing.state === 'ACTIVE') return { ok: true, already: true, matchId: matchId, teamId: teamId };
+
+  /* A team plays one seat per match. A later match (another M number) is a new
+     match, so a qualified team is never blocked from the next stage. */
+  if (live) {
+    return {
+      ok: false, code: 'ALREADY', already: true, matchId: matchId, teamId: teamId,
+      room: live.room, slot: live.slot,
+      error: 'This team is already assigned to ' + roomLabel_(live.room) + ' — Slot ' + live.slot + '.'
+    };
+  }
   if (activeCount >= MATCH_ROOM_SIZE) {
-    return { ok: false, code: 'FULL', error: 'All 12 slots in this room are taken.' };
+    return { ok: false, code: 'FULL', error: 'All 12 slots in ' + roomLabel_(code) + ' are taken.' };
   }
 
   var requestedSlot = Number(payload.slot) || 0;
   if (requestedSlot && (requestedSlot < 1 || requestedSlot > MATCH_ROOM_SIZE || slotTaken[requestedSlot])) {
-    return { ok: false, code: 'SLOT', error: 'Choose a free slot from 1 to 12.' };
+    return {
+      ok: false, code: 'SLOT',
+      error: requestedSlot >= 1 && requestedSlot <= MATCH_ROOM_SIZE
+        ? 'Slot ' + requestedSlot + ' is already taken in ' + roomLabel_(code) + '.'
+        : 'Choose a free slot from 1 to 12.'
+    };
   }
   var slot = requestedSlot;
   if (!slot) {
     for (var s = 1; s <= MATCH_ROOM_SIZE; s++) if (!slotTaken[s]) { slot = s; break; }
   }
-  if (!slot) return { ok: false, code: 'FULL', error: 'All 12 slots in this room are taken.' };
+  if (!slot) return { ok: false, code: 'FULL', error: 'All 12 slots in ' + roomLabel_(code) + ' are taken.' };
 
   var now = new Date();
   var who = actor ? actor.id : 'organiser';
   if (existing) {
     sheet.getRange(existing.row, 1, 1, MATCH_TEAM_HEADERS.length).setValues([[
-      matchId, teamId, record.teamName, slot, now, who, 'ACTIVE'
+      matchId, teamId, record.teamName, slot, now, who, 'ACTIVE', code
     ]]);
   } else {
-    sheet.appendRow([matchId, teamId, record.teamName, slot, now, who, 'ACTIVE']);
+    sheet.appendRow([matchId, teamId, record.teamName, slot, now, who, 'ACTIVE', code]);
   }
 
-  orgAudit_(actor, 'match-assign', matchId + ':' + teamId, record.teamName + ' · slot ' + slot, 'ok');
+  orgAudit_(actor, 'match-assign', matchId + ':' + teamId, record.teamName + ' · ' + roomLabel_(code) + ' slot ' + slot, 'ok');
 
   try {
     var match = null;
@@ -7008,116 +7805,29 @@ function adminMatchAssign_(payload, actor) {
     console.error('Assignment notification failed: ' + messageOf_(error));
   }
 
-  return { ok: true, matchId: matchId, teamId: teamId, slot: slot, message: record.teamName + ' added to ' + matchId + '.' };
+  return {
+    ok: true, matchId: matchId, teamId: teamId, room: code, slot: slot,
+    message: record.teamName + ' added to ' + matchId + ' ' + roomLabel_(code) + ' — Slot ' + slot + '.'
+  };
 }
 
 function adminMatchUnassign_(payload, actor) {
   var matchId = normaliseMatchId_(payload.matchId);
   var teamId = cleanText_(payload.teamId);
   if (!matchId || !teamId) return { ok: false, code: 'INPUT', error: 'Choose a match and a team.' };
+  var wanted = cleanText_(payload.room) ? normaliseRoomCode_(payload.room) : '';
   var list = readMatchTeams_();
   var target = null;
   for (var i = 0; i < list.length; i++) {
-    if (list[i].matchId === matchId && list[i].teamId === teamId && list[i].state === 'ACTIVE') target = list[i];
+    if (list[i].matchId !== matchId || list[i].teamId !== teamId || list[i].state !== 'ACTIVE') continue;
+    if (wanted && list[i].room !== wanted) continue;
+    target = list[i];
   }
   if (!target) return { ok: false, code: 'NOT_FOUND', error: 'That team is not assigned to this match.' };
 
   matchTeamSheet_().getRange(target.row, MATCH_TEAM_COL.STATE).setValue('WITHDRAWN');
-  orgAudit_(actor, 'match-unassign', matchId + ':' + teamId, target.teamName + ' withdrawn', 'ok');
-  return { ok: true, message: target.teamName + ' removed from ' + matchId + '.' };
-}
-
-/**
- * Adds one more 12-slot room after the last existing room. The id itself is
- * never taken from the browser: the next free number is worked out here, so a
- * stale dashboard tab cannot create the same room twice.
- */
-function adminMatchAdd_(payload, actor) {
-  var ids = tournamentMatchIds_();
-  if (ids.length >= 60) {
-    return { ok: false, code: 'LIMIT', error: 'That is already 60 rooms. Leave one unused before adding another.' };
-  }
-
-  var next = 1;
-  for (var i = 0; i < ids.length; i++) {
-    var no = Number(ids[i].slice(1)) || 0;
-    if (no >= next) next = no + 1;
-  }
-
-  var id = 'M' + next;
-  var stage = normaliseMatchStage_(payload.stage || 'QUALIFIER');
-  var room = cleanText_(payload.roomLabel).slice(0, 20);
-
-  try {
-    PropertiesService.getScriptProperties()
-      .setProperty(MATCH_IDS_PROPERTY, JSON.stringify(ids.concat([id])));
-  } catch (error) {
-    return { ok: false, code: 'STORE', error: 'The room list could not be saved. Try again.' };
-  }
-
-  // ensureTournamentSheets_ reads the list that was just saved, so the new
-  // Matches row (and the two other tabs, if this is the first run) appears now.
-  var sheet = matchSheet_();
-  var matches = readMatches_();
-  var fresh = null;
-  for (var m = 0; m < matches.length; m++) if (matches[m].id === id) fresh = matches[m];
-  if (!fresh) {
-    return { ok: false, code: 'MATCH', error: 'The new room row could not be created. Reload the dashboard.' };
-  }
-
-  var now = new Date();
-  sheet.getRange(fresh.row, MATCH_COL.STAGE).setValue(stage);
-  sheet.getRange(fresh.row, MATCH_COL.ROOM).setValue(room);
-  sheet.getRange(fresh.row, MATCH_COL.UPDATED).setValue(now);
-  sheet.getRange(fresh.row, MATCH_COL.UPDATED_BY).setValue(actor ? actor.id : 'organiser');
-
-  var all = readMatches_();
-  for (var a = 0; a < all.length; a++) if (all[a].id === id) fresh = all[a];
-  fresh.teams = [];
-  fresh.teamCount = 0;
-  fresh.resultCount = 0;
-  fresh.publishedCount = 0;
-
-  orgAudit_(actor, 'match-add', id, stage + (room ? ' · ' + room : ''), 'ok');
-  return { ok: true, match: fresh, message: id + ' added — a new 12-slot room.' };
-}
-
-/**
- * Deletes a room that was added from the dashboard. The fixed qualifier rooms
- * are never removed, and a room that already holds a team or a result is kept
- * as evidence, so deleting can never erase tournament data.
- */
-function adminMatchRemove_(payload, actor) {
-  var matchId = normaliseMatchId_(payload.matchId);
-  if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose a room.' };
-
-  var fixedRooms = CONFIG.MATCH_IDS || ['M1', 'M2', 'M3', 'M4', 'M5', 'M6'];
-  if (fixedRooms.indexOf(matchId) !== -1) {
-    return { ok: false, code: 'FIXED', error: 'The qualifier rooms ' + fixedRooms.join(', ') + ' cannot be deleted.' };
-  }
-
-  var teams = activeMatchTeamIds_(matchId);
-  if (teams.length) {
-    return { ok: false, code: 'IN_USE', error: 'Remove the teams from ' + matchId + ' before deleting the room.' };
-  }
-  var results = readResults_();
-  for (var i = 0; i < results.length; i++) {
-    if (results[i].matchId === matchId) {
-      return { ok: false, code: 'IN_USE', error: matchId + ' already has results, so it stays on the board.' };
-    }
-  }
-
-  var kept = [];
-  var ids = tournamentMatchIds_();
-  for (var k = 0; k < ids.length; k++) if (ids[k] !== matchId) kept.push(ids[k]);
-  try {
-    PropertiesService.getScriptProperties().setProperty(MATCH_IDS_PROPERTY, JSON.stringify(kept));
-  } catch (error) {
-    return { ok: false, code: 'STORE', error: 'The room list could not be saved. Try again.' };
-  }
-
-  orgAudit_(actor, 'match-remove', matchId, 'empty room deleted', 'ok');
-  return { ok: true, message: matchId + ' deleted. Its sheet row stays as a record.' };
+  orgAudit_(actor, 'match-unassign', matchId + ':' + teamId, target.teamName + ' withdrawn from ' + roomLabel_(target.room), 'ok');
+  return { ok: true, room: target.room, message: target.teamName + ' removed from ' + matchId + ' ' + roomLabel_(target.room) + '.' };
 }
 
 function adminResultSave_(payload, actor) {
@@ -7126,9 +7836,14 @@ function adminResultSave_(payload, actor) {
   if (!matchId) return { ok: false, code: 'MATCH', error: 'Choose a match.' };
   if (!teamId) return { ok: false, code: 'TEAM', error: 'Choose a team.' };
 
-  var assigned = activeMatchTeamIds_(matchId);
-  if (assigned.indexOf(teamId) === -1) {
+  var assignments = readMatchTeams_();
+  var seat = assignmentFor_(assignments, matchId, teamId);
+  if (!seat) {
     return { ok: false, code: 'ASSIGN', error: 'Assign that team to the match before entering a result.' };
+  }
+  var code = normaliseRoomCode_(payload.room || seat.room) || seat.room || 'A';
+  if (seat.room !== code) {
+    return { ok: false, code: 'ROOM', error: 'That team sits in ' + roomLabel_(seat.room) + ', not ' + roomLabel_(code) + '.' };
   }
   var record = tournamentTeam_(teamId);
   if (!record) return { ok: false, code: 'TEAM', error: 'That team is not in the registration sheet.' };
@@ -7142,13 +7857,18 @@ function adminResultSave_(payload, actor) {
     return { ok: false, code: 'KILLS', error: 'Kills must be a whole number from 0 to 100.' };
   }
 
-  var results = readResults_();
+  var results = attachResultRooms_(readResults_(), assignments);
   var existing = null;
   for (var i = 0; i < results.length; i++) {
-    if (results[i].matchId === matchId && results[i].teamId === teamId) existing = results[i];
-    if (results[i].matchId === matchId && results[i].teamId !== teamId &&
-        Number(results[i].placement) === placement) {
-      return { ok: false, code: 'PLACEMENT', error: 'Placement ' + placement + ' is already used by ' + results[i].teamName + '.' };
+    if (results[i].matchId !== matchId) continue;
+    if (results[i].teamId === teamId) {
+      existing = results[i];
+      continue;
+    }
+    /* Placements only clash inside one room: Room A's 1st and Room B's 1st are
+       both legitimate. */
+    if ((results[i].room || 'A') === code && Number(results[i].placement) === placement) {
+      return { ok: false, code: 'PLACEMENT', error: 'Placement ' + placement + ' is already used in ' + roomLabel_(code) + ' by ' + results[i].teamName + '.' };
     }
   }
 
@@ -7159,7 +7879,7 @@ function adminResultSave_(payload, actor) {
   var now = new Date();
   var who = actor ? actor.id : 'organiser';
   var notes = cleanText_(payload.notes).slice(0, 300);
-  var row = [matchId, teamId, record.teamName, placement, kills, placementPoints, killPoints, total, 'DRAFT', notes, now, who, ''];
+  var row = [matchId, teamId, record.teamName, placement, kills, placementPoints, killPoints, total, 'DRAFT', notes, now, who, '', code];
 
   if (existing) {
     resultSheet_().getRange(existing.row, 1, 1, RESULT_HEADERS.length).setValues([row]);
@@ -7260,14 +7980,47 @@ function adminResultUnpublish_(payload, actor) {
 function publicSchedule_() {
   var matches = readMatches_();
   var results = readResults_();
+  var rooms = readRooms_();
+  var assignments = readMatchTeams_();
+  var codes = matchRoomCodes_();
   var out = [];
+  var stageIndex = {};
   for (var i = 0; i < matches.length; i++) {
     var match = matches[i];
+    /* Only the configured number of matches per stage is public. */
+    var used = stageIndex[match.stage] || 0;
+    stageIndex[match.stage] = used + 1;
+    if (used >= matchCountForStage_(match.stage)) continue;
+
     var published = 0;
     for (var r = 0; r < results.length; r++) {
       if (results[r].matchId === match.id && results[r].status === 'PUBLISHED') published++;
     }
-    var released = match.roomReleased && match.status !== 'CANCELLED';
+
+    var publicRooms = [];
+    for (var c = 0; c < codes.length; c++) {
+      var room = roomFor_(rooms, match.id, codes[c]);
+      var seats = 0;
+      for (var a = 0; a < assignments.length; a++) {
+        if (assignments[a].state === 'ACTIVE' && assignments[a].matchId === match.id && assignments[a].room === codes[c]) seats++;
+      }
+      /* The only place a password can reach the browser: the room's own release
+         time has passed. Being "Scheduled" is never enough. */
+      var released = !!(room && room.roomReleased) && match.status !== 'CANCELLED';
+      publicRooms.push({
+        room: codes[c],
+        label: roomLabel_(codes[c]),
+        seats: seats,
+        released: released,
+        id: released ? room.roomId : '',
+        password: released ? room.roomPassword : '',
+        releasedAt: released ? room.releaseAt : '',
+        releaseAt: room ? room.releaseLabel : '',
+        releaseAtIso: room ? room.releaseAt : ''
+      });
+    }
+
+    var firstRoom = publicRooms[0];
     out.push({
       id: match.id,
       map: match.map,
@@ -7276,10 +8029,14 @@ function publicSchedule_() {
       scheduledAt: match.scheduledAt,
       scheduledLabel: match.scheduledLabel,
       status: match.status,
-      room: released ? { id: match.roomId, password: match.roomPassword, releasedAt: match.releaseAt } : null,
-      releaseAt: match.releaseLabel,
-      releaseAtIso: match.releaseAt,
-      roomReleased: released,
+      matchRooms: publicRooms,
+      rooms: publicRooms,
+      room: firstRoom && firstRoom.released
+        ? { id: firstRoom.id, password: firstRoom.password, releasedAt: firstRoom.releasedAt }
+        : null,
+      releaseAt: firstRoom ? firstRoom.releaseAt : match.releaseLabel,
+      releaseAtIso: firstRoom ? firstRoom.releaseAtIso : match.releaseAt,
+      roomReleased: !!(firstRoom && firstRoom.released),
       resultsPublished: published > 0,
       publishedCount: published,
       notes: match.notes
@@ -7289,12 +8046,15 @@ function publicSchedule_() {
 }
 
 function publicResults_() {
-  var results = readResults_();
+  var assignments = readMatchTeams_();
+  var results = attachResultRooms_(readResults_(), assignments);
   var published = [];
   for (var i = 0; i < results.length; i++) {
     if (results[i].status === 'PUBLISHED') {
       published.push({
         matchId: results[i].matchId,
+        room: results[i].room || 'A',
+        roomLabel: roomLabel_(results[i].room || 'A'),
         teamId: results[i].teamId,
         teamName: results[i].teamName,
         placement: results[i].placement,
@@ -7309,26 +8069,55 @@ function publicResults_() {
   // Rank each room separately, #1 through #12. The public table must show the
   // same order as the organiser's result table.
   var tie = tieBreakers_();
+  /* Each room is ranked on its own, then every match and every stage gets a
+     combined board. Room A's #1 is never assumed to beat Room B's #1. */
+  var byMatchRoom = {};
   var byMatch = {};
   for (var p = 0; p < published.length; p++) {
-    var key = published[p].matchId;
-    if (!byMatch[key]) byMatch[key] = [];
-    byMatch[key].push(published[p]);
+    var roomKey = published[p].matchId + '|' + published[p].room;
+    if (!byMatchRoom[roomKey]) byMatchRoom[roomKey] = [];
+    byMatchRoom[roomKey].push(published[p]);
+    if (!byMatch[published[p].matchId]) byMatch[published[p].matchId] = [];
+    byMatch[published[p].matchId].push(published[p]);
   }
+
   var ranked = [];
+  var roomBoards = {};
+  var roomKeys = [];
+  for (var rk in byMatchRoom) if (Object.prototype.hasOwnProperty.call(byMatchRoom, rk)) roomKeys.push(rk);
+  roomKeys.sort();
+  for (var k = 0; k < roomKeys.length; k++) {
+    var roomRows = sortByTieBreakers_(byMatchRoom[roomKeys[k]], tie);
+    for (var rr = 0; rr < roomRows.length; rr++) {
+      roomRows[rr].rank = rr + 1;
+      ranked.push(roomRows[rr]);
+    }
+    roomBoards[roomKeys[k]] = roomRows;
+  }
+
+  var matchBoards = {};
   var matchIds = [];
   for (var id in byMatch) if (Object.prototype.hasOwnProperty.call(byMatch, id)) matchIds.push(id);
   matchIds.sort();
   for (var m = 0; m < matchIds.length; m++) {
     var rows = sortByTieBreakers_(byMatch[matchIds[m]], tie);
-    for (var r = 0; r < rows.length; r++) {
-      rows[r].rank = r + 1;
-      ranked.push(rows[r]);
-    }
+    for (var r = 0; r < rows.length; r++) rows[r].rank = r + 1;
+    matchBoards[matchIds[m]] = rows;
   }
+
+  var matches = readMatches_();
+  var stageBoards = {};
+  for (var s = 0; s < MATCH_STAGES.length; s++) {
+    stageBoards[MATCH_STAGES[s]] = stageBoard_(MATCH_STAGES[s], matches, results,
+      matchCountForStage_(MATCH_STAGES[s]));
+  }
+
   return {
     ok: true,
     results: ranked,
+    roomBoards: roomBoards,
+    matchBoards: matchBoards,
+    stageBoards: stageBoards,
     leaderboard: leaderboard_(results, true),
     tieBreakers: tie,
     generatedAt: new Date().toISOString()

@@ -1045,3 +1045,12 @@ footer {
   .public-board { padding: 18px; margin: 18px 0; border-radius: 16px; }
   .schedule-grid { grid-template-columns: 1fr; }
 }
+
+/* Room-by-room credentials on the public schedule */
+.room-block { margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,.12); }
+.room-block .room-name {
+  display: block; margin-bottom: 6px;
+  font: 600 11px/1 "Space Grotesk", Inter, sans-serif;
+  letter-spacing: .18em; text-transform: uppercase; color: var(--muted, #B5BAC3);
+}
+.room-block .room-seats { display: block; margin-top: 6px; font-size: 11px; color: var(--muted, #B5BAC3); }

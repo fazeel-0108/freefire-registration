@@ -367,6 +367,48 @@ sandbox.Utilities.computeHmacSha256Signature = (value, key) => {
   return Array.from(digest).map(b => (b > 127 ? b - 256 : b));
 };
 
+// Drive is only used by referee evidence. The mock keeps the blobs in memory
+// so the upload path (create folder, create file, share, record the link) can
+// be exercised without a Google account.
+sandbox.Utilities.base64Decode = (data) => Array.from(Buffer.from(String(data), 'base64'));
+sandbox.Utilities.newBlob = (bytes, mime, name) => ({
+  getBytes: () => bytes.slice(),
+  getContentType: () => mime,
+  getName: () => name
+});
+const driveFolders = [];
+let driveFileSeq = 0;
+function driveIterator(list) {
+  let index = 0;
+  return { hasNext: () => index < list.length, next: () => list[index++] };
+}
+sandbox.DriveApp = {
+  Access: { ANYONE_WITH_LINK: 'ANYONE_WITH_LINK' },
+  Permission: { VIEW: 'VIEW' },
+  getFoldersByName: (name) => driveIterator(driveFolders.filter(f => f.name === name)),
+  createFolder: (name) => {
+    const folder = {
+      name: name,
+      createFile: (blob) => {
+        const file = {
+          id: 'drive-file-' + (driveFileSeq += 1),
+          name: blob.getName(),
+          mime: blob.getContentType(),
+          bytes: blob.getBytes(),
+          sharing: null,
+          getId() { return this.id; },
+          setSharing(access, permission) { this.sharing = access + '/' + permission; return this; }
+        };
+        folder.files = folder.files || [];
+        folder.files.push(file);
+        return file;
+      }
+    };
+    driveFolders.push(folder);
+    return folder;
+  }
+};
+
 vm.createContext(sandbox);
 vm.runInContext(SOURCE, sandbox, { filename: 'apps-script.js' });
 
@@ -3105,70 +3147,571 @@ check('manual UPI is accepted as PENDING, never PAID',
 check('manual UPI is the active default without gateway credentials',
   sandbox.publicConfig_().manualUpi === true && sandbox.publicConfig_().online === false);
 
-console.log('\n38. extra rooms can be added and a team removed from a room');
-const roomsBefore = sandbox.adminTournament_().matches.map(m => m.id).join(',');
-const addedRoom = adminCall({ action: 'match-add', session: superSession });
-check('the organiser can add a new room',
-  addedRoom.ok === true && addedRoom.match && addedRoom.match.id === 'M7', JSON.stringify(addedRoom));
-check('the new room sits after M6 on the board',
-  sandbox.adminTournament_().matches.map(m => m.id).join(',') === roomsBefore + ',M7',
-  sandbox.adminTournament_().matches.map(m => m.id).join(','));
-check('the new room starts empty and scheduled',
-  addedRoom.match.teamCount === 0 && addedRoom.match.status === 'SCHEDULED',
-  JSON.stringify({ teams: addedRoom.match.teamCount, status: addedRoom.match.status }));
-check('the public schedule lists the new room as well',
-  sandbox.publicSchedule_().matches.some(m => m.id === 'M7'));
-const secondRoom = adminCall({ action: 'match-add', session: superSession });
-check('a second add creates M8 instead of a duplicate M7',
-  secondRoom.ok === true && secondRoom.match.id === 'M8' &&
-  sandbox.adminTournament_().matches.map(m => m.id).join(',').slice(-5) === 'M7,M8',
-  JSON.stringify({ id: secondRoom.match && secondRoom.match.id }));
-const roomSaved = adminCall({
-  action: 'match-save', session: superSession, matchId: 'M7', map: 'Alpine',
-  scheduledAt: '2026-12-05T19:00', status: 'SCHEDULED', stage: 'KNOCKOUT 2'
-});
-check('a room added from the dashboard can be scheduled like any other',
-  roomSaved.ok === true && roomSaved.match.stage === 'KNOCKOUT 2' && roomSaved.match.map === 'Alpine',
-  JSON.stringify(roomSaved.match && { stage: roomSaved.match.stage, map: roomSaved.match.map }));
+/* Approves teams until at least `count` are approved, so the room tests do
+   not depend on which registration happened to be approved earlier. */
+function ensureApproved(count) {
+  const teams = sandbox.adminTeams_().teams || [];
+  for (let i = 0; i < teams.length; i++) {
+    const approvedNow = sandbox.adminTeams_().teams.filter(t => t.status === 'APPROVED').length;
+    if (approvedNow >= count) break;
+    if (teams[i].status === 'APPROVED') continue;
+    adminCall({ action: 'status', session: superSession, id: teams[i].id, status: 'APPROVED' });
+  }
+  return sandbox.adminTeams_().teams.filter(t => t.status === 'APPROVED');
+}
 
-const roomTeamCountBefore = sandbox.adminTournament_().matches[0].teams.length;
-const removedTeam = adminCall({
+console.log('\n38. every match plays Room A and Room B, and M7 can never appear');
+const board38 = sandbox.adminTournament_();
+check('the board lists exactly M1 to M6',
+  board38.matches.map(m => m.id).join(',') === 'M1,M2,M3,M4,M5,M6',
+  board38.matches.map(m => m.id).join(','));
+check('M7 and above are refused by the server',
+  sandbox.normaliseMatchId_('M7') === '' && sandbox.normaliseMatchId_('M6') === 'M6');
+check('each match exposes Room A and Room B',
+  board38.matches[0].rooms.map(r => r.room).join(',') === 'A,B',
+  board38.matches[0].rooms.map(r => r.room).join(','));
+check('the add-room action no longer exists',
+  adminCall({ action: 'match-add', session: superSession }).code === 'ACTION');
+check('the delete-room action no longer exists',
+  adminCall({ action: 'match-remove', session: superSession }).code === 'ACTION');
+
+console.log('\n39. Room A and Room B keep separate credentials and release times');
+const roomA39 = adminCall({
+  action: 'room-save', session: superSession, matchId: 'M1', room: 'A',
+  roomId: 'ROOM-A-1', roomPassword: 'pass-a', releaseAt: '2020-01-01T00:00'
+});
+check('Room A saves its own Room ID and password',
+  roomA39.ok === true && roomA39.room.roomId === 'ROOM-A-1', JSON.stringify(roomA39));
+const roomB39 = adminCall({
+  action: 'room-save', session: superSession, matchId: 'M1', room: 'B',
+  roomId: 'ROOM-B-1', roomPassword: 'pass-b', releaseAt: '2020-01-01T00:00'
+});
+check('Room B saves different credentials',
+  roomB39.ok === true && roomB39.room.roomId === 'ROOM-B-1', JSON.stringify(roomB39));
+const publicRooms39 = sandbox.publicSchedule_().matches.filter(m => m.id === 'M1')[0].rooms;
+check('the public schedule lists both rooms separately',
+  publicRooms39.length === 2 && publicRooms39[0].id === 'ROOM-A-1' && publicRooms39[1].id === 'ROOM-B-1',
+  JSON.stringify(publicRooms39));
+const futureRoom39 = adminCall({
+  action: 'room-save', session: superSession, matchId: 'M2', room: 'A',
+  roomId: 'ROOM-A-2', roomPassword: 'pass-a2', releaseAt: '2099-01-01T00:00'
+});
+const futurePublic39 = sandbox.publicSchedule_().matches.filter(m => m.id === 'M2')[0].rooms[0];
+check('credentials stay hidden until their own release time',
+  futureRoom39.ok === true && futurePublic39.id === '' && futurePublic39.password === '' &&
+  futurePublic39.released === false, JSON.stringify(futurePublic39));
+const noRelease39 = adminCall({
+  action: 'room-save', session: superSession, matchId: 'M3', room: 'B', roomId: 'X', roomPassword: 'Y'
+});
+check('credentials without a release time are refused',
+  noRelease39.ok === false && noRelease39.code === 'RELEASE', JSON.stringify(noRelease39));
+check('Room A credentials never leak into Room B',
+  sandbox.adminTournament_().matches[0].rooms[1].roomId === 'ROOM-B-1');
+
+console.log('\n40. slot assignment is per match and per room');
+const seats40 = sandbox.adminTournament_().matches[0].rooms;
+check('a team keeps its room and slot on the board',
+  seats40[0].teams.some(t => t.teamId === approvedTeam.id),
+  JSON.stringify(seats40.map(r => r.teams.map(t => t.teamName))));
+const duplicate40 = adminCall({
+  action: 'match-assign', session: superSession, matchId: 'M1', room: 'B', teamId: approvedTeam.id
+});
+check('the same team cannot be assigned twice in one match',
+  duplicate40.ok === false && duplicate40.code === 'ALREADY' &&
+  /already assigned to ROOM [AB] — Slot \d+/i.test(duplicate40.error), JSON.stringify(duplicate40));
+const laterMatch40 = adminCall({
+  action: 'match-assign', session: superSession, matchId: 'M3', teamId: approvedTeam.id
+});
+check('a qualified team can be assigned to a later match',
+  laterMatch40.ok === true && laterMatch40.room === 'A', JSON.stringify(laterMatch40));
+adminCall({ action: 'match-unassign', session: superSession, matchId: 'M3', teamId: approvedTeam.id });
+const roomBefore40 = sandbox.adminTournament_().matches[0].teams.length;
+const removedTeam40 = adminCall({
   action: 'match-unassign', session: superSession, matchId: 'M1', teamId: approvedTeam.id
 });
-check('a team can be removed from a room', removedTeam.ok === true, JSON.stringify(removedTeam));
-check('the removed team leaves the room chart',
-  sandbox.adminTournament_().matches[0].teams.length === roomTeamCountBefore - 1 &&
-  !sandbox.adminTournament_().matches[0].teams.some(t => t.teamId === approvedTeam.id));
+check('a team can be removed from its room',
+  removedTeam40.ok === true &&
+  sandbox.adminTournament_().matches[0].teams.length === roomBefore40 - 1, JSON.stringify(removedTeam40));
 check('removing a team keeps its published result for the record',
   sandbox.publicResults_().results.some(r => r.teamId === approvedTeam.id));
-const reassignedTeam = adminCall({
+const reassigned40 = adminCall({
   action: 'match-assign', session: superSession, matchId: 'M1', teamId: approvedTeam.id
 });
-check('a removed team can be put back into the room',
-  reassignedTeam.ok === true &&
+check('a removed team can be put back into a room',
+  reassigned40.ok === true &&
   sandbox.adminTournament_().matches[0].teams.some(t => t.teamId === approvedTeam.id),
-  JSON.stringify(reassignedTeam));
+  JSON.stringify(reassigned40));
 
-console.log('\n39. an empty added room can be deleted again');
-check('the board marks M8 as removable but not M1',
-  sandbox.adminTournament_().matches.filter(m => m.id === 'M8')[0].removable === true &&
-  sandbox.adminTournament_().matches.filter(m => m.id === 'M1')[0].removable === false);
-const fixedDelete = adminCall({ action: 'match-remove', session: superSession, matchId: 'M1' });
-check('a qualifier room cannot be deleted',
-  fixedDelete.ok === false && fixedDelete.code === 'FIXED', JSON.stringify(fixedDelete));
-const roomWithTeam = adminCall({ action: 'match-assign', session: superSession, matchId: 'M7', teamId: approvedTeam.id });
-const busyDelete = adminCall({ action: 'match-remove', session: superSession, matchId: 'M7' });
-check('a room that holds a team cannot be deleted',
-  roomWithTeam.ok === true && busyDelete.ok === false && busyDelete.code === 'IN_USE', JSON.stringify(busyDelete));
-adminCall({ action: 'match-unassign', session: superSession, matchId: 'M7', teamId: approvedTeam.id });
-const emptyDelete = adminCall({ action: 'match-remove', session: superSession, matchId: 'M8' });
-check('an empty added room can be deleted', emptyDelete.ok === true, JSON.stringify(emptyDelete));
-check('the deleted room leaves the board and the public schedule',
-  !sandbox.adminTournament_().matches.some(m => m.id === 'M8') &&
-  !sandbox.publicSchedule_().matches.some(m => m.id === 'M8'),
-  sandbox.adminTournament_().matches.map(m => m.id).join(','));
-check('the remaining added room is still there',
-  sandbox.adminTournament_().matches.some(m => m.id === 'M7'));
+console.log('\n41. room-wise results, statuses, correction and leaderboards');
+const pool41 = ensureApproved(3);
+const secondTeam41 = pool41.filter(t => t.id !== approvedTeam.id)[0];
+const thirdTeam41 = pool41.filter(t => t.id !== approvedTeam.id && t.id !== secondTeam41.id)[0];
+if (secondTeam41 && thirdTeam41) {
+  const inB = adminCall({
+    action: 'match-assign', session: superSession, matchId: 'M1', room: 'B',
+    teamId: secondTeam41.id, slot: 2
+  });
+  const inB2 = adminCall({
+    action: 'match-assign', session: superSession, matchId: 'M1', room: 'B',
+    teamId: thirdTeam41.id, slot: 3
+  });
+  check('two more teams can be seated in Room B', inB.ok === true && inB2.ok === true,
+    JSON.stringify({ inB, inB2 }));
+
+  const slotClash41 = adminCall({
+    action: 'match-assign', session: superSession, matchId: 'M1', room: 'B',
+    teamId: approvedTeam.id, slot: 2
+  });
+  check('a team already in the match is refused before the slot is even checked',
+    slotClash41.ok === false && slotClash41.code === 'ALREADY', JSON.stringify(slotClash41));
+
+  const roomBFilled = adminCall({
+    action: 'room-result-save', session: superSession, matchId: 'M1', room: 'B', rows: [
+      { teamId: secondTeam41.id, placement: 1, kills: 4 },
+      { teamId: thirdTeam41.id, placement: 2, kills: 6 }
+    ]
+  });
+  check('Room B saves its own result rows', roomBFilled.ok === true && roomBFilled.saved === 2,
+    JSON.stringify(roomBFilled));
+
+  const sharedPlacement41 = adminCall({
+    action: 'room-result-save', session: superSession, matchId: 'M1', room: 'B', rows: [
+      { teamId: secondTeam41.id, placement: 1, kills: 1 },
+      { teamId: thirdTeam41.id, placement: 1, kills: 1 }
+    ]
+  });
+  check('two teams cannot share a placement inside one room',
+    sharedPlacement41.ok === false && sharedPlacement41.code === 'PLACEMENT',
+    JSON.stringify(sharedPlacement41));
+
+  const wrongRoom41 = adminCall({
+    action: 'room-result-save', session: superSession, matchId: 'M2', room: 'A',
+    rows: [{ teamId: secondTeam41.id, placement: 1, kills: 1 }]
+  });
+  check('a team that is not in the room cannot be given a result there',
+    wrongRoom41.ok === false && wrongRoom41.code === 'ASSIGN', JSON.stringify(wrongRoom41));
+
+  const submitted41 = adminCall({
+    action: 'room-result-status', session: superSession, matchId: 'M1', room: 'B', status: 'APPROVED'
+  });
+  check('Room B results can be submitted', submitted41.ok === true, JSON.stringify(submitted41));
+  const verified41 = adminCall({
+    action: 'room-result-status', session: superSession, matchId: 'M1', room: 'B', status: 'VERIFIED'
+  });
+  check('Room B results can be verified', verified41.ok === true, JSON.stringify(verified41));
+
+  const board41 = sandbox.adminTournament_();
+  const roomBPanel = board41.matches[0].rooms[1];
+  check('the room status follows its own rows', roomBPanel.status === 'VERIFIED', roomBPanel.status);
+  check('each room ranks its own teams from #1',
+    roomBPanel.leaderboard[0].rank === 1 && roomBPanel.leaderboard[0].teamId === secondTeam41.id,
+    JSON.stringify(roomBPanel.leaderboard));
+  check('the match board combines both rooms',
+    (board41.matchBoards['M1'] || []).length === 3,
+    JSON.stringify((board41.matchBoards['M1'] || []).map(r => r.teamName)));
+
+  const locked41 = adminCall({
+    action: 'room-result-save', session: superSession, matchId: 'M1', room: 'B',
+    rows: [{ teamId: secondTeam41.id, placement: 2, kills: 1 }]
+  });
+  check('a verified result needs a confirmed correction',
+    locked41.ok === false && locked41.code === 'CORRECTION', JSON.stringify(locked41));
+  const corrected41 = adminCall({
+    action: 'room-result-save', session: superSession, matchId: 'M1', room: 'B', correct: true,
+    rows: [{ teamId: secondTeam41.id, placement: 2, kills: 1 }]
+  });
+  check('a confirmed correction is saved', corrected41.ok === true, JSON.stringify(corrected41));
+  check('a correction returns the row to draft for a fresh check',
+    sandbox.adminTournament_().matches[0].rooms[1].status === 'DRAFT',
+    sandbox.adminTournament_().matches[0].rooms[1].status);
+
+  const stageBoard41 = sandbox.adminTournament_().stageBoards['QUALIFIER'];
+  check('the stage board sums verified results per team',
+    stageBoard41.rows.length >= 2 && typeof stageBoard41.rows[0].byMatch === 'object',
+    JSON.stringify(stageBoard41.rows.map(r => ({ n: r.teamName, t: r.total }))));
+  check('the stage board is provisional while a match is unverified',
+    stageBoard41.provisional === true && stageBoard41.final === false, JSON.stringify({ p: stageBoard41.provisional }));
+} else {
+  console.log('  SKIP  Room B checks (the harness had fewer than 3 teams)');
+}
+
+const badEvidence41 = adminCall({
+  action: 'result-evidence', session: superSession, matchId: 'M1', room: 'A',
+  mimeType: 'application/pdf', dataBase64: 'AAAA'
+});
+check('evidence must be an image',
+  badEvidence41.ok === false && badEvidence41.code === 'TYPE', JSON.stringify(badEvidence41));
+const oversized41 = adminCall({
+  action: 'result-evidence', session: superSession, matchId: 'M1', room: 'A',
+  mimeType: 'image/png', dataBase64: new Array(2100001).join('A')
+});
+check('oversized evidence is refused',
+  oversized41.ok === false && oversized41.code === 'SIZE', JSON.stringify(oversized41));
+
+console.log('\n42. the organiser controls how many matches are played');
+const four42 = adminCall({ action: 'match-count-set', session: superSession, matchCount: 4 });
+check('the number of matches can be set to 4', four42.ok === true && four42.matchCount === 4, JSON.stringify(four42));
+const visible42 = sandbox.adminTournament_().matches.filter(m => m.visible).map(m => m.id).join(',');
+check('only M1 to M4 stay visible on the board', visible42 === 'M1,M2,M3,M4', visible42);
+const public42 = sandbox.publicSchedule_().matches.map(m => m.id).join(',');
+check('the public schedule shows only the configured matches', public42 === 'M1,M2,M3,M4', public42);
+const seven42 = adminCall({ action: 'match-count-set', session: superSession, matchCount: 7 });
+check('seven matches are refused', seven42.ok === false && seven42.code === 'COUNT', JSON.stringify(seven42));
+const one42 = adminCall({ action: 'match-count-set', session: superSession, matchCount: 1 });
+check('a single match is allowed',
+  one42.ok === true && sandbox.adminTournament_().matches.filter(m => m.visible).map(m => m.id).join(',') === 'M1',
+  JSON.stringify(one42));
+const six42 = adminCall({ action: 'match-count-set', session: superSession, matchCount: 6 });
+check('it can be put back to six',
+  six42.ok === true && sandbox.publicSchedule_().matches.length === 6, JSON.stringify(six42));
+const stage42 = adminCall({ action: 'match-count-set', session: superSession, matchCount: 2, stage: 'KNOCKOUT 1' });
+check('a stage can play a different number of matches',
+  stage42.ok === true && stage42.stageMatchCounts['KNOCKOUT 1'] === 2, JSON.stringify(stage42));
+adminCall({ action: 'match-count-set', session: superSession, matchCount: 6, stage: 'KNOCKOUT 1' });
+
+console.log('\n43. a room holds twelve teams and refuses the thirteenth');
+const pool43 = ensureApproved(13);
+if (pool43.length >= 13) {
+  let seated43 = 0;
+  for (let i = 0; i < 12; i++) {
+    const r43 = adminCall({
+      action: 'match-assign', session: superSession, matchId: 'M6', room: 'A', teamId: pool43[i].id
+    });
+    if (r43.ok) seated43++;
+  }
+  const roomA43 = sandbox.adminTournament_().matches.filter(m => m.id === 'M6')[0].rooms[0];
+  check('twelve teams fit in one room', seated43 === 12 && roomA43.teamCount === 12, String(seated43));
+  const thirteenth43 = adminCall({
+    action: 'match-assign', session: superSession, matchId: 'M6', room: 'A', teamId: pool43[12].id
+  });
+  check('the thirteenth team is refused',
+    thirteenth43.ok === false && thirteenth43.code === 'FULL', JSON.stringify(thirteenth43));
+  const otherRoom43 = adminCall({
+    action: 'match-assign', session: superSession, matchId: 'M6', room: 'B', teamId: pool43[12].id
+  });
+  check('Room B still has room for it', otherRoom43.ok === true && otherRoom43.room === 'B',
+    JSON.stringify(otherRoom43));
+} else {
+  console.log('  SKIP  twelve-team room (the harness had ' + pool43.length + ' approved teams)');
+}
+
+/* =====================================================================
+   44. FINAL AUDIT - one match played in Room A and Room B at once
+   ===================================================================== */
+
+console.log('\n44. final audit: M5 with 12 teams in Room A and 12 different teams in Room B');
+
+/* Enough approved teams for two full rooms plus two spare seats. */
+function auditPool(count) {
+  let list = ensureApproved(count);
+  let guard = 0;
+  while (list.length < count && guard < 40) {
+    guard++;
+    const name = 'AUDIT SQUAD ' + (100 + guard);
+    const res = post(validPayload(name));
+    if (!res.ok) break;
+    const fresh = sandbox.adminTeams_().teams.filter(t => t.teamName === name)[0];
+    if (fresh) adminCall({ action: 'status', session: superSession, id: fresh.id, status: 'APPROVED' });
+    list = sandbox.adminTeams_().teams.filter(t => t.status === 'APPROVED');
+  }
+  return list;
+}
+
+const pool44 = auditPool(26);
+check('26 approved teams are available for the audit', pool44.length >= 26, String(pool44.length));
+
+if (pool44.length >= 26) {
+  const A44 = pool44.slice(0, 12);
+  const B44 = pool44.slice(12, 24);
+  const spare1 = pool44[24];
+  const spare2 = pool44[25];
+
+  const schedule44 = adminCall({
+    action: 'match-save', session: superSession, matchId: 'M5', map: 'Purgatory',
+    stage: 'KNOCKOUT 1', scheduledAt: '2026-12-05T20:00', status: 'SCHEDULED', notes: 'audit'
+  });
+  check('M5 can be scheduled into its own stage',
+    schedule44.ok === true && schedule44.match.stage === 'KNOCKOUT 1', JSON.stringify(schedule44));
+
+  let seatedA = 0;
+  let seatedB = 0;
+  A44.forEach(team => {
+    const r = adminCall({ action: 'match-assign', session: superSession, matchId: 'M5', room: 'A', teamId: team.id });
+    if (r.ok) seatedA++;
+  });
+  B44.forEach(team => {
+    const r = adminCall({ action: 'match-assign', session: superSession, matchId: 'M5', room: 'B', teamId: team.id });
+    if (r.ok) seatedB++;
+  });
+  const m5 = () => sandbox.adminTournament_().matches.filter(m => m.id === 'M5')[0];
+  check('12 teams are seated in Room A of M5', seatedA === 12 && m5().rooms[0].teamCount === 12, String(seatedA));
+  check('12 different teams are seated in Room B of M5', seatedB === 12 && m5().rooms[1].teamCount === 12, String(seatedB));
+
+  const slotsA = m5().rooms[0].teams.map(t => t.slot).sort((a, b) => a - b);
+  const slotsB = m5().rooms[1].teams.map(t => t.slot).sort((a, b) => a - b);
+  check('Room A uses slots 1 to 12 exactly once', slotsA.join(',') === '1,2,3,4,5,6,7,8,9,10,11,12', slotsA.join(','));
+  check('Room B uses slots 1 to 12 exactly once', slotsB.join(',') === '1,2,3,4,5,6,7,8,9,10,11,12', slotsB.join(','));
+
+  const idsA = m5().rooms[0].teams.map(t => t.teamId);
+  const idsB = m5().rooms[1].teams.map(t => t.teamId);
+  const overlap = idsA.filter(id => idsB.indexOf(id) !== -1);
+  check('no team appears in both rooms of the same match', overlap.length === 0, JSON.stringify(overlap));
+  check('the match holds 24 seats in total', m5().rooms[0].teamCount + m5().rooms[1].teamCount === 24);
+
+  /* Separate credentials and separate release instants. */
+  const credsA44 = adminCall({
+    action: 'room-save', session: superSession, matchId: 'M5', room: 'A',
+    roomId: 'M5-ROOM-A', roomPassword: 'm5-pass-a', releaseAt: '2020-01-01T00:00'
+  });
+  const credsB44 = adminCall({
+    action: 'room-save', session: superSession, matchId: 'M5', room: 'B',
+    roomId: 'M5-ROOM-B', roomPassword: 'm5-pass-b', releaseAt: '2099-01-01T00:00'
+  });
+  check('Room A and Room B accept different Room IDs',
+    credsA44.ok === true && credsB44.ok === true &&
+    credsA44.room.roomId === 'M5-ROOM-A' && credsB44.room.roomId === 'M5-ROOM-B',
+    JSON.stringify([credsA44.room && credsA44.room.roomId, credsB44.room && credsB44.room.roomId]));
+
+  const publicM5 = () => sandbox.publicSchedule_().matches.filter(m => m.id === 'M5')[0];
+  check('Room A is released and shows only its own credentials',
+    publicM5().rooms[0].id === 'M5-ROOM-A' && publicM5().rooms[0].password === 'm5-pass-a' &&
+    publicM5().rooms[0].released === true, JSON.stringify(publicM5().rooms[0]));
+  check('Room B stays hidden until its own later release time',
+    publicM5().rooms[1].id === '' && publicM5().rooms[1].password === '' &&
+    publicM5().rooms[1].released === false, JSON.stringify(publicM5().rooms[1]));
+
+  adminCall({
+    action: 'room-save', session: superSession, matchId: 'M5', room: 'B',
+    roomId: 'M5-ROOM-B', roomPassword: 'm5-pass-b', releaseAt: '2020-01-02T00:00'
+  });
+  check('once both are released each room still shows its own values',
+    publicM5().rooms[1].id === 'M5-ROOM-B' && publicM5().rooms[1].password === 'm5-pass-b' &&
+    publicM5().rooms[0].password !== publicM5().rooms[1].password,
+    JSON.stringify(publicM5().rooms.map(r => ({ id: r.id, p: r.password }))));
+
+  /* Rescheduling must not touch either room's credentials. */
+  adminCall({
+    action: 'match-save', session: superSession, matchId: 'M5', map: 'Bermuda',
+    stage: 'KNOCKOUT 1', scheduledAt: '2026-12-05T21:15', status: 'LIVE'
+  });
+  check('changing the schedule keeps both rooms credentials',
+    publicM5().rooms[0].password === 'm5-pass-a' && publicM5().rooms[1].password === 'm5-pass-b',
+    JSON.stringify(publicM5().rooms.map(r => r.password)));
+
+  /* Results: placements and kills, one save per room. */
+  const killsA44 = [0, 2, 1, 5, 0, 0, 0, 0, 0, 0, 0, 0];
+  const killsB44 = [5, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const saveA44 = adminCall({
+    action: 'room-result-save', session: superSession, matchId: 'M5', room: 'A',
+    rows: A44.map((team, index) => ({ teamId: team.id, placement: index + 1, kills: killsA44[index] }))
+  });
+  const saveB44 = adminCall({
+    action: 'room-result-save', session: superSession, matchId: 'M5', room: 'B',
+    rows: B44.map((team, index) => ({ teamId: team.id, placement: index + 1, kills: killsB44[index] }))
+  });
+  check('Room A saves twelve result rows in one call', saveA44.ok === true && saveA44.saved === 12, JSON.stringify(saveA44));
+  check('Room B saves twelve result rows in one call', saveB44.ok === true && saveB44.saved === 12, JSON.stringify(saveB44));
+
+  const rows44 = () => sandbox.adminTournament_().results.filter(r => r.matchId === 'M5' && r.room === 'A');
+  const firstRow = rows44().filter(r => r.teamId === A44[0].id)[0];
+  const fourthRow = rows44().filter(r => r.teamId === A44[3].id)[0];
+  check('placement points come from the scoring settings',
+    firstRow.placementPoints === 12 && fourthRow.placementPoints === 7,
+    JSON.stringify([firstRow.placementPoints, fourthRow.placementPoints]));
+  check('kill points are kills multiplied by one',
+    firstRow.killPoints === 0 && fourthRow.killPoints === 5,
+    JSON.stringify([firstRow.killPoints, fourthRow.killPoints]));
+  check('match total is placement points plus kill points',
+    firstRow.total === 12 && fourthRow.total === 12,
+    JSON.stringify([firstRow.total, fourthRow.total]));
+
+  const verifyA44 = adminCall({ action: 'room-result-status', session: superSession, matchId: 'M5', room: 'A', status: 'VERIFIED' });
+  const verifyB44 = adminCall({ action: 'room-result-status', session: superSession, matchId: 'M5', room: 'B', status: 'VERIFIED' });
+  check('both rooms can be verified independently', verifyA44.ok === true && verifyB44.ok === true,
+    JSON.stringify([verifyA44, verifyB44]));
+
+  const boardA44 = m5().rooms[0].leaderboard;
+  const boardB44 = m5().rooms[1].leaderboard;
+  check('Room A ranks on total points first and kills second',
+    boardA44.length === 12 && boardA44[0].teamId === A44[3].id && boardA44[0].rank === 1 &&
+    boardA44[1].teamId === A44[0].id && boardA44[1].rank === 2,
+    JSON.stringify(boardA44.slice(0, 2)));
+  check('Room B ranks its own winner first',
+    boardB44.length === 12 && boardB44[0].teamId === B44[0].id && boardB44[0].rank === 1,
+    JSON.stringify(boardB44.slice(0, 2)));
+  check('the room boards never contain the other room team',
+    boardA44.every(r => idsB.indexOf(r.teamId) === -1) && boardB44.every(r => idsA.indexOf(r.teamId) === -1));
+
+  const combined44 = (sandbox.adminTournament_().matchBoards['M5'] || []);
+  check('the combined match board covers both rooms', combined44.length === 24, String(combined44.length));
+  check('the Room B winner leads the combined match board',
+    !!combined44[0] && combined44[0].teamId === B44[0].id && combined44[0].total === 17,
+    JSON.stringify(combined44.slice(0, 2).map(r => ({ n: r.teamName, t: r.total }))));
+  const roomAWinnerRank = (combined44.filter(r => r.teamId === A44[0].id)[0] || {}).rank;
+  check('Room A rank one is not assumed better than Room B rank one', roomAWinnerRank > 1, String(roomAWinnerRank));
+  check('equal totals are separated by kills first',
+    combined44.filter(r => r.teamId === A44[3].id)[0].rank === 2 &&
+    combined44.filter(r => r.teamId === B44[1].id)[0].rank === 3,
+    JSON.stringify(combined44.slice(0, 5).map(r => ({ n: r.teamName, t: r.total, k: r.kills }))));
+
+  const tieFlip44 = adminCall({
+    action: 'settings-set', session: superSession, fee: 100, tieBreakers: 'total,placement,kills'
+  });
+  const flipped44 = (sandbox.adminTournament_().matchBoards['M5'] || []);
+  check('the tie-breaker order is configurable',
+    tieFlip44.ok === true &&
+    flipped44.filter(r => r.teamId === A44[0].id)[0].rank === 2 &&
+    flipped44.filter(r => r.teamId === A44[3].id)[0].rank === 4,
+    JSON.stringify(flipped44.slice(0, 5).map(r => ({ n: r.teamName, t: r.total, p: r.placement }))));
+  adminCall({ action: 'settings-set', session: superSession, fee: 100, tieBreakers: 'total,kills,placement' });
+
+  /* Stage board: M5 and M6 in KNOCKOUT 1, with M6 still unplayed. */
+  adminCall({
+    action: 'match-save', session: superSession, matchId: 'M6', map: 'Kalahari',
+    stage: 'KNOCKOUT 1', scheduledAt: '2026-12-06T20:00', status: 'SCHEDULED'
+  });
+  adminCall({ action: 'match-count-set', session: superSession, matchCount: 2, stage: 'KNOCKOUT 1' });
+  const stage44 = sandbox.adminTournament_().stageBoards['KNOCKOUT 1'];
+  check('the stage board lists both configured matches',
+    stage44.matches.map(m => m.id).join(',') === 'M5,M6' && stage44.matches[1].verified === false,
+    JSON.stringify(stage44.matches));
+  check('the stage board is provisional while one match has no results',
+    stage44.provisional === true && stage44.final === false, JSON.stringify({ p: stage44.provisional }));
+  check('overall points come only from played matches',
+    stage44.rows[0].total === 17 && stage44.rows[0].matches === 1 &&
+    stage44.rows[0].byMatch['M6'] === undefined && !stage44.rows[0].countedMatches['M6'],
+    JSON.stringify(stage44.rows[0]));
+  check('a missing match never invents points',
+    stage44.matches.filter(m => m.id === 'M6')[0].results === 0);
+
+  const final44 = adminCall({ action: 'match-count-set', session: superSession, matchCount: 1, stage: 'KNOCKOUT 1' });
+  const stageFinal44 = sandbox.adminTournament_().stageBoards['KNOCKOUT 1'];
+  check('the stage becomes final when every configured match is verified',
+    final44.ok === true && stageFinal44.final === true && stageFinal44.provisional === false,
+    JSON.stringify({ f: stageFinal44.final, n: stageFinal44.matches.length }));
+  adminCall({ action: 'match-count-set', session: superSession, matchCount: 6, stage: 'KNOCKOUT 1' });
+
+  /* Qualification: the Room B winner moves on without losing its identity. */
+  const qualified44 = adminCall({
+    action: 'match-assign', session: superSession, matchId: 'M6', room: 'B', teamId: B44[0].id, slot: 6
+  });
+  check('a qualified team can be assigned to the next match',
+    qualified44.ok === true && qualified44.teamId === B44[0].id &&
+    qualified44.room === 'B' && qualified44.slot === 6, JSON.stringify(qualified44));
+  const nextSeat44 = sandbox.adminTournament_().matches.filter(m => m.id === 'M6')[0]
+    .rooms[1].teams.filter(t => t.teamId === B44[0].id)[0];
+  check('the next-stage seat keeps the original Team ID and name',
+    !!nextSeat44 && nextSeat44.teamName === B44[0].teamName, JSON.stringify(nextSeat44));
+  check('the earlier match keeps its own seat',
+    m5().rooms[1].teams.some(t => t.teamId === B44[0].id && t.slot === 1));
+
+  /* Slot rules inside the audit rooms. */
+  const slotA44 = adminCall({ action: 'match-assign', session: superSession, matchId: 'M4', room: 'A', teamId: spare1.id, slot: 5 });
+  check('a spare team can take a slot in an empty room', slotA44.ok === true && slotA44.slot === 5, JSON.stringify(slotA44));
+  const slotClash44 = adminCall({ action: 'match-assign', session: superSession, matchId: 'M4', room: 'A', teamId: spare2.id, slot: 5 });
+  check('two teams cannot share one slot in the same room',
+    slotClash44.ok === false && slotClash44.code === 'SLOT', JSON.stringify(slotClash44));
+  const slotOther44 = adminCall({ action: 'match-assign', session: superSession, matchId: 'M4', room: 'B', teamId: spare2.id, slot: 5 });
+  check('the same slot number is free in the other room',
+    slotOther44.ok === true && slotOther44.room === 'B' && slotOther44.slot === 5, JSON.stringify(slotOther44));
+  const twice44 = adminCall({ action: 'match-assign', session: superSession, matchId: 'M4', room: 'B', teamId: spare1.id });
+  check('a team already playing that match is refused with the exact room and slot',
+    twice44.ok === false && twice44.code === 'ALREADY' &&
+    twice44.error === 'This team is already assigned to ROOM A \u2014 Slot 5.', JSON.stringify(twice44));
+
+  /* Referee evidence, one per room. */
+  const tinyPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const evidenceA44 = adminCall({
+    action: 'result-evidence', session: superSession, matchId: 'M5', room: 'A',
+    mimeType: 'image/png', dataBase64: tinyPng, name: 'room-a-proof.png'
+  });
+  const evidenceB44 = adminCall({
+    action: 'result-evidence', session: superSession, matchId: 'M5', room: 'B',
+    mimeType: 'image/png', dataBase64: tinyPng, name: 'room-b-proof.png'
+  });
+  check('Room A can attach its own referee photo', evidenceA44.ok === true, JSON.stringify(evidenceA44));
+  check('Room B can attach a different referee photo', evidenceB44.ok === true, JSON.stringify(evidenceB44));
+  const evidenceList44 = sandbox.adminTournament_().evidence.filter(e => e.matchId === 'M5');
+  const evA44 = evidenceList44.filter(e => e.room === 'A')[0];
+  const evB44 = evidenceList44.filter(e => e.room === 'B')[0];
+  check('each photo is linked to its own match and room',
+    !!evA44 && !!evB44 && evA44.name !== evB44.name && evA44.url !== evB44.url,
+    JSON.stringify(evidenceList44.map(e => ({ r: e.room, n: e.name }))));
+  check('the evidence records the uploader, its size and its stage',
+    !!evA44.uploadedBy && evA44.size === 70 && evA44.stage === 'KNOCKOUT 1', JSON.stringify(evA44));
+  check('Room A evidence is never returned as Room B evidence',
+    sandbox.evidenceFor_('M5', 'A').room === 'A' && sandbox.evidenceFor_('M5', 'B').room === 'B');
+
+  /* A verified result cannot change silently, and a correction is audited. */
+  const correctionBlocked44 = adminCall({
+    action: 'room-result-save', session: superSession, matchId: 'M5', room: 'A',
+    rows: [{ teamId: A44[0].id, placement: 2, kills: 1 }]
+  });
+  check('a verified result cannot be overwritten silently',
+    correctionBlocked44.ok === false && correctionBlocked44.code === 'CORRECTION', JSON.stringify(correctionBlocked44));
+  const correctionDone44 = adminCall({
+    action: 'room-result-save', session: superSession, matchId: 'M5', room: 'A', correct: true,
+    rows: [{ teamId: A44[0].id, placement: 2, kills: 1 }]
+  });
+  check('a confirmed correction is saved and returns the room to draft',
+    correctionDone44.ok === true && m5().rooms[0].status === 'DRAFT', JSON.stringify(correctionDone44));
+  const audit44 = adminCall({ action: 'audit-list', session: superSession, pageSize: 200 });
+  const corrections44 = (audit44.entries || [])
+    .filter(e => e.action === 'result-correct' && String(e.target).indexOf('M5:A') === 0);
+  check('the correction records who changed what, with the previous value',
+    corrections44.length > 0 && /was P1 \/ 0 kills/.test(corrections44[0].detail) && !!corrections44[0].actor,
+    JSON.stringify(corrections44[0] || null));
+
+  adminCall({
+    action: 'room-result-save', session: superSession, matchId: 'M5', room: 'A',
+    rows: [{ teamId: A44[0].id, placement: 1, kills: 0 }]
+  });
+  adminCall({ action: 'room-result-status', session: superSession, matchId: 'M5', room: 'A', status: 'VERIFIED' });
+
+  /* Publication: both rooms at once, still separated. */
+  const publishA44 = adminCall({ action: 'room-result-status', session: superSession, matchId: 'M5', room: 'A', status: 'PUBLISHED' });
+  const publishB44 = adminCall({ action: 'room-result-status', session: superSession, matchId: 'M5', room: 'B', status: 'PUBLISHED' });
+  check('both rooms can be published', publishA44.ok === true && publishB44.ok === true,
+    JSON.stringify([publishA44, publishB44]));
+  const publicResults44 = sandbox.publicResults_();
+  const publicM5Rows = publicResults44.results.filter(r => r.matchId === 'M5');
+  check('the public result list carries both rooms separately',
+    publicM5Rows.length === 24 &&
+    publicM5Rows.filter(r => r.room === 'A').length === 12 &&
+    publicM5Rows.filter(r => r.room === 'B').length === 12,
+    String(publicM5Rows.length));
+  check('every published row names its room',
+    publicM5Rows.every(r => r.roomLabel === 'ROOM A' || r.roomLabel === 'ROOM B'),
+    JSON.stringify(publicM5Rows.slice(0, 1)));
+  const publicCombined44 = publicResults44.matchBoards['M5'] || [];
+  check('the public match board combines both rooms',
+    publicCombined44.length === 24 && publicCombined44[0].teamId === B44[0].id,
+    JSON.stringify(publicCombined44.slice(0, 2).map(r => ({ n: r.teamName, t: r.total }))));
+
+  /* Match counts one to six, and no M7 anywhere. */
+  const qualifierVisible = () => sandbox.adminTournament_().matches
+    .filter(m => m.stage === 'QUALIFIER' && m.visible).map(m => m.id).join(',');
+  let countsOk = true;
+  for (let n = 1; n <= 6; n++) {
+    adminCall({ action: 'match-count-set', session: superSession, matchCount: n });
+    const qualifierMatches = ['M1', 'M2', 'M3', 'M4'];
+    const expected = qualifierMatches.slice(0, Math.min(n, qualifierMatches.length)).join(',');
+    if (qualifierVisible() !== expected) countsOk = false;
+  }
+  check('one to six matches each show exactly that many match numbers', countsOk);
+  check('the public schedule never contains M7',
+    sandbox.publicSchedule_().matches.every(m => /^M[1-6]$/.test(m.id)),
+    sandbox.publicSchedule_().matches.map(m => m.id).join(','));
+  check('the dashboard board never contains M7',
+    sandbox.adminTournament_().matches.every(m => /^M[1-6]$/.test(m.id)));
+  check('the match list is the single source of truth',
+    sandbox.CONFIG.MATCH_IDS.join(',') === 'M1,M2,M3,M4,M5,M6');
+  check('seven matches are still refused after every configuration change',
+    adminCall({ action: 'match-count-set', session: superSession, matchCount: 7 }).code === 'COUNT');
+  adminCall({ action: 'match-count-set', session: superSession, matchCount: 6 });
+} else {
+  console.log('  SKIP  audit rooms (the harness had only ' + pool44.length + ' approved teams)');
+}
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail === 0 ? 0 : 1);

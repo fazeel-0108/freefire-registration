@@ -240,119 +240,213 @@
         </div>
       </section>
 
-      <!-- ====================== MATCHES (M1-M6) ====================== -->
+            <!-- ====================== ROOMS AND SLOTS ====================== -->
       <section class="panel" id="matches" aria-labelledby="matchesTitle">
         <div class="panel-head">
           <div>
-            <h2 id="matchesTitle">Matches and rooms</h2>
+            <h2 id="matchesTitle">Rooms and slot assignments</h2>
             <p id="matchSummary">Loading the tournament board…</p>
           </div>
           <div class="panel-tools">
-            <button class="btn btn-primary" id="addRoomBtn" type="button">Add room</button>
+            <label class="select"><span class="sr-only">Number of matches</span>
+              <select id="matchCountSelect">
+                <option value="1">1 match (M1)</option>
+                <option value="2">2 matches (M1–M2)</option>
+                <option value="3">3 matches (M1–M3)</option>
+                <option value="4">4 matches (M1–M4)</option>
+                <option value="5">5 matches (M1–M5)</option>
+                <option value="6">6 matches (M1–M6)</option>
+              </select>
+            </label>
+            <button class="btn btn-primary" id="matchCountSave" type="button">Save match count</button>
           </div>
         </div>
 
         <form class="tournament-form" id="matchForm">
-          <label class="field"><span>Match</span><select id="matchSelect">
-            <option>M1</option><option>M2</option><option>M3</option><option>M4</option><option>M5</option><option>M6</option>
-          </select></label>
-          <label class="field"><span>Map</span><select id="matchMap">
-            <option>Bermuda</option><option>Purgatory</option><option>Kalahari</option><option>Alpine</option><option>NeXTerra</option><option>Solara</option><option>Bermuda Remastered</option><option>Purgatory Remastered</option>
-          </select></label>
+          <label class="field"><span>Match</span><select id="matchSelect"></select></label>
           <label class="field"><span>Stage</span><select id="matchStage">
             <option>QUALIFIER</option><option>KNOCKOUT 1</option><option>KNOCKOUT 2</option><option>GRAND FINAL</option>
           </select></label>
-          <label class="field"><span>Room label</span><input id="matchRoomLabel" type="text" maxlength="20" placeholder="A / B / Lobby 1"></label>
-          <label class="field"><span>Scheduled at</span><input id="matchWhen" type="datetime-local"></label>
-          <label class="field"><span>Status</span><select id="matchStatus"><option>SCHEDULED</option><option>LIVE</option><option>COMPLETED</option><option>CANCELLED</option></select></label>
-          <label class="field"><span>Room ID</span><input id="matchRoomId" type="text" maxlength="40" autocomplete="off"></label>
-          <label class="field"><span>Room password</span><input id="matchPassword" type="text" maxlength="40" autocomplete="off"></label>
-          <label class="field"><span>Release at</span><input id="matchRelease" type="datetime-local"></label>
+          <label class="field"><span>Map</span><select id="matchMap"></select></label>
+          <label class="field"><span>Scheduled at (IST)</span><input id="matchWhen" type="datetime-local"></label>
+          <label class="field"><span>Status</span><select id="matchStatus">
+            <option>DRAFT</option><option>SCHEDULED</option><option>LIVE</option><option>COMPLETED</option><option>CANCELLED</option>
+          </select></label>
           <label class="field wide"><span>Notes</span><input id="matchNotes" type="text" maxlength="500" placeholder="Reporting instructions, map, lobby…"></label>
           <div class="form-actions"><button class="btn btn-primary" id="matchSave" type="submit">Save match</button></div>
         </form>
-        <p class="hint">All times are Asia/Kolkata (IST). <b>Scheduled at</b> is when the match starts; <b>Release at</b> is when the Room ID and password become visible on the public website. Credentials remain hidden until that server-side release time. Saving a schedule, reschedule or released room queues the matching WhatsApp event only for opted-in teams.</p>
+        <p class="hint">The schedule is editable at any time: change the start time, map, stage or status and save. Room ID, password and release time belong to each room below, so a reschedule never wipes a credential.</p>
+
+        <div class="room-panels" id="roomPanels">
+          <article class="room-panel" data-room="A" aria-labelledby="roomATitle">
+            <div class="room-panel-head">
+              <h3 id="roomATitle">ROOM A</h3>
+              <span class="badge" id="roomAStatus">—</span>
+            </div>
+            <form class="room-cred" data-room="A">
+              <label class="field"><span>Room ID</span><input id="roomAId" type="text" maxlength="40" autocomplete="off"></label>
+              <label class="field"><span>Room password</span><input id="roomAPassword" type="text" maxlength="40" autocomplete="off"></label>
+              <label class="field"><span>Release at (IST)</span><input id="roomARelease" type="datetime-local"></label>
+              <button class="btn btn-ghost" type="submit">Save Room A</button>
+            </form>
+            <p class="room-cred-note" id="roomACredNote">Credentials stay hidden on the website until the release time.</p>
+            <div class="table-wrap">
+              <table class="reg-table slot-table">
+                <thead><tr><th>Slot</th><th>Team</th><th><span class="sr-only">Remove</span></th></tr></thead>
+                <tbody id="roomARows"></tbody>
+              </table>
+            </div>
+            <div class="slot-copy-bar">
+              <button class="btn btn-ghost btn-sm" id="roomACopy" type="button">Copy Room A slot list</button>
+              <button class="btn btn-ghost btn-sm" id="roomAShare" type="button">Share Room A</button>
+            </div>
+          </article>
+
+          <article class="room-panel" data-room="B" aria-labelledby="roomBTitle">
+            <div class="room-panel-head">
+              <h3 id="roomBTitle">ROOM B</h3>
+              <span class="badge" id="roomBStatus">—</span>
+            </div>
+            <form class="room-cred" data-room="B">
+              <label class="field"><span>Room ID</span><input id="roomBId" type="text" maxlength="40" autocomplete="off"></label>
+              <label class="field"><span>Room password</span><input id="roomBPassword" type="text" maxlength="40" autocomplete="off"></label>
+              <label class="field"><span>Release at (IST)</span><input id="roomBRelease" type="datetime-local"></label>
+              <button class="btn btn-ghost" type="submit">Save Room B</button>
+            </form>
+            <p class="room-cred-note" id="roomBCredNote">Room B has its own Room ID and password. They never appear in Room A.</p>
+            <div class="table-wrap">
+              <table class="reg-table slot-table">
+                <thead><tr><th>Slot</th><th>Team</th><th><span class="sr-only">Remove</span></th></tr></thead>
+                <tbody id="roomBRows"></tbody>
+              </table>
+            </div>
+            <div class="slot-copy-bar">
+              <button class="btn btn-ghost btn-sm" id="roomBCopy" type="button">Copy Room B slot list</button>
+              <button class="btn btn-ghost btn-sm" id="roomBShare" type="button">Share Room B</button>
+            </div>
+          </article>
+        </div>
+
+        <div class="table-wrap">
+          <table class="reg-table">
+            <thead><tr><th>Match</th><th>Stage</th><th>Map</th><th>Schedule</th><th>Status</th><th>Room A</th><th>Room B</th><th>Results</th><th><span class="sr-only">Edit</span></th></tr></thead>
+            <tbody id="matchRows"></tbody>
+          </table>
+        </div>
 
         <div class="result-actions">
           <button class="btn btn-ghost" id="scheduleCopy" type="button">Copy match schedule</button>
           <button class="btn btn-primary" id="scheduleShare" type="button">Share match schedule</button>
         </div>
+      </section>
+
+      <!-- ====================== SLOT ASSIGNMENT ====================== -->
+      <section class="panel" id="slots" aria-labelledby="slotsTitle">
+        <div class="panel-head">
+          <div>
+            <h2 id="slotsTitle">Slot assignment</h2>
+            <p id="slotSummary">Pick a match, a room and a team, then save the seat.</p>
+          </div>
+          <div class="panel-tools">
+            <button class="btn btn-ghost" id="slotRefresh" type="button">Refresh</button>
+          </div>
+        </div>
+
+        <div class="assign-bar" id="assignBar">
+          <label class="field"><span>Match</span><select id="assignMatch"></select></label>
+          <label class="field"><span>Room</span><select id="assignRoom"><option>A</option><option>B</option></select></label>
+          <label class="field"><span>Team</span><select id="assignTeam"><option value="">Loading approved teams…</option></select></label>
+          <label class="field"><span>Slot (1–12)</span><input id="assignSlot" type="number" min="1" max="12" inputmode="numeric" placeholder="Auto"></label>
+          <button class="btn btn-primary" id="assignBtn" type="button">Save assignment</button>
+        </div>
+        <p class="hint">A team holds one seat per match, and each room holds at most 12 teams. Leave the slot empty to take the next free one. A team already seated is refused with its room and slot. A qualified team can always be added to a later match.</p>
 
         <div class="table-wrap">
           <table class="reg-table">
-            <thead><tr><th>Match</th><th>Schedule</th><th>Status</th><th>Room</th><th>Teams</th><th>Results</th><th><span class="sr-only">Edit</span></th></tr></thead>
-            <tbody id="matchRows"></tbody>
+            <thead><tr><th>Match</th><th>Room</th><th>Slot</th><th>Team</th><th><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody id="assignRows"></tbody>
           </table>
         </div>
+      </section>
 
-        <div class="assign-bar">
-          <label class="field"><span>Assign approved team</span><select id="assignMatch">
-            <option>M1</option><option>M2</option><option>M3</option><option>M4</option><option>M5</option><option>M6</option>
-          </select></label>
-          <label class="field"><span>Team</span><select id="assignTeam"><option value="" selected>Loading approved teams…</option></select></label>
-          <label class="field"><span>Slot (1–12)</span><input id="assignSlot" type="number" min="1" max="12" inputmode="numeric"></label>
-          <button class="btn btn-primary" id="assignBtn" type="button">Assign team</button>
-        </div>
-
-        <div class="room-chart" id="roomChartPanel">
-          <div class="room-chart-head">
-            <div>
-              <h3 id="roomChartTitle">12-slot room chart</h3>
-              <p id="roomChartMeta">Select a match to build its room chart.</p>
-            </div>
-            <div class="room-chart-actions">
-              <button class="btn btn-primary" id="chartCopy" type="button">Copy room chart</button>
-              <button class="btn btn-primary" id="chartShare" type="button">Share room chart</button>
-              <button class="btn btn-ghost" id="chartShareQualified" type="button">Share qualified teams</button>
-              <button class="btn btn-ghost" id="chartCopyAll" type="button">Copy all rooms</button>
-            </div>
+      <!-- ====================== SLOT LIST (WHATSAPP) ====================== -->
+      <section class="panel" id="slotlists" aria-labelledby="slotListTitle">
+        <div class="panel-head">
+          <div>
+            <h3 id="slotListTitle2">Slot list</h3>
+            <p id="slotListMeta">Pick a room to build its slot list.</p>
           </div>
-          <div class="table-wrap">
-            <table class="reg-table room-chart-table">
-              <thead><tr><th>Slot</th><th>Team</th><th>Result</th><th>Status</th><th><span class="sr-only">Remove</span></th></tr></thead>
-              <tbody id="roomChartRows"></tbody>
-            </table>
+          <div class="panel-tools">
+            <button class="btn btn-primary" id="slotListCopy" type="button">Copy slot list</button>
+            <button class="btn btn-primary" id="slotListShare" type="button">Share slot list</button>
+            <button class="btn btn-ghost" id="slotListAll" type="button">Copy every room</button>
           </div>
-          <p class="hint" id="roomChartHint">Each room holds 12 teams. The top 6 in the standings are marked QUALIFIED. Use Remove on an occupied slot to take that team out of the room.</p>
         </div>
+        <div class="slot-poster" id="slotPoster" aria-live="polite"></div>
+        <p class="hint">Slots 01–12 are listed in two columns of six, the way the slot-list poster is posted. Empty slots are labelled, never filled with an invented team. Room ID and password appear once that room's release time has passed.</p>
       </section>
 
       <!-- ======================== RESULTS ======================== -->
       <section class="panel" id="results" aria-labelledby="resultsTitle">
         <div class="panel-head">
-          <div><h2 id="resultsTitle">Scoring and results</h2><p id="resultSummary">Draft results stay private until approved and published.</p></div>
+          <div>
+            <h2 id="resultsTitle">Results and leaderboards</h2>
+            <p id="resultSummary">Draft results stay private until verified and published.</p>
+          </div>
         </div>
 
-        <form class="tournament-form" id="resultForm">
-          <label class="field"><span>Match</span><select id="resultMatch">
-            <option>M1</option><option>M2</option><option>M3</option><option>M4</option><option>M5</option><option>M6</option>
+        <div class="tournament-form result-picker">
+          <label class="field"><span>Stage</span><select id="resultStage">
+            <option>QUALIFIER</option><option>KNOCKOUT 1</option><option>KNOCKOUT 2</option><option>GRAND FINAL</option>
           </select></label>
-          <label class="field"><span>Team</span><select id="resultTeam"><option value="" selected>Loading approved teams…</option></select></label>
-          <label class="field"><span>Placement (1–12)</span><input id="resultPlacement" type="number" min="1" max="12" required inputmode="numeric"></label>
-          <label class="field"><span>Kills</span><input id="resultKills" type="number" min="0" max="100" required inputmode="numeric"></label>
-          <label class="field wide"><span>Result note</span><input id="resultNotes" type="text" maxlength="300" placeholder="Optional note"></label>
-          <div class="form-actions"><button class="btn btn-primary" id="resultSave" type="submit">Save draft result</button></div>
-        </form>
+          <label class="field"><span>Match</span><select id="resultMatch"></select></label>
+          <label class="field"><span>Room</span><select id="resultRoom"><option>A</option><option>B</option></select></label>
+          <label class="field"><span>Room status</span><input id="resultRoomStatus" type="text" readonly></label>
+        </div>
 
+        <h3 class="org-sub" id="roomResultTitle">MATCH M1 — ROOM A</h3>
         <div class="table-wrap">
-          <table class="reg-table">
-            <thead><tr><th>Rank</th><th>Slot</th><th>Team</th><th>Place</th><th>Kills</th><th>Placement pts</th><th>Kill pts</th><th>Total</th><th>Qualification</th><th>Status</th></tr></thead>
-            <tbody id="resultRows"></tbody>
+          <table class="reg-table room-result-table">
+            <thead><tr><th>Slot</th><th>Team</th><th>Placement</th><th>Kills</th><th>Placement pts</th><th>Kill pts</th><th>Total</th><th>Rank</th></tr></thead>
+            <tbody id="roomResultRows"></tbody>
           </table>
         </div>
 
-        <div class="form-actions result-actions">
-          <button class="btn btn-approve" id="resultApprove" type="button">Approve all drafts for selected match</button>
-          <button class="btn btn-primary" id="resultPublish" type="button">Publish selected match</button>
-          <button class="btn btn-ghost" id="resultUnpublish" type="button">Unpublish</button>
-          <button class="btn btn-ghost" id="resultCopy" type="button">Copy result chart</button>
-          <button class="btn btn-primary" id="resultShare" type="button">Share results &amp; leaderboard</button>
-          <button class="btn btn-ghost" id="leaderboardShare" type="button">Share leaderboard</button>
+        <div class="result-actions">
+          <button class="btn btn-primary" id="resultSaveRoom" type="button">Save Room results</button>
+          <button class="btn btn-wait" id="resultSubmit" type="button">Mark submitted</button>
+          <button class="btn btn-approve" id="resultVerify" type="button">Verify</button>
+          <button class="btn btn-primary" id="resultPublish" type="button">Publish room</button>
+          <button class="btn btn-ghost" id="resultUnpublish" type="button">Unpublish room</button>
+          <button class="btn btn-ghost" id="resultCopyRoom" type="button">Copy room result chart</button>
+          <button class="btn btn-ghost" id="resultShareRoom" type="button">Share room result chart</button>
         </div>
 
-        <h3 class="org-sub">Published leaderboard preview</h3>
+        <div class="evidence-row">
+          <label class="field"><span>Referee photo / evidence (optional)</span><input id="evidenceFile" type="file" accept="image/png,image/jpeg,image/webp"></label>
+          <button class="btn btn-ghost" id="evidenceUpload" type="button">Attach evidence</button>
+          <a class="evidence-link" id="evidenceLink" href="#" target="_blank" rel="noopener" hidden>View attached evidence →</a>
+        </div>
+        <p class="hint">PNG, JPEG or WebP up to 1.5 MB. The photo is optional: a room's result never depends on it. Only signed-in organisers can reach the link.</p>
+
+        <h3 class="org-sub">Room leaderboard</h3>
         <div class="table-wrap">
-          <table class="reg-table"><thead><tr><th>#</th><th>Team</th><th>Matches</th><th>Kills</th><th>Total</th></tr></thead><tbody id="leaderboardRows"></tbody></table>
+          <table class="reg-table"><thead><tr><th>Rank</th><th>Slot</th><th>Team</th><th>Kills</th><th>Points</th></tr></thead><tbody id="roomBoardRows"></tbody></table>
+        </div>
+
+        <h3 class="org-sub" id="matchBoardTitle">Match leaderboard — all rooms</h3>
+        <div class="table-wrap">
+          <table class="reg-table"><thead><tr><th>Rank</th><th>Room</th><th>Slot</th><th>Team</th><th>Placement</th><th>Kills</th><th>Points</th></tr></thead><tbody id="matchBoardRows"></tbody></table>
+        </div>
+
+        <h3 class="org-sub" id="stageTitle">Stage leaderboard — QUALIFIER</h3>
+        <p class="hint" id="stageState">Not enough results yet.</p>
+        <div class="table-wrap">
+          <table class="reg-table"><thead id="stageHead"><tr><th>#</th><th>Team</th><th>M1</th><th>M2</th><th>Kills</th><th>Points</th></tr></thead><tbody id="stageRows"></tbody></table>
+        </div>
+        <div class="result-actions">
+          <button class="btn btn-ghost" id="stageCopy" type="button">Copy stage leaderboard</button>
+          <button class="btn btn-primary" id="stageShare" type="button">Share stage leaderboard</button>
         </div>
 
         <h3 class="org-sub">Scoring settings</h3>
@@ -372,7 +466,7 @@
         </div>
       </section>
 
-      <!-- ====================== PAYMENTS TO REVIEW ====================== -->
+<!-- ====================== PAYMENTS TO REVIEW ====================== -->
       <section class="panel" id="review" aria-labelledby="reviewTitle">
         <div class="panel-head">
           <div>

@@ -1155,20 +1155,33 @@ function boardEscape(value) {
 
 function renderSchedule(data) {
   if (!scheduleGrid) return;
-  const matches = data && data.matches ? data.matches : [];
+  /* The tournament plays at most six matches; a stale seventh row is never shown. */
+  const matches = (data && data.matches ? data.matches : []).filter((match) => /^M[1-6]$/.test(match.id));
   if (!matches.length) {
     scheduleGrid.innerHTML = '<p class="board-empty">The schedule is not published yet.</p>';
     return;
   }
   scheduleGrid.innerHTML = matches.map((match) => {
-    const room = match.room
-      ? '<div class="room-reveal"><span>ROOM ID</span><b>' + boardEscape(match.room.id || "—") + '</b><span>PASSWORD</span><b>' + boardEscape(match.room.password || "—") + '</b></div>'
-      : '<p class="room-locked">Room details release automatically at ' + boardEscape(match.releaseAt || "the published time") + '.</p>';
-    const stage = [match.stage || "QUALIFIER", match.roomLabel ? "ROOM " + match.roomLabel : ""].filter(Boolean).join(" · ");
+    /* Each room is shown on its own: Room A's Room ID and password are never
+       printed inside Room B. The server blanks them until that room's own
+       release time, so this page cannot leak them early. */
+    const rooms = Array.isArray(match.rooms) && match.rooms.length
+      ? match.rooms.map((room) => {
+        const body = room.released
+          ? '<div class="room-reveal"><span>ROOM ID</span><b>' + boardEscape(room.id || "—") + '</b>' +
+            '<span>PASSWORD</span><b>' + boardEscape(room.password || "—") + '</b></div>'
+          : '<p class="room-locked">' + boardEscape(room.label || "Room details") +
+            ' release at ' + boardEscape(room.releaseAt || "the published time") + '.</p>';
+        return '<div class="room-block"><span class="room-name">' + boardEscape(room.label || "ROOM A") + '</span>' +
+          body + '<span class="room-seats">' + Number(room.seats || 0) + '/12 teams</span></div>';
+      }).join("")
+      : (match.room
+        ? '<div class="room-reveal"><span>ROOM ID</span><b>' + boardEscape(match.room.id || "—") + '</b><span>PASSWORD</span><b>' + boardEscape(match.room.password || "—") + '</b></div>'
+        : '<p class="room-locked">Room details release automatically at ' + boardEscape(match.releaseAt || "the published time") + '.</p>');
     return '<article class="schedule-card"><div class="schedule-top"><span class="match-id">' + boardEscape(match.id) + '</span><span class="status-chip">' + boardEscape(match.status) + '</span></div>' +
       '<h3>' + boardEscape(match.map || "Map to be announced") + '</h3>' +
-      '<p class="schedule-stage">' + boardEscape(stage) + '</p>' +
-      '<p class="schedule-time">Scheduled at: ' + boardEscape(match.scheduledLabel) + '</p>' + room +
+      '<p class="schedule-stage">' + boardEscape(match.stage || "QUALIFIER") + '</p>' +
+      '<p class="schedule-time">Scheduled at: ' + boardEscape(match.scheduledLabel) + '</p>' + rooms +
       (match.resultsPublished ? '<a class="schedule-result-link" href="#results">Results published →</a>' : '') + '</article>';
   }).join("");
 }
@@ -1183,7 +1196,9 @@ function renderPublishedResults(data) {
   }
   if (publicResultRows) {
     publicResultRows.innerHTML = results.length
-      ? results.map((row) => '<tr><td>#' + (row.rank || row.placement) + '</td><td>' + boardEscape(row.matchId) + '</td><td>' + boardEscape(row.teamName) + '</td><td>' + row.placement + '</td><td>' + row.kills + '</td><td>' + row.total + '</td></tr>').join("")
+      ? results.map((row) => '<tr><td>#' + (row.rank || row.placement) + '</td><td>' + boardEscape(row.matchId) +
+        (row.roomLabel ? ' · ' + boardEscape(row.roomLabel) : '') + '</td><td>' + boardEscape(row.teamName) +
+        '</td><td>' + row.placement + '</td><td>' + row.kills + '</td><td>' + row.total + '</td></tr>').join("")
       : '<tr><td colspan="6">No published match results yet.</td></tr>';
   }
 }

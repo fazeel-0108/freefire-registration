@@ -740,6 +740,24 @@ function applyResult(result, options) {
   setHint("");
 }
 
+/* Rebuilding a table can briefly shorten the page, and the browser clamps the
+   scroll position while it is short. Restoring only that clamp keeps a silent
+   refresh from fighting a scroll the organiser started themselves. */
+/* Re-rendering replaces table bodies, so for one frame the document can be
+   shorter than the reader's scroll position. The browser clamps the scroll at
+   that instant, which is what makes the page appear to jump. The position is
+   re-asserted after the render and once more after the next paint, when the
+   document has its full height again. */
+function keepScrollDuring(render) {
+  const before = window.scrollY;
+  render();
+  const restore = () => {
+    if (window.scrollY !== before) window.scrollTo({ top: before, behavior: "instant" });
+  };
+  if (window.scrollY !== before) window.scrollTo({ top: before, behavior: "instant" });
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(restore);
+}
+
 function timeOf(iso) {
   const date = new Date(iso);
   if (isNaN(date.getTime())) return "now";
@@ -780,7 +798,11 @@ async function load(options) {
     return;
   }
 
-  applyResult(result, { keepPage: true });
+  if (opts.silent) {
+    keepScrollDuring(() => applyResult(result, { keepPage: true }));
+  } else {
+    applyResult(result, { keepPage: true });
+  }
 
   // The fee is sheet data, so it is read once per sign-in rather than on every
   // 20-second refresh. The review queue is refreshed with every list so a
@@ -790,7 +812,7 @@ async function load(options) {
     loadSettings();
   }
   loadReview();
-  loadTournament();
+  loadTournament({ silent: opts.silent });
 
   /* Keep the open drawer in step with fresh data; close it if the record
      was changed by someone else and no longer exists in the list. */
@@ -2428,57 +2450,91 @@ if (waRows) {
 }
 
 /* ==================================================================
-   TOURNAMENT BOARD (M1-M6, assignments, scoring, publication)
+   ROOMS, SLOT ASSIGNMENT, SCHEDULE, RESULTS
+   ------------------------------------------------------------------
+   A match is played in Room A and Room B. Each room owns 12 slots and
+   its own Room ID / password / release time, so a credential can never
+   drift from one room to the other. Everything below renders from
+   state.tournament, which is read from the sheet, never typed by hand.
    ================================================================== */
 const matchForm = el("matchForm");
 const matchSelect = el("matchSelect");
+const matchStage = el("matchStage");
 const matchMap = el("matchMap");
 const matchWhen = el("matchWhen");
 const matchStatus = el("matchStatus");
-const matchRoomId = el("matchRoomId");
-const matchPassword = el("matchPassword");
-const matchRelease = el("matchRelease");
 const matchNotes = el("matchNotes");
 const matchRowsEl = el("matchRows");
 const matchSummaryEl = el("matchSummary");
+const matchCountSelect = el("matchCountSelect");
+const matchCountSave = el("matchCountSave");
+const roomARows = el("roomARows");
+const roomBRows = el("roomBRows");
+const roomAId = el("roomAId");
+const roomAPassword = el("roomAPassword");
+const roomARelease = el("roomARelease");
+const roomBId = el("roomBId");
+const roomBPassword = el("roomBPassword");
+const roomBRelease = el("roomBRelease");
+const roomAStatus = el("roomAStatus");
+const roomBStatus = el("roomBStatus");
 const assignMatch = el("assignMatch");
+const assignRoom = el("assignRoom");
 const assignTeam = el("assignTeam");
 const assignSlot = el("assignSlot");
 const assignBtn = el("assignBtn");
-const resultForm = el("resultForm");
+const assignRows = el("assignRows");
+const slotSummary = el("slotSummary");
+const slotRefresh = el("slotRefresh");
+const slotPoster = el("slotPoster");
+const slotListMeta = el("slotListMeta");
+const slotListCopy = el("slotListCopy");
+const slotListShare = el("slotListShare");
+const slotListAll = el("slotListAll");
+const resultStage = el("resultStage");
 const resultMatch = el("resultMatch");
-const resultTeam = el("resultTeam");
-const resultPlacement = el("resultPlacement");
-const resultKills = el("resultKills");
-const resultNotes = el("resultNotes");
-const resultRowsEl = el("resultRows");
-const resultSummaryEl = el("resultSummary");
-const leaderboardRows = el("leaderboardRows");
-const tournamentRefresh = el("tournamentRefresh");
-const exportExcel = el("exportExcel");
+const resultRoom = el("resultRoom");
+const resultRoomStatus = el("resultRoomStatus");
+const resultRoomTitle = el("roomResultTitle");
+const roomResultRows = el("roomResultRows");
+const resultSaveRoom = el("resultSaveRoom");
+const resultSubmit = el("resultSubmit");
+const resultVerify = el("resultVerify");
+const resultPublish = el("resultPublish");
+const resultUnpublish = el("resultUnpublish");
+const resultCopyRoom = el("resultCopyRoom");
+const resultShareRoom = el("resultShareRoom");
+const evidenceFile = el("evidenceFile");
+const evidenceUpload = el("evidenceUpload");
+const evidenceLink = el("evidenceLink");
+const roomBoardRows = el("roomBoardRows");
+const matchBoardRows = el("matchBoardRows");
+const matchBoardTitle = el("matchBoardTitle");
+const stageTitle = el("stageTitle");
+const stageState = el("stageState");
+const stageRows = el("stageRows");
+const stageHead = el("stageHead");
+const stageCopy = el("stageCopy");
+const stageShare = el("stageShare");
 const maxTeamsInput = el("maxTeamsInput");
 const killPointsInput = el("killPointsInput");
 const placementPointsInput = el("placementPointsInput");
 const tieBreakersInput = el("tieBreakersInput");
 const scoringSave = el("scoringSave");
-const matchStage = el("matchStage");
-const matchRoomLabel = el("matchRoomLabel");
-const roomChartRows = el("roomChartRows");
-const roomChartTitle = el("roomChartTitle");
-const roomChartMeta = el("roomChartMeta");
-const roomChartHint = el("roomChartHint");
-const chartCopy = el("chartCopy");
-const chartShare = el("chartShare");
-const chartShareQualified = el("chartShareQualified");
-const chartCopyAll = el("chartCopyAll");
-const resultCopy = el("resultCopy");
-const resultShare = el("resultShare");
-const leaderboardShare = el("leaderboardShare");
 const scheduleCopy = el("scheduleCopy");
 const scheduleShare = el("scheduleShare");
-const addRoomBtn = el("addRoomBtn");
+const resultSummaryEl = el("resultSummary");
 
 const MATCH_MAPS = ["Bermuda", "Purgatory", "Kalahari", "Alpine", "NeXTerra", "Solara", "Bermuda Remastered", "Purgatory Remastered"];
+const STATUS_LABEL = {
+  DRAFT: "Draft", SCHEDULED: "Scheduled", LIVE: "Live", COMPLETED: "Completed", CANCELLED: "Cancelled",
+  APPROVED: "Submitted", VERIFIED: "Verified", PUBLISHED: "Published", EMPTY: "No results yet"
+};
+
+/* Set as soon as the organiser touches a form. A silent refresh must never
+   overwrite half-typed room details or move the page while they work. */
+let matchFormTouched = false;
+let roomFormTouched = { A: false, B: false };
 
 function localInput(iso) {
   if (!iso) return "";
@@ -2518,7 +2574,7 @@ function setSelectValue(select, value) {
 }
 
 function stageText(match) {
-  return [match.stage || "QUALIFIER", roomShareName(match)].filter(Boolean).join(" · ");
+  return match.stage || "QUALIFIER";
 }
 
 function stageShareName(stage) {
@@ -2529,14 +2585,12 @@ function stageShareName(stage) {
   return "QUALIFIER";
 }
 
-function roomShareName(match) {
-  const room = String((match && match.room) || "").trim();
-  if (!room) return "";
-  return /^room\b/i.test(room) ? room.toUpperCase() : "ROOM " + room.toUpperCase();
+function roomShareName(code) {
+  return "ROOM " + String(code || "A").toUpperCase();
 }
 
-function matchShareTitle(match) {
-  return [stageShareName(match && match.stage), roomShareName(match)].filter(Boolean).join(" — ");
+function matchShareTitle(match, room) {
+  return [stageShareName(match && match.stage), roomShareName(room)].filter(Boolean).join(" — ");
 }
 
 function shareWhatsApp(text, emptyMessage) {
@@ -2548,22 +2602,68 @@ function shareWhatsApp(text, emptyMessage) {
   link.click();
 }
 
-function publishedTournamentResults() {
-  return ((state.tournament && state.tournament.results) || []).filter((r) => r.status === "PUBLISHED");
+async function copyChart(text, okMessage) {
+  if (!text) return toast("There is nothing to copy yet.", "error");
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(okMessage || "Copied. Paste it into WhatsApp.", "ok");
+  } catch (ignored) {
+    toast("This browser blocked the clipboard.", "error");
+  }
+}
+
+function visibleMatches() {
+  const list = (state.tournament && state.tournament.matches) || [];
+  const visible = list.filter((m) => m.visible !== false);
+  return visible.length ? visible : list;
+}
+
+function matchById(id) {
+  return ((state.tournament && state.tournament.matches) || []).find((m) => m.id === id) || null;
+}
+
+function currentMatch() {
+  const list = visibleMatches();
+  return list.find((m) => m.id === matchSelect.value) || list[0] || null;
+}
+
+function currentAssignMatch() {
+  const list = visibleMatches();
+  return list.find((m) => m.id === assignMatch.value) || list[0] || null;
+}
+
+function currentResultMatch() {
+  const list = visibleMatches();
+  return list.find((m) => m.id === resultMatch.value) || list[0] || null;
+}
+
+function roomCode(value) {
+  return String(value || "A").toUpperCase().slice(0, 1) || "A";
+}
+
+function roomPanel(match, code) {
+  if (!match) return null;
+  return (match.rooms || []).find((r) => r.room === roomCode(code)) || null;
+}
+
+function roomSeats(match, code) {
+  const panel = roomPanel(match, code);
+  return panel ? panel.teams || [] : [];
+}
+
+function resultRowsFor(matchId, code) {
+  return ((state.tournament && state.tournament.results) || [])
+    .filter((r) => r.matchId === matchId && roomCode(r.room) === roomCode(code));
 }
 
 function resultTieBreakers() {
   const configured = state.tournament && state.tournament.tieBreakers;
-  return Array.isArray(configured) && configured.length === 3
-    ? configured
-    : ["total", "kills", "placement"];
+  return Array.isArray(configured) && configured.length === 3 ? configured : ["total", "kills", "placement"];
 }
 
-function resultStandings(matchId, results, tieBreakers) {
-  const order = Array.isArray(tieBreakers) && tieBreakers.length === 3
-    ? tieBreakers
-    : resultTieBreakers();
-  return (results || []).filter((r) => r.matchId === matchId).sort((a, b) => {
+function sortStandings(rows, tieBreakers) {
+  const order = Array.isArray(tieBreakers) && tieBreakers.length === 3 ? tieBreakers : resultTieBreakers();
+  return rows.slice().sort((a, b) => {
     for (const key of order) {
       let diff = 0;
       if (key === "total") diff = (Number(b.total) || 0) - (Number(a.total) || 0);
@@ -2575,118 +2675,190 @@ function resultStandings(matchId, results, tieBreakers) {
   });
 }
 
-function resultSlotMap(match) {
-  const map = {};
-  ((match && match.teams) || []).forEach((assignment) => { map[assignment.teamId] = assignment.slot; });
-  return map;
-}
-
-function fillMatchForm(match) {
+function fillMatchForm(match, options) {
+  const opts = options || {};
   if (!match) return;
   matchSelect.value = match.id;
   setSelectValue(matchMap, match.map || "Bermuda");
   setSelectValue(matchStage, match.stage || "QUALIFIER");
-  matchRoomLabel.value = match.room || "";
   matchWhen.value = localInput(match.scheduledAt);
   matchStatus.value = match.status || "SCHEDULED";
-  matchRoomId.value = match.roomId || "";
-  matchPassword.value = match.roomPassword || "";
-  matchRelease.value = localInput(match.releaseAt);
   matchNotes.value = match.notes || "";
-  matchForm.scrollIntoView({ behavior: "smooth", block: "center" });
+  /* Only an explicit Edit click may move the page. The 30-second silent
+     refresh used to land here and scroll the organiser back to the top. */
+  if (opts.scroll) matchForm.scrollIntoView({ behavior: "smooth", block: "center" });
+  matchFormTouched = false;
 }
 
-function renderRoomChart(match, results) {
-  if (!match || !roomChartRows) return;
-  const standings = resultStandings(match.id, results, resultTieBreakers());
-  const qualified = standings.length >= 6 ? new Set(standings.slice(0, 6).map((r) => r.teamId)) : new Set();
-  const bySlot = {};
-  (match.teams || []).forEach((assignment) => { bySlot[assignment.slot] = assignment; });
-  const resultByTeam = {};
-  standings.forEach((r) => { resultByTeam[r.teamId] = r; });
+/* ------------------------------ rooms ------------------------------ */
 
-  roomChartTitle.textContent = match.id + " · " + stageText(match);
-  const meta = [match.map || "Map TBD", match.scheduledLabel || "Not scheduled", match.status];
-  if (match.hasRoom) meta.push(match.roomReleased ? "Room released" : "Room at " + (match.releaseLabel || "TBA"));
-  roomChartMeta.textContent = meta.join(" · ");
-
-  let rows = "";
+function renderRoomTable(code) {
+  const target = code === "B" ? roomBRows : roomARows;
+  if (!target) return;
+  const match = currentMatch();
+  const panel = roomPanel(match, code);
+  const seated = {};
+  (panel ? panel.teams : []).forEach((team) => { seated[team.slot] = team; });
+  let html = "";
   for (let slot = 1; slot <= 12; slot++) {
-    const assignment = bySlot[slot];
-    const result = assignment ? resultByTeam[assignment.teamId] : null;
-    const isQualified = assignment && qualified.has(assignment.teamId);
-    rows += `<tr class="${isQualified ? "chart-qualified" : ""}">
-      <td><b>${slot}</b></td>
-      <td class="cell-team">${assignment ? escapeHtml(assignment.teamName) : '<span class="hint">Open slot</span>'}</td>
-      <td>${result ? "#" + result.placement + " · " + result.kills + " kills · <b>" + result.total + " pts</b>" : "—"}</td>
-      <td>${isQualified ? '<span class="badge badge-q">QUALIFIED</span>' : (result ? '<span class="badge">PLAYED</span>' : '<span class="badge">OPEN</span>')}</td>
-      <td class="cell-actions">${assignment
-        ? `<button class="btn btn-ghost btn-sm" type="button" data-remove-team="${escapeHtml(assignment.teamId)}" data-remove-match="${escapeHtml(match.id)}">Remove</button>`
-        : ""}</td>
+    const team = seated[slot];
+    html += `<tr><td><b>${String(slot).padStart(2, "0")}</b></td>` +
+      `<td class="cell-team">${team ? escapeHtml(team.teamName) : '<span class="hint">Open slot</span>'}</td>` +
+      `<td class="cell-actions">${team
+        ? `<button class="btn btn-ghost btn-sm" type="button" data-unseat="${escapeHtml(team.teamId)}" data-unseat-room="${code}">Remove</button>`
+        : ""}</td></tr>`;
+  }
+  target.innerHTML = html;
+}
+
+function fillRoomForm(code, match) {
+  const panel = roomPanel(match, code);
+  const ids = code === "B"
+    ? { id: roomBId, password: roomBPassword, release: roomBRelease, status: roomBStatus }
+    : { id: roomAId, password: roomAPassword, release: roomARelease, status: roomAStatus };
+  if (!ids.id) return;
+  const focused = document.activeElement && document.activeElement.closest &&
+    document.activeElement.closest(`.room-cred[data-room="${code}"]`);
+  if (!focused && !roomFormTouched[code]) {
+    ids.id.value = (panel && panel.roomId) || "";
+    ids.password.value = (panel && panel.roomPassword) || "";
+    ids.release.value = localInput(panel && panel.releaseAt);
+  }
+  if (ids.status) {
+    const stateLabel = panel ? (panel.status || "EMPTY") : "EMPTY";
+    ids.status.textContent = STATUS_LABEL[stateLabel] || stateLabel;
+    ids.status.className = "badge" + (stateLabel === "PUBLISHED" ? " badge-q" : "");
+  }
+}
+
+function renderRooms() {
+  const match = currentMatch();
+  ["A", "B"].forEach((code) => {
+    renderRoomTable(code);
+    fillRoomForm(code, match);
+  });
+}
+
+/* -------------------------- match table --------------------------- */
+
+function renderMatchRows() {
+  const list = (state.tournament && state.tournament.matches) || [];
+  matchRowsEl.innerHTML = list.filter((m) => m.visible !== false).map((m) => {
+    const panelA = roomPanel(m, "A");
+    const panelB = roomPanel(m, "B");
+    const roomCell = (panel) => panel
+      ? `${panel.teamCount}/12<small>${panel.hasRoom ? (panel.roomReleased ? "released" : "held until release") : "no credentials"}</small>`
+      : "—";
+    return `<tr data-match="${m.id}">
+      <td class="cell-team">${m.id}<small>${escapeHtml(stageText(m))}</small></td>
+      <td>${escapeHtml(stageText(m))}</td>
+      <td>${escapeHtml(m.map || "Map TBD")}</td>
+      <td>${escapeHtml(m.scheduledLabel || "Not scheduled")}</td>
+      <td><span class="badge">${escapeHtml(m.status)}</span></td>
+      <td>${roomCell(panelA)}</td>
+      <td>${roomCell(panelB)}</td>
+      <td>${m.resultCount || 0} entered<small>${m.publishedCount || 0} published</small></td>
+      <td class="cell-actions"><button class="btn btn-ghost btn-sm" data-edit-match="${m.id}" type="button">Edit</button></td>
     </tr>`;
-  }
-  roomChartRows.innerHTML = rows;
-  roomChartHint.textContent = standings.length >= 6
-    ? "Top 6 in the standings are marked QUALIFIED for the next stage."
-    : "Enter at least 6 results to mark the top 6 qualifiers. Each room holds 12 teams.";
+  }).join("");
 }
 
-function padChartCell(value, width, alignRight) {
-  const text = value == null ? "" : String(value);
-  if (text.length >= width) return text;
-  const fill = new Array(width - text.length + 1).join(" ");
-  return alignRight ? fill + text : text + fill;
+/* ------------------------ slot assignment ------------------------- */
+
+function renderAssignRows() {
+  const rows = [];
+  visibleMatches().forEach((m) => {
+    (m.rooms || []).forEach((panel) => {
+      (panel.teams || []).forEach((team) => {
+        rows.push({ match: m.id, room: panel.room, slot: team.slot, teamName: team.teamName, teamId: team.teamId });
+      });
+    });
+  });
+  rows.sort((a, b) => (a.match.localeCompare(b.match) || a.room.localeCompare(b.room) || a.slot - b.slot));
+  assignRows.innerHTML = rows.length
+    ? rows.map((row) => `<tr>
+        <td>${escapeHtml(row.match)}</td>
+        <td>${escapeHtml(roomShareName(row.room))}</td>
+        <td><b>${row.slot}</b></td>
+        <td class="cell-team">${escapeHtml(row.teamName)}</td>
+        <td class="cell-actions"><button class="btn btn-ghost btn-sm" type="button"
+          data-unseat="${escapeHtml(row.teamId)}" data-unseat-match="${escapeHtml(row.match)}"
+          data-unseat-room="${escapeHtml(row.room)}">Remove</button></td>
+      </tr>`).join("")
+    : '<tr><td colspan="5">No team is seated yet. Pick a match, a room, a team and a slot above.</td></tr>';
+  slotSummary.textContent = rows.length + " seat(s) filled across " + visibleMatches().length + " match(es) · 12 slots per room";
 }
 
-/* WhatsApp renders a proportional font, so columns only stay readable when every
-   cell is padded to the width of its widest entry and numbers are right-aligned. */
-function chartTableText(headers, rows, rightFrom) {
-  const widths = headers.map((header, index) =>
-    Math.max(header.length, ...rows.map((row) => String(row[index] == null ? "" : row[index]).length))
-  );
-  return [headers].concat(rows).map((row) => row.map((cell, index) => {
-    const padded = padChartCell(cell, widths[index], index >= rightFrom);
-    return index === row.length - 1 ? padded.replace(/\s+$/, "") : padded;
-  }).join("  ")).join("\n");
-}
+/* --------------------------- slot lists --------------------------- */
 
-function roomChartText(match, results) {
-  if (!match) return "";
-  const lines = ["QQSGP FREE FIRE TOURNAMENT", "", matchShareTitle(match), ""];
-  lines.push("Map: " + (match.map || "TBD"));
-  lines.push("Scheduled at: " + (match.scheduledLabel || "Not scheduled"));
-  if (match.hasRoom && match.roomReleased && (match.roomId || match.roomPassword)) {
-    lines.push("Room ID: " + (match.roomId || "—"));
-    lines.push("Password: " + (match.roomPassword || "—"));
-  } else if (match.hasRoom) {
-    lines.push("Room ID & password: release at " + (match.releaseLabel || "TBA"));
-  } else {
-    lines.push("Room ID & password: not set yet");
-  }
-  lines.push("");
+function slotListRows(match, code) {
   const bySlot = {};
-  (match.teams || []).forEach((assignment) => { bySlot[assignment.slot] = assignment; });
-  const resultByTeam = {};
-  resultStandings(match.id, results, resultTieBreakers()).forEach((row) => { resultByTeam[row.teamId] = row; });
+  roomSeats(match, code).forEach((assignment) => { bySlot[assignment.slot] = assignment; });
   const rows = [];
   for (let slot = 1; slot <= 12; slot++) {
     const assignment = bySlot[slot];
-    const player = assignment ? resultByTeam[assignment.teamId] : null;
-    rows.push([
-      "#" + String(slot).padStart(2, "0") + ".",
-      assignment ? assignment.teamName : "TBD",
-      player ? (Number(player.placement) === 1 ? 1 : 0) : "-",
-      player ? 1 : "-",
-      player ? player.placement : "-",
-      player ? player.kills : "-",
-      player ? player.total : "-"
-    ]);
+    rows.push({ slot: slot, teamName: assignment ? assignment.teamName : "" });
   }
-  lines.push(chartTableText(
-    ["RANK", "TEAM", "BOOYAH", "MATCHES", "POS", "ELIMS", "PTS"],
-    rows,
-    2
-  ));
+  return rows;
+}
+
+function renderSlotList(match, code) {
+  if (!slotPoster) return;
+  if (!match) {
+    slotListMeta.textContent = "Pick a room to build its slot list.";
+    slotPoster.innerHTML = '<p class="slot-poster-empty">No room selected yet.</p>';
+    return;
+  }
+  const panel = roomPanel(match, code);
+  slotListMeta.textContent = [match.id, roomShareName(code), stageText(match), match.map || "Map TBD",
+    match.scheduledLabel || "Not scheduled"].join(" · ");
+  const rows = slotListRows(match, code);
+  const cell = (row) => '<div class="slot-row">' +
+    '<span class="slot-no">' + String(row.slot).padStart(2, "0") + '</span>' +
+    '<span class="slot-team' + (row.teamName ? "" : " is-open") + '">' +
+    escapeHtml(row.teamName || "OPEN SLOT") + '</span></div>';
+  const half = Math.ceil(rows.length / 2);
+  const left = rows.slice(0, half).map(cell).join("");
+  const right = rows.slice(half).map(cell).join("");
+  let credentials;
+  if (!panel || !panel.hasRoom) credentials = '<span>Room ID &amp; password not set yet</span>';
+  else if (panel.roomReleased && (panel.roomId || panel.roomPassword)) {
+    credentials = '<span>Room ID <b>' + escapeHtml(panel.roomId || "—") + '</b></span>' +
+      '<span>Password <b>' + escapeHtml(panel.roomPassword || "—") + '</b></span>';
+  } else {
+    credentials = '<span>Room ID &amp; password release at <b>' + escapeHtml(panel.releaseLabel || "TBA") + '</b></span>';
+  }
+  slotPoster.innerHTML =
+    '<div class="slot-poster-brand"><span>QQSGP</span> FREE FIRE TOURNAMENT</div>' +
+    '<div class="slot-poster-title">SLOT LIST</div>' +
+    '<div class="slot-poster-sub">' + escapeHtml(matchShareTitle(match, code)) + '</div>' +
+    '<div class="slot-poster-cred">' + credentials + '</div>' +
+    '<div class="slot-grid"><div class="slot-col">' + left + '</div>' +
+    '<div class="slot-col">' + right + '</div></div>' +
+    '<div class="slot-poster-foot">' +
+    '<span>' + escapeHtml(match.id + " · " + (match.map || "Map TBD")) + '</span>' +
+    '<span>' + escapeHtml(match.scheduledLabel || "Not scheduled") + '</span>' +
+    '<span>Top 6 qualify</span></div>';
+}
+
+function slotListText(match, code) {
+  if (!match) return "";
+  const panel = roomPanel(match, code);
+  const rows = slotListRows(match, code);
+  const filled = rows.filter((row) => row.teamName).length;
+  const lines = ["🏆 QQSGP FREE FIRE TOURNAMENT", "", "MATCH: " + match.id, "ROOM: " + roomShareName(code),
+    "MAP: " + (match.map || "TBD"), ""];
+  rows.forEach((row) => {
+    lines.push("SLOT " + row.slot + " — " + (row.teamName || "OPEN SLOT"));
+  });
+  lines.push("", "SCHEDULED AT: " + (match.scheduledLabel || "Not scheduled"));
+  if (panel && panel.hasRoom && panel.roomReleased && (panel.roomId || panel.roomPassword)) {
+    lines.push("ROOM ID: " + (panel.roomId || "—"));
+    lines.push("PASSWORD: " + (panel.roomPassword || "—"));
+  } else if (panel && panel.hasRoom) {
+    lines.push("ROOM ID & PASSWORD: released at " + (panel.releaseLabel || "TBA"));
+  }
+  if (filled < 12) lines.push("", filled + " of 12 slots filled — " + (12 - filled) + " still open.");
   lines.push("", "Only the top 6 teams qualify for the next stage.", "Best of luck, everyone!");
   return lines.join("\n");
 }
@@ -2696,299 +2868,575 @@ function scheduleShareText(matches) {
   if (!list.length) return "";
   const lines = ["QQSGP FREE FIRE TOURNAMENT", "", "MATCH SCHEDULE", ""];
   list.forEach((match) => {
-    lines.push(match.id + " — " + matchShareTitle(match));
+    lines.push(match.id + " — " + stageShareName(match.stage));
     lines.push("Map: " + (match.map || "TBD"));
     lines.push("Scheduled at: " + (match.scheduledLabel || "Not scheduled"));
     lines.push("Status: " + (match.status || "SCHEDULED"));
-    if (match.hasRoom && match.roomReleased && (match.roomId || match.roomPassword)) {
-      lines.push("Room ID: " + (match.roomId || "—"));
-      lines.push("Password: " + (match.roomPassword || "—"));
-    } else if (match.hasRoom) {
-      lines.push("Room details: release at " + (match.releaseLabel || "TBA"));
-    } else {
-      lines.push("Room details: not set yet");
-    }
+    (match.rooms || []).forEach((panel) => {
+      lines.push(roomShareName(panel.room) + ": " +
+        (panel.hasRoom ? (panel.roomReleased ? "ID " + (panel.roomId || "—") + " · password " + (panel.roomPassword || "—")
+          : "released at " + (panel.releaseLabel || "TBA")) : "not set yet"));
+    });
     lines.push("");
   });
   return lines.join("\n").trim();
 }
 
-function resultChartText(match, results, tieBreakers) {
-  if (!match) return "";
-  const standings = resultStandings(match.id, results, tieBreakers);
-  if (!standings.length) return "";
-  const qualified = standings.length >= 6 ? new Set(standings.slice(0, 6).map((r) => r.teamId)) : new Set();
-  const slots = resultSlotMap(match);
-  const lines = ["QQSGP FREE FIRE TOURNAMENT", "", "RESULT — " + match.id + " — " + matchShareTitle(match), ""];
-  standings.forEach((r, index) => {
-    lines.push(String(index + 1).padStart(2, "0") + ". " + r.teamName +
-      " (slot " + (slots[r.teamId] || "?") + ") — Placement " + r.placement +
-      " · Kills " + r.kills + " · " + r.total + " pts" +
-      (qualified.size ? (qualified.has(r.teamId) ? " · QUALIFIED" : " · ELIMINATED") : ""));
+/* ----------------------------- results ---------------------------- */
+
+let resultGridDirty = false;
+
+function resultEntryRows(match, code) {
+  const existing = {};
+  resultRowsFor(match.id, code).forEach((row) => { existing[row.teamId] = row; });
+  return roomSeats(match, code).slice().sort((a, b) => a.slot - b.slot).map((seat) => {
+    const row = existing[seat.teamId];
+    return {
+      teamId: seat.teamId,
+      teamName: seat.teamName,
+      slot: seat.slot,
+      placement: row ? Number(row.placement) || "" : "",
+      kills: row ? Number(row.kills) || 0 : "",
+      status: row ? row.status : ""
+    };
   });
-  lines.push("", "Only the top 6 teams qualify for the next stage.");
-  return lines.join("\n");
 }
 
-function qualifiedTeamsText(match, results, tieBreakers) {
-  if (!match) return "";
-  const standings = resultStandings(match.id, results, tieBreakers).slice(0, 6);
-  if (standings.length < 6) return "";
-  const slots = resultSlotMap(match);
-  const lines = ["QQSGP FREE FIRE TOURNAMENT", "", "QUALIFIED TEAMS — " + matchShareTitle(match), ""];
-  standings.forEach((r, index) => {
-    lines.push(String(index + 1).padStart(2, "0") + ". " + r.teamName +
-      (slots[r.teamId] ? " (slot " + slots[r.teamId] + ")" : "") +
-      " — " + r.total + " pts");
+function pointsFor(placement, kills) {
+  const table = (state.tournament && state.tournament.placementPoints) || [12, 9, 8, 7, 6, 5, 4, 3, 2, 1];
+  const perKill = Number((state.tournament && state.tournament.killPoints) || 1);
+  const placementPoints = Number(table[Number(placement) - 1]) || 0;
+  const killPoints = Math.round((Number(kills) || 0) * perKill * 100) / 100;
+  return { placementPoints: placementPoints, killPoints: killPoints, total: Math.round((placementPoints + killPoints) * 100) / 100 };
+}
+
+function recalcResultGrid() {
+  const rows = Array.from(roomResultRows.querySelectorAll("tr[data-team-id]"));
+  const computed = rows.map((tr) => {
+    const placement = Number(tr.querySelector("[data-field=placement]").value);
+    const kills = Number(tr.querySelector("[data-field=kills]").value);
+    const pts = pointsFor(placement, kills);
+    tr.querySelector("[data-out=placementPoints]").textContent = placement ? pts.placementPoints : "—";
+    tr.querySelector("[data-out=killPoints]").textContent = placement ? pts.killPoints : "—";
+    tr.querySelector("[data-out=total]").textContent = placement ? pts.total : "—";
+    return { tr: tr, placement: placement, kills: kills, total: pts.total, teamName: tr.dataset.teamName };
   });
-  lines.push("", "Only the top 6 teams qualify for the next stage.", "Best of luck, everyone!");
-  return lines.join("\n");
+  const ranked = computed.filter((r) => r.placement).slice().sort((a, b) =>
+    (b.total - a.total) || (b.kills - a.kills) || (a.placement - b.placement) ||
+    String(a.teamName).localeCompare(String(b.teamName)));
+  computed.forEach((r) => { r.tr.querySelector("[data-out=rank]").textContent = ""; });
+  ranked.forEach((r, index) => { r.tr.querySelector("[data-out=rank]").textContent = "#" + (index + 1); });
 }
 
-function leaderboardShareText(board) {
-  const rows = board || [];
-  if (!rows.length) return "";
-  const lines = ["QQSGP FREE FIRE TOURNAMENT", "", "OVERALL LEADERBOARD", ""];
-  rows.forEach((row) => {
-    lines.push(String(row.rank).padStart(2, "0") + ". " + row.teamName +
-      " — " + row.total + " pts · " + row.kills + " kills · " + row.matches + " match" + (row.matches === 1 ? "" : "es"));
-  });
-  return lines.join("\n");
+function renderResultGrid(force) {
+  const match = currentResultMatch();
+  const code = roomCode(resultRoom.value);
+  if (!match) {
+    resultRoomTitle.textContent = "No match configured";
+    roomResultRows.innerHTML = "";
+    return;
+  }
+  const focused = document.activeElement && roomResultRows.contains(document.activeElement);
+  if (!force && (resultGridDirty || focused)) return;
+
+  resultRoomTitle.textContent = "MATCH " + match.id + " — " + roomShareName(code);
+  const panel = roomPanel(match, code);
+  resultRoomStatus.value = STATUS_LABEL[panel ? panel.status : "EMPTY"] || "No results yet";
+  const rows = resultEntryRows(match, code);
+  roomResultRows.innerHTML = rows.length ? rows.map((row) => `<tr data-team-id="${escapeHtml(row.teamId)}" data-team-name="${escapeHtml(row.teamName)}">
+      <td><b>${String(row.slot).padStart(2, "0")}</b></td>
+      <td class="cell-team">${escapeHtml(row.teamName)}</td>
+      <td><input class="num-input" type="number" min="1" max="12" inputmode="numeric" data-field="placement" value="${row.placement}"></td>
+      <td><input class="num-input" type="number" min="0" max="100" inputmode="numeric" data-field="kills" value="${row.kills}"></td>
+      <td data-out="placementPoints">—</td>
+      <td data-out="killPoints">—</td>
+      <td><b data-out="total">—</b></td>
+      <td data-out="rank">—</td>
+    </tr>`).join("")
+    : '<tr><td colspan="8">No team is seated in this room yet. Use Slot assignment first.</td></tr>';
+  resultGridDirty = false;
+  recalcResultGrid();
+  renderEvidence(panel);
 }
 
-function resultAndLeaderboardText(match, results, board, tieBreakers) {
-  return [resultChartText(match, results, tieBreakers), leaderboardShareText(board)].filter(Boolean).join("\n\n");
-}
-
-async function copyChart(text, okMessage) {
-  if (!text) return toast("There is no chart to copy yet.", "error");
-  try {
-    await navigator.clipboard.writeText(text);
-    toast(okMessage || "Chart copied. Paste it into WhatsApp.", "ok");
-  } catch (ignored) {
-    toast("This browser blocked the clipboard.", "error");
+function renderEvidence(panel) {
+  if (!evidenceLink) return;
+  const match = currentResultMatch();
+  const code = roomCode(resultRoom.value);
+  const record = ((state.tournament && state.tournament.evidence) || [])
+    .find((item) => match && item.matchId === match.id && item.room === code);
+  if (record && record.url) {
+    evidenceLink.href = record.url;
+    evidenceLink.textContent = "View attached evidence (" + (record.name || "photo") + ") →";
+    evidenceLink.hidden = false;
+  } else {
+    evidenceLink.hidden = true;
+    evidenceLink.removeAttribute("href");
   }
 }
+
+function renderBoards() {
+  const match = currentResultMatch();
+  const code = roomCode(resultRoom.value);
+  if (!match) return;
+  const panel = roomPanel(match, code);
+  const roomBoard = (panel && panel.leaderboard) || [];
+  roomBoardRows.innerHTML = roomBoard.length ? roomBoard.map((row) => `<tr>
+      <td>#${row.rank}</td><td>${row.slot || "—"}</td><td class="cell-team">${escapeHtml(row.teamName)}</td>
+      <td>${row.kills}</td><td><b>${row.total}</b></td></tr>`).join("")
+    : '<tr><td colspan="5">No verified results in this room yet.</td></tr>';
+
+  const matchBoard = ((state.tournament && state.tournament.matchBoards) || {})[match.id] || [];
+  matchBoardTitle.textContent = "Match leaderboard — " + match.id + " (all rooms)";
+  matchBoardRows.innerHTML = matchBoard.length ? matchBoard.map((row) => `<tr>
+      <td>#${row.rank}</td><td>${escapeHtml(roomShareName(row.room || "A"))}</td><td>${row.slot || "—"}</td>
+      <td class="cell-team">${escapeHtml(row.teamName)}</td><td>${row.placement}</td>
+      <td>${row.kills}</td><td><b>${row.total}</b></td></tr>`).join("")
+    : '<tr><td colspan="7">No verified result for this match yet.</td></tr>';
+
+  const stage = resultStage.value || "QUALIFIER";
+  const board = ((state.tournament && state.tournament.stageBoards) || {})[stage] || { rows: [], matches: [], provisional: true, final: false };
+  stageTitle.textContent = "Stage leaderboard — " + stageShareName(stage);
+  const matchIds = (board.matches || []).map((m) => m.id);
+  stageHead.innerHTML = '<tr><th>#</th><th>Team</th>' +
+    matchIds.map((id) => "<th>" + escapeHtml(id) + "</th>").join("") +
+    '<th>Kills</th><th>Points</th></tr>';
+  stageRows.innerHTML = (board.rows || []).length ? board.rows.map((row) => `<tr>
+      <td>#${row.rank}</td><td class="cell-team">${escapeHtml(row.teamName)}</td>` +
+    matchIds.map((id) => "<td>" + (row.byMatch && row.byMatch[id] !== undefined ? row.byMatch[id] : "—") + "</td>").join("") +
+    `<td>${row.kills}</td><td><b>${row.total}</b></td></tr>`).join("")
+    : '<tr><td colspan="' + (matchIds.length + 4) + '">No verified results for this stage yet.</td></tr>';
+  const pending = (board.matches || []).filter((m) => !m.verified).map((m) => m.id);
+  stageState.textContent = board.final
+    ? "Final — every configured match has verified results."
+    : "Provisional — waiting on " + (pending.length ? pending.join(", ") : "verified results") + ".";
+}
+
+/* ---------------------------- rendering --------------------------- */
 
 function renderTournament() {
   const t = state.tournament;
   if (!t) return;
-  const ids = t.matches.map((m) => m.id);
   fillMapOptions(t.matches);
-  const keep = (select, html) => {
+  const ids = visibleMatches().map((m) => m.id);
+  const keepOptions = (select, values, fallback) => {
+    if (!select) return;
     const current = select.value;
-    select.innerHTML = html;
-    if (current) select.value = current;
+    select.innerHTML = values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("");
+    select.value = values.indexOf(current) === -1 ? (fallback || values[0] || "") : current;
   };
-  keep(matchSelect, ids.map((id) => `<option>${id}</option>`).join(""));
-  keep(assignMatch, ids.map((id) => `<option>${id}</option>`).join(""));
-  keep(resultMatch, ids.map((id) => `<option>${id}</option>`).join(""));
+  keepOptions(matchSelect, ids);
+  keepOptions(assignMatch, ids);
+  keepOptions(resultMatch, ids);
+  keepOptions(resultRoom, (t.rooms || ["A", "B"]), "A");
+  keepOptions(assignRoom, (t.rooms || ["A", "B"]), "A");
+
+  if (matchCountSelect && t.matchCount) matchCountSelect.value = String(t.matchCount);
+
   const approved = (Array.isArray(t.teams) ? t.teams : []).filter((team) => team.status === "APPROVED");
+  const currentTeam = assignTeam.value;
   assignTeam.innerHTML = approved.length
     ? approved.map((team) => `<option value="${escapeHtml(team.id)}">${escapeHtml(team.teamName)}</option>`).join("")
     : '<option value="">No approved teams yet</option>';
-  const selectedMatch = resultMatch.value || ids[0];
-  const match = t.matches.find((m) => m.id === selectedMatch);
-  const eligible = match ? approved.filter((team) => match.teams.some((a) => a.teamId === team.id)) : [];
-  resultTeam.innerHTML = eligible.length
-    ? eligible.map((team) => `<option value="${escapeHtml(team.id)}">${escapeHtml(team.teamName)}</option>`).join("")
-    : '<option value="">Assign an approved team first</option>';
+  if (currentTeam && Array.from(assignTeam.options).some((o) => o.value === currentTeam)) assignTeam.value = currentTeam;
 
-  matchSummaryEl.textContent = t.matches.length + " rooms · " + approved.length + " approved teams · 12 slots per room · top 6 qualify";
-  matchRowsEl.innerHTML = t.matches.map((m) => `<tr data-match="${m.id}">
-    <td class="cell-team">${m.id}<small>${escapeHtml(stageText(m))}${m.map ? " · " + escapeHtml(m.map) : ""}</small></td>
-    <td>${escapeHtml(m.scheduledLabel)}</td><td><span class="badge">${m.status}</span></td>
-    <td>${m.hasRoom ? "Set" : "—"}<small>${m.roomReleased ? "Released" : escapeHtml(m.releaseLabel || "No release")}</small></td>
-    <td>${m.teamCount}/12</td><td>${m.publishedCount}/${m.resultCount} published</td>
-    <td class="cell-actions"><button class="btn btn-ghost btn-sm" data-edit-match="${m.id}" type="button">Edit</button>${
-      m.removable ? `<button class="btn btn-ghost btn-sm" data-remove-room="${m.id}" type="button">Delete</button>` : ""
-    }</td></tr>`).join("");
+  const match = currentMatch();
+  matchSummaryEl.textContent = ids.length + " match(es) × " + (t.rooms || ["A", "B"]).length +
+    " rooms · 12 slots per room · " + approved.length + " approved teams · top 6 qualify";
 
-  const slots = resultSlotMap(match);
-  const standings = resultStandings(selectedMatch, t.results, resultTieBreakers());
-  const qualified = standings.length >= 6 ? new Set(standings.slice(0, 6).map((r) => r.teamId)) : new Set();
-  resultRowsEl.innerHTML = standings.length ? standings.map((r, index) => `<tr>
-    <td>#${index + 1}</td><td>${slots[r.teamId] || "—"}</td><td class="cell-team">${escapeHtml(r.teamName)}</td><td>${r.placement}</td><td>${r.kills}</td>
-    <td>${r.placementPoints}</td><td>${r.killPoints}</td><td><b>${r.total}</b></td>
-    <td>${qualified.size ? (qualified.has(r.teamId) ? "QUALIFIED" : "ELIMINATED") : "—"}</td><td>${r.status}</td></tr>`).join("")
-    : `<tr><td colspan="10">No results entered for ${selectedMatch} yet.</td></tr>`;
-  leaderboardRows.innerHTML = t.leaderboard.length ? t.leaderboard.slice(0, 20).map((row) => `<tr><td>${row.rank}</td><td class="cell-team">${escapeHtml(row.teamName)}</td><td>${row.matches}</td><td>${row.kills}</td><td><b>${row.total}</b></td></tr>`).join("")
-    : '<tr><td colspan="5">The leaderboard appears after results are entered.</td></tr>';
+  renderMatchRows();
+  renderRooms();
+  renderAssignRows();
+  renderSlotList(currentAssignMatch(), roomCode(assignRoom.value));
+  renderResultGrid(false);
+  renderBoards();
+
   maxTeamsInput.value = t.maxTeams;
   killPointsInput.value = t.killPoints;
   placementPointsInput.value = (t.placementPoints || []).join(",");
   if (tieBreakersInput) setSelectValue(tieBreakersInput, (t.tieBreakers || ["total", "kills", "placement"]).join(","));
-  renderRoomChart(t.matches.find((m) => m.id === (matchSelect.value || ids[0])), t.results);
-  if (!matchWhen.value) fillMatchForm(t.matches[0]);
+
+  /* Fill the form for the room that is actually selected. It used to always
+     load M1, which undid the room the organiser had just picked. */
+  if (!matchFormTouched && !matchForm.contains(document.activeElement) && match && !matchWhen.value) {
+    fillMatchForm(match, { scroll: false });
+  }
+  resultSummaryEl.textContent = "Draft results stay private. Publish a room to show its results and the stage board on the website.";
 }
 
-async function loadTournament() {
+/* A backend that predates rooms returns one 12-slot list per match. It is read
+   as Room A so the dashboard keeps working (Room B simply stays empty) until
+   the new Apps Script version is deployed. */
+function normalizeTournament(payload) {
+  const t = payload || {};
+  const codes = Array.isArray(t.rooms) && t.rooms.length ? t.rooms : ["A", "B"];
+  t.rooms = codes;
+  t.matchCount = Number(t.matchCount) >= 1 && Number(t.matchCount) <= 6 ? Number(t.matchCount) : 6;
+  /* The tournament never plays more than six matches. A board that still
+     carries an M7 from an older deployment is trimmed here as well, so the
+     dropdown can never offer it. */
+  t.matches = (t.matches || []).filter((match) => /^M[1-6]$/.test(match.id));
+  t.matches.forEach((match, index) => {
+    if (match.visible === undefined) match.visible = index < t.matchCount;
+    if (!Array.isArray(match.rooms) || !match.rooms.length) {
+      match.rooms = codes.map((code, index) => ({
+        room: code,
+        label: "ROOM " + code,
+        roomId: index === 0 ? (match.roomId || "") : "",
+        roomPassword: index === 0 ? (match.roomPassword || "") : "",
+        hasRoom: index === 0 ? !!match.hasRoom : false,
+        releaseAt: index === 0 ? (match.releaseAt || "") : "",
+        releaseLabel: index === 0 ? (match.releaseLabel || "") : "",
+        roomReleased: index === 0 ? !!match.roomReleased : false,
+        teams: index === 0 ? (match.teams || []).map((team) => Object.assign({ room: "A" }, team)) : [],
+        teamCount: index === 0 ? (match.teams || []).length : 0,
+        resultCount: 0,
+        publishedCount: 0,
+        status: "EMPTY",
+        leaderboard: []
+      }));
+    }
+  });
+  if (!t.results) t.results = [];
+  t.results.forEach((row) => { if (!row.room) row.room = "A"; });
+  if (!t.matchBoards) t.matchBoards = {};
+  if (!t.stageBoards) {
+    t.stageBoards = {};
+    (t.stages || ["QUALIFIER"]).forEach((stage) => {
+      t.stageBoards[stage] = { stage: stage, matches: [], rows: [], provisional: true, final: false };
+    });
+  }
+  if (!t.evidence) t.evidence = [];
+  if (!t.matchCount) t.matchCount = 6;
+  return t;
+}
+
+async function loadTournament(options) {
   if (!matchRowsEl) return;
+  const opts = options || {};
   const result = await api("tournament");
   if (!result.ok) {
     matchSummaryEl.textContent = result.error || "The tournament board could not be read.";
     assignTeam.innerHTML = '<option value="">Teams unavailable — refresh</option>';
-    resultTeam.innerHTML = '<option value="">Teams unavailable — refresh</option>';
     return;
   }
-  state.tournament = result;
-  renderTournament();
+  state.tournament = normalizeTournament(result);
+  /* Every refresh keeps the reader where they were, silent or not: a save must
+     never move the page. */
+  keepScrollDuring(() => renderTournament());
 }
 
-addRoomBtn && addRoomBtn.addEventListener("click", async () => {
-  addRoomBtn.disabled = true;
-  const result = await api("match-add", {});
-  addRoomBtn.disabled = false;
+/* ----------------------------- events ----------------------------- */
+
+matchCountSave && matchCountSave.addEventListener("click", async () => {
+  matchCountSave.disabled = true;
+  const result = await api("match-count-set", { matchCount: Number(matchCountSelect.value) });
+  matchCountSave.disabled = false;
   if (!result.ok) return toast(result.error, "error");
-  toast(result.message || "Room added.", "ok");
+  toast(result.message || "Match count saved.", "ok");
   await loadTournament();
-  if (result.match && result.match.id) {
-    [matchSelect, assignMatch, resultMatch].forEach((select) => { if (select) select.value = result.match.id; });
-    renderTournament();
-  }
 });
-roomChartRows && roomChartRows.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-remove-team]");
+
+matchRowsEl && matchRowsEl.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-edit-match]");
+  if (!button || !state.tournament) return;
+  const selected = matchById(button.dataset.editMatch);
+  if (!selected) return;
+  matchSelect.value = selected.id;
+  if (assignMatch) assignMatch.value = selected.id;
+  if (resultMatch) resultMatch.value = selected.id;
+  fillMatchForm(selected, { scroll: true });
+  renderTournament();
+});
+
+[roomARows, roomBRows].forEach((body) => {
+  body && body.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-unseat]");
+    if (!button) return;
+    const match = currentMatch();
+    if (!match) return;
+    const row = button.closest("tr");
+    const name = row && row.querySelector(".cell-team") ? row.querySelector(".cell-team").textContent.trim() : "This team";
+    if (!confirm("Remove " + name + " from " + match.id + " " + roomShareName(button.dataset.unseatRoom) + "? The slot becomes free.")) return;
+    const result = await api("match-unassign", {
+      matchId: match.id, teamId: button.dataset.unseat, room: button.dataset.unseatRoom
+    });
+    if (!result.ok) return toast(result.error, "error");
+    toast(result.message || "Team removed.", "ok");
+    await loadTournament();
+  });
+});
+
+assignRows && assignRows.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-unseat]");
   if (!button) return;
-  const matchId = button.dataset.removeMatch;
-  const teamId = button.dataset.removeTeam;
-  const name = (button.closest("tr") && button.closest("tr").querySelector(".cell-team")
-    ? button.closest("tr").querySelector(".cell-team").textContent.trim() : "This team");
-  if (!confirm("Remove " + name + " from " + matchId + "? Their slot becomes free for another team.")) return;
-  const result = await api("match-unassign", { matchId, teamId });
+  const matchId = button.dataset.unseatMatch;
+  const room = button.dataset.unseatRoom;
+  const row = button.closest("tr");
+  const name = row ? row.querySelector(".cell-team").textContent.trim() : "This team";
+  if (!confirm("Remove " + name + " from " + matchId + " " + roomShareName(room) + "?")) return;
+  const result = await api("match-unassign", { matchId: matchId, teamId: button.dataset.unseat, room: room });
   if (!result.ok) return toast(result.error, "error");
   toast(result.message || "Team removed.", "ok");
   await loadTournament();
 });
-matchRowsEl && matchRowsEl.addEventListener("click", async (event) => {
-  const removeRoom = event.target.closest("[data-remove-room]");
-  if (removeRoom && state.tournament) {
-    const id = removeRoom.dataset.removeRoom;
-    if (!confirm("Delete room " + id + "? Only an empty room added from the dashboard can be deleted.")) return;
-    const removed = await api("match-remove", { matchId: id });
-    if (!removed.ok) return toast(removed.error, "error");
-    toast(removed.message || "Room deleted.", "ok");
-    await loadTournament();
-    return;
-  }
-  const button = event.target.closest("[data-edit-match]");
-  if (!button || !state.tournament) return;
-  const selected = state.tournament.matches.find((m) => m.id === button.dataset.editMatch);
-  fillMatchForm(selected);
-  if (assignMatch) assignMatch.value = selected.id;
-  if (resultMatch) resultMatch.value = selected.id;
-  renderTournament();
-});
-matchSelect && matchSelect.addEventListener("change", () => { resultMatch.value = matchSelect.value; renderTournament(); });
-resultMatch && resultMatch.addEventListener("change", () => { matchSelect.value = resultMatch.value; renderTournament(); });
-assignMatch && assignMatch.addEventListener("change", () => {
-  matchSelect.value = assignMatch.value;
-  resultMatch.value = assignMatch.value;
-  renderTournament();
-});
-tournamentRefresh && tournamentRefresh.addEventListener("click", () => { load(); loadTournament(); });
-matchForm && matchForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const result = await api("match-save", {
-    matchId: matchSelect.value, map: matchMap.value, stage: matchStage.value, roomLabel: matchRoomLabel.value,
-    scheduledAt: matchWhen.value, status: matchStatus.value, roomId: matchRoomId.value,
-    roomPassword: matchPassword.value, releaseAt: matchRelease.value, notes: matchNotes.value
-  });
-  if (!result.ok) return toast(result.error, "error");
-  toast(result.message || "Match saved.", "ok");
-  await loadTournament();
-});
+
 assignBtn && assignBtn.addEventListener("click", async () => {
-  const result = await api("match-assign", { matchId: assignMatch.value, teamId: assignTeam.value, slot: assignSlot.value });
+  if (!state.tournament) return;
+  const matchId = assignMatch.value;
+  const room = roomCode(assignRoom.value);
+  const teamId = assignTeam.value;
+  const option = assignTeam.options[assignTeam.selectedIndex];
+  const teamName = option ? option.textContent.trim() : "This team";
+  if (!teamId) return toast("Pick an approved team first.", "error");
+
+  const match = matchById(matchId);
+  const seated = roomSeats(match, room).find((team) => team.teamId === teamId);
+  if (seated) {
+    return toast("This team is already assigned to " + roomShareName(room) + " — Slot " + seated.slot + ".", "error");
+  }
+  const elsewhere = ((match && match.teams) || []).find((team) => team.teamId === teamId);
+  if (elsewhere) {
+    return toast("This team is already assigned to " + roomShareName(elsewhere.room) + " — Slot " + elsewhere.slot + ".", "error");
+  }
+
+  assignBtn.disabled = true;
+  const result = await api("match-assign", { matchId: matchId, teamId: teamId, room: room, slot: assignSlot.value });
+  assignBtn.disabled = false;
+  if (result.ok && result.already) {
+    return toast(result.message || (teamName + " is already assigned to " + roomShareName(result.room) + " — Slot " + result.slot + "."), "error");
+  }
   if (!result.ok) return toast(result.error, "error");
   toast(result.message || "Team assigned.", "ok");
   assignSlot.value = "";
   await loadTournament();
 });
-chartCopy && chartCopy.addEventListener("click", () => {
-  if (!state.tournament) return;
-  const match = state.tournament.matches.find((m) => m.id === matchSelect.value);
-  copyChart(roomChartText(match, state.tournament.results), "Room chart copied. Paste it into WhatsApp.");
+
+[[roomAId, roomAPassword, roomARelease, "A"], [roomBId, roomBPassword, roomBRelease, "B"]].forEach((entry) => {
+  entry.slice(0, 3).forEach((input) => {
+    input && input.addEventListener("input", () => { roomFormTouched[entry[3]] = true; });
+  });
 });
-chartShare && chartShare.addEventListener("click", () => {
-  if (!state.tournament) return;
-  const match = state.tournament.matches.find((m) => m.id === matchSelect.value);
-  shareWhatsApp(roomChartText(match, state.tournament.results), "There is no room chart to share yet.");
+
+document.querySelectorAll(".room-cred").forEach((form) => {
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const code = form.dataset.room;
+    const match = currentMatch();
+    if (!match) return;
+    const ids = code === "B"
+      ? { id: roomBId, password: roomBPassword, release: roomBRelease }
+      : { id: roomAId, password: roomAPassword, release: roomARelease };
+    const result = await api("room-save", {
+      matchId: match.id, room: code,
+      roomId: ids.id.value, roomPassword: ids.password.value, releaseAt: ids.release.value
+    });
+    if (!result.ok) return toast(result.error, "error");
+    roomFormTouched[code] = false;
+    toast(result.message || (roomShareName(code) + " saved."), "ok");
+    await loadTournament();
+  });
 });
-chartShareQualified && chartShareQualified.addEventListener("click", () => {
-  if (!state.tournament) return;
-  const match = state.tournament.matches.find((m) => m.id === matchSelect.value);
-  const text = qualifiedTeamsText(match, publishedTournamentResults(), resultTieBreakers());
-  if (!text) return toast("Publish at least 6 results for this room before sharing qualifiers.", "error");
-  shareWhatsApp(text);
+
+matchSelect && matchSelect.addEventListener("change", () => { renderTournament(); });
+assignMatch && assignMatch.addEventListener("change", () => {
+  matchSelect.value = assignMatch.value;
+  renderTournament();
 });
-chartCopyAll && chartCopyAll.addEventListener("click", () => {
+assignRoom && assignRoom.addEventListener("change", () => { renderSlotList(currentAssignMatch(), roomCode(assignRoom.value)); });
+matchStage && matchStage.addEventListener("change", () => { matchFormTouched = true; });
+matchMap && matchMap.addEventListener("change", () => { matchFormTouched = true; });
+matchWhen && matchWhen.addEventListener("input", () => { matchFormTouched = true; });
+matchStatus && matchStatus.addEventListener("change", () => { matchFormTouched = true; });
+matchNotes && matchNotes.addEventListener("input", () => { matchFormTouched = true; });
+slotRefresh && slotRefresh.addEventListener("click", () => loadTournament());
+el("tournamentRefresh") && el("tournamentRefresh").addEventListener("click", () => { load(); loadTournament(); });
+
+matchForm && matchForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const result = await api("match-save", {
+    matchId: matchSelect.value, map: matchMap.value, stage: matchStage.value,
+    scheduledAt: matchWhen.value, status: matchStatus.value, notes: matchNotes.value
+  });
+  if (!result.ok) return toast(result.error, "error");
+  matchFormTouched = false;
+  toast(result.message || "Match saved.", "ok");
+  await loadTournament();
+});
+
+[["roomACopy", "A"], ["roomBCopy", "B"]].forEach(([id, code]) => {
+  const button = el(id);
+  button && button.addEventListener("click", () => {
+    const match = currentMatch();
+    if (!match) return;
+    copyChart(slotListText(match, code), roomShareName(code) + " slot list copied.");
+  });
+});
+[["roomAShare", "A"], ["roomBShare", "B"]].forEach(([id, code]) => {
+  const button = el(id);
+  button && button.addEventListener("click", () => {
+    const match = currentMatch();
+    if (!match) return;
+    shareWhatsApp(slotListText(match, code), "There is no slot list to share yet.");
+  });
+});
+slotListCopy && slotListCopy.addEventListener("click", () => {
+  const match = currentAssignMatch();
+  if (!match) return toast("There is no room selected yet.", "error");
+  copyChart(slotListText(match, roomCode(assignRoom.value)), "Slot list copied. Paste it into WhatsApp.");
+});
+slotListShare && slotListShare.addEventListener("click", () => {
+  const match = currentAssignMatch();
+  if (!match) return toast("There is no room selected yet.", "error");
+  shareWhatsApp(slotListText(match, roomCode(assignRoom.value)), "There is no slot list to share yet.");
+});
+slotListAll && slotListAll.addEventListener("click", () => {
   if (!state.tournament) return;
-  const text = state.tournament.matches.map((match) => roomChartText(match, state.tournament.results)).join("\n\n————————————\n\n");
-  copyChart(text, "All room charts copied.");
+  const text = visibleMatches().map((match) => (match.rooms || [])
+    .map((panel) => slotListText(match, panel.room)).join("\n\n")).join("\n\n————————————\n\n");
+  copyChart(text, "Every room's slot list copied.");
 });
 scheduleCopy && scheduleCopy.addEventListener("click", () => {
   if (!state.tournament) return;
-  copyChart(scheduleShareText(state.tournament.matches), "Match schedule copied.");
+  copyChart(scheduleShareText(visibleMatches()), "Match schedule copied.");
 });
 scheduleShare && scheduleShare.addEventListener("click", () => {
   if (!state.tournament) return;
-  shareWhatsApp(scheduleShareText(state.tournament.matches), "There is no schedule to share yet.");
+  shareWhatsApp(scheduleShareText(visibleMatches()), "There is no schedule to share yet.");
 });
-resultCopy && resultCopy.addEventListener("click", () => {
-  if (!state.tournament) return;
-  const match = state.tournament.matches.find((m) => m.id === resultMatch.value);
-  const text = resultChartText(match, publishedTournamentResults(), resultTieBreakers());
-  if (!text) return toast("Publish this room's results before copying them.", "error");
-  copyChart(text, "Published result chart copied.");
-});
-resultShare && resultShare.addEventListener("click", () => {
-  if (!state.tournament) return;
-  const match = state.tournament.matches.find((m) => m.id === resultMatch.value);
-  const text = resultAndLeaderboardText(match, publishedTournamentResults(),
-    state.tournament.publishedLeaderboard || [], resultTieBreakers());
-  if (!text) return toast("Publish this room's results before sharing them.", "error");
-  shareWhatsApp(text);
-});
-leaderboardShare && leaderboardShare.addEventListener("click", () => {
-  if (!state.tournament) return;
-  const text = leaderboardShareText(state.tournament.publishedLeaderboard || []);
-  if (!text) return toast("Publish results before sharing the leaderboard.", "error");
-  shareWhatsApp(text);
-});
-resultForm && resultForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const result = await api("result-save", {
-    matchId: resultMatch.value, teamId: resultTeam.value,
-    placement: resultPlacement.value, kills: resultKills.value, notes: resultNotes.value
-  });
-  if (!result.ok) return toast(result.error, "error");
-  toast(result.message || "Result saved.", "ok");
-  const keepMatch = resultMatch.value;
-  resultForm.reset();
-  resultMatch.value = keepMatch;
-  await loadTournament();
-});
-el("resultApprove") && el("resultApprove").addEventListener("click", async () => {
-  const result = await api("result-approve", { matchId: resultMatch.value });
-  if (!result.ok) return toast(result.error, "error");
-  toast(result.message || "Approved.", "ok");
-  await loadTournament();
-});
-el("resultPublish") && el("resultPublish").addEventListener("click", async () => {
-  if (!confirm("Publish these results to the public leaderboard?")) return;
-  const result = await api("result-publish", { matchId: resultMatch.value });
-  if (!result.ok) return toast(result.error, "error");
-  toast(result.message || "Published.", "ok");
-  await loadTournament();
-});
-el("resultUnpublish") && el("resultUnpublish").addEventListener("click", async () => {
-  const result = await api("result-unpublish", { matchId: resultMatch.value });
-  if (!result.ok) return toast(result.error, "error");
-  toast(result.message || "Unpublished.", "ok");
 
-  await loadTournament();
+/* --------------------------- result grid -------------------------- */
+
+roomResultRows && roomResultRows.addEventListener("input", () => {
+  resultGridDirty = true;
+  recalcResultGrid();
 });
+
+function collectResultRows() {
+  return Array.from(roomResultRows.querySelectorAll("tr[data-team-id]")).map((tr) => ({
+    teamId: tr.dataset.teamId,
+    placement: tr.querySelector("[data-field=placement]").value,
+    kills: tr.querySelector("[data-field=kills]").value
+  })).filter((row) => row.placement !== "" && row.placement !== null);
+}
+
+async function saveRoomResults(correct) {
+  const match = currentResultMatch();
+  if (!match) return;
+  const rows = collectResultRows();
+  if (!rows.length) return toast("Enter at least one placement first.", "error");
+  const payload = { matchId: match.id, room: roomCode(resultRoom.value), rows: rows };
+  if (correct) payload.correct = true;
+  const result = await api("room-result-save", payload);
+  if (!result.ok && result.code === "CORRECTION") {
+    if (!confirm(result.error + "\n\nSave the correction anyway? The previous values stay in the audit trail.")) return;
+    return saveRoomResults(true);
+  }
+  if (!result.ok) return toast(result.error, "error");
+  toast(result.message || "Results saved.", "ok");
+  resultGridDirty = false;
+  await loadTournament();
+}
+
+resultSaveRoom && resultSaveRoom.addEventListener("click", () => saveRoomResults(false));
+[["resultSubmit", "APPROVED"], ["resultVerify", "VERIFIED"], ["resultPublish", "PUBLISHED"], ["resultUnpublish", "APPROVED"]].forEach(([id, status]) => {
+  const button = el(id);
+  button && button.addEventListener("click", async () => {
+    const match = currentResultMatch();
+    if (!match) return;
+    if (status === "PUBLISHED" && !confirm("Publish " + match.id + " " + roomShareName(resultRoom.value) + " results to the website?")) return;
+    const result = await api("room-result-status", { matchId: match.id, room: roomCode(resultRoom.value), status: status });
+    if (!result.ok) return toast(result.error, "error");
+    toast(result.message || "Room status saved.", "ok");
+    await loadTournament();
+  });
+});
+
+resultStage && resultStage.addEventListener("change", () => { renderBoards(); });
+resultMatch && resultMatch.addEventListener("change", () => {
+  matchSelect.value = resultMatch.value;
+  renderResultGrid(true);
+  renderBoards();
+});
+resultRoom && resultRoom.addEventListener("change", () => {
+  renderResultGrid(true);
+  renderBoards();
+});
+
+evidenceUpload && evidenceUpload.addEventListener("click", () => {
+  const match = currentResultMatch();
+  const file = evidenceFile && evidenceFile.files && evidenceFile.files[0];
+  if (!match) return toast("Pick a match first.", "error");
+  if (!file) return toast("Choose a referee photo first.", "error");
+  if (!/^image\/(png|jpeg|webp)$/.test(file.type)) return toast("Evidence must be a PNG, JPEG or WebP image.", "error");
+  if (file.size > 1572864) return toast("Evidence must be 1.5 MB or smaller.", "error");
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const base64 = String(reader.result || "").split(",").pop() || "";
+    evidenceUpload.disabled = true;
+    const result = await api("result-evidence", {
+      matchId: match.id, room: roomCode(resultRoom.value), fileName: file.name,
+      mimeType: file.type, dataBase64: base64
+    });
+    evidenceUpload.disabled = false;
+    if (!result.ok) return toast(result.error, "error");
+    toast(result.message || "Evidence attached.", "ok");
+    if (evidenceFile) evidenceFile.value = "";
+    await loadTournament();
+  };
+  reader.readAsDataURL(file);
+});
+
+resultCopyRoom && resultCopyRoom.addEventListener("click", () => {
+  const match = currentResultMatch();
+  if (!match) return;
+  const text = roomResultText(match, roomCode(resultRoom.value));
+  if (!text) return toast("No verified results in this room yet.", "error");
+  copyChart(text, "Room result chart copied.");
+});
+resultShareRoom && resultShareRoom.addEventListener("click", () => {
+  const match = currentResultMatch();
+  if (!match) return;
+  const text = roomResultText(match, roomCode(resultRoom.value));
+  if (!text) return toast("No verified results in this room yet.", "error");
+  shareWhatsApp(text);
+});
+stageCopy && stageCopy.addEventListener("click", () => {
+  const text = stageBoardText(resultStage.value || "QUALIFIER");
+  if (!text) return toast("No verified results for this stage yet.", "error");
+  copyChart(text, "Stage leaderboard copied.");
+});
+stageShare && stageShare.addEventListener("click", () => {
+  const text = stageBoardText(resultStage.value || "QUALIFIER");
+  if (!text) return toast("No verified results for this stage yet.", "error");
+  shareWhatsApp(text);
+});
+
+function roomResultText(match, code) {
+  const panel = roomPanel(match, code);
+  const rows = (panel && panel.leaderboard) || [];
+  if (!rows.length) return "";
+  const lines = ["🏆 QQSGP FREE FIRE TOURNAMENT", "", "MATCH: " + match.id, "ROOM: " + roomShareName(code), ""];
+  rows.forEach((row) => {
+    const medal = row.rank === 1 ? "🥇" : row.rank === 2 ? "🥈" : row.rank === 3 ? "🥉" : "";
+    lines.push((medal ? medal + " " : "") + "#" + row.rank + " — " + row.teamName + " — " +
+      row.kills + " Kills — " + row.total + " Points");
+  });
+  lines.push("", "Top 6 of this room qualify for the next stage.");
+  return lines.join("\n");
+}
+
+function stageBoardText(stage) {
+  const board = ((state.tournament && state.tournament.stageBoards) || {})[stage] || { rows: [], final: false };
+  if (!board.rows || !board.rows.length) return "";
+  const lines = ["🏆 QQSGP FREE FIRE TOURNAMENT", "", stageShareName(stage) + " — OVERALL " + (board.final ? "FINAL" : "PROVISIONAL"), ""];
+  board.rows.forEach((row) => {
+    lines.push("#" + row.rank + " — " + row.teamName + " — " + row.kills + " Kills — " + row.total + " Points");
+  });
+  lines.push("", board.final ? "Final standings." : "Provisional standings — results are still being verified.");
+  return lines.join("\n");
+}
+
 scoringSave && scoringSave.addEventListener("click", async () => {
   const result = await api("settings-set", {
     fee: feeInput.value, maxTeams: maxTeamsInput.value,
@@ -3000,6 +3448,7 @@ scoringSave && scoringSave.addEventListener("click", async () => {
   loadSettings();
   await loadTournament();
 });
+
 downloadExport = async function (dataset) {
   const result = await api("export", { dataset: dataset || "registrations", status: state.status, department: state.department, q: state.query });
   if (!result.ok) return toast(result.error, "error");
